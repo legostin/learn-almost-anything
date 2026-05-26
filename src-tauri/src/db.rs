@@ -105,3 +105,59 @@ pub fn set_course_status(
     )?;
     Ok(())
 }
+
+#[derive(Debug, Serialize)]
+pub struct Module {
+    pub id: String,
+    pub course_id: String,
+    pub parent_id: Option<String>,
+    pub position: i64,
+    pub title: String,
+    pub summary: Option<String>,
+    pub generation_state: String,
+}
+
+pub fn insert_module(
+    conn: &Connection,
+    id: &str,
+    course_id: &str,
+    parent_id: Option<&str>,
+    position: i64,
+    title: &str,
+    summary: Option<&str>,
+    generation_state: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO modules (id, course_id, parent_id, position, title, summary, generation_state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![id, course_id, parent_id, position, title, summary, generation_state],
+    )?;
+    Ok(())
+}
+
+pub fn list_modules(conn: &Connection, course_id: &str) -> Result<Vec<Module>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, course_id, parent_id, position, title, summary, generation_state \
+         FROM modules WHERE course_id = ?1 ORDER BY parent_id IS NULL DESC, position",
+    )?;
+    let rows = stmt.query_map([course_id], |r| {
+        Ok(Module {
+            id: r.get(0)?,
+            course_id: r.get(1)?,
+            parent_id: r.get(2)?,
+            position: r.get(3)?,
+            title: r.get(4)?,
+            summary: r.get(5)?,
+            generation_state: r.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_modules_for_course(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM modules WHERE course_id = ?1", [course_id])?;
+    Ok(())
+}

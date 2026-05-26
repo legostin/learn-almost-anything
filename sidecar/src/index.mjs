@@ -20,6 +20,7 @@ const methods = {
   ping: async () => ({ pong: true, time: Date.now() }),
   claude_chat: async (params) => claude.chat(params),
   wizard_questions: async (params) => claude.wizardQuestions(params),
+  build_structure: async (params) => claude.buildStructure(params),
 };
 
 const rl = createInterface({ input: process.stdin });

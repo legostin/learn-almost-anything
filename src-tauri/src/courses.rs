@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::db;
 
@@ -81,4 +82,145 @@ pub fn save_wizard_answers(
 
     db::set_course_status(conn, &course.id, "structuring", now_secs()?)?;
     Ok(())
+}
+
+pub fn read_course_md(paths: &AppPaths, course_id: &str) -> Result<String, CourseError> {
+    let path = paths.course_dir(course_id).join("course.md");
+    Ok(fs::read_to_string(path)?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SidecarSubmodule {
+    pub title: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SidecarModule {
+    pub title: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub submodules: Vec<SidecarSubmodule>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SidecarTree {
+    pub modules: Vec<SidecarModule>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModuleNode {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub submodules: Vec<ModuleNode>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StructureFile {
+    pub course_id: String,
+    pub modules: Vec<ModuleNode>,
+}
+
+pub fn install_structure(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+    course_id: &str,
+    raw: SidecarTree,
+) -> Result<StructureFile, CourseError> {
+    // assign UUIDs in a single pass
+    let modules: Vec<ModuleNode> = raw
+        .modules
+        .into_iter()
+        .map(|m| ModuleNode {
+            id: Uuid::new_v4().to_string(),
+            title: m.title,
+            summary: m.summary.unwrap_or_default(),
+            submodules: m
+                .submodules
+                .into_iter()
+                .map(|s| ModuleNode {
+                    id: Uuid::new_v4().to_string(),
+                    title: s.title,
+                    summary: s.summary.unwrap_or_default(),
+                    submodules: vec![],
+                })
+                .collect(),
+        })
+        .collect();
+
+    let file = StructureFile {
+        course_id: course_id.to_string(),
+        modules,
+    };
+
+    // 1. write structure.json
+    let dir = paths.course_dir(course_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(&file).expect("serialize structure");
+    fs::write(dir.join("structure.json"), json)?;
+
+    // 2. replace modules in DB (deterministic from file)
+    db::delete_modules_for_course(conn, course_id)?;
+    for (mod_pos, m) in file.modules.iter().enumerate() {
+        db::insert_module(
+            conn,
+            &m.id,
+            course_id,
+            None,
+            mod_pos as i64,
+            &m.title,
+            if m.summary.is_empty() { None } else { Some(&m.summary) },
+            "pending",
+        )?;
+        for (sub_pos, s) in m.submodules.iter().enumerate() {
+            db::insert_module(
+                conn,
+                &s.id,
+                course_id,
+                Some(&m.id),
+                sub_pos as i64,
+                &s.title,
+                if s.summary.is_empty() { None } else { Some(&s.summary) },
+                "pending",
+            )?;
+        }
+    }
+
+    db::set_course_status(conn, course_id, "ready", now_secs()?)?;
+    Ok(file)
+}
+
+pub fn load_structure(
+    conn: &rusqlite::Connection,
+    course_id: &str,
+) -> Result<StructureFile, CourseError> {
+    let rows = db::list_modules(conn, course_id)?;
+    let mut top: Vec<ModuleNode> = Vec::new();
+    let mut sub_by_parent: std::collections::HashMap<String, Vec<ModuleNode>> =
+        std::collections::HashMap::new();
+
+    for m in rows {
+        let node = ModuleNode {
+            id: m.id.clone(),
+            title: m.title,
+            summary: m.summary.unwrap_or_default(),
+            submodules: vec![],
+        };
+        match m.parent_id {
+            None => top.push(node),
+            Some(parent) => sub_by_parent.entry(parent).or_default().push(node),
+        }
+    }
+    for m in top.iter_mut() {
+        if let Some(children) = sub_by_parent.remove(&m.id) {
+            m.submodules = children;
+        }
+    }
+    Ok(StructureFile {
+        course_id: course_id.to_string(),
+        modules: top,
+    })
 }

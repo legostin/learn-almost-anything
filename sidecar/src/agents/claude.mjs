@@ -47,6 +47,63 @@ export async function chat({ prompt }) {
 }
 
 /**
+ * Build a curriculum tree from the course.md (topic + wizard answers).
+ * @param {{ courseMd: string, topic: string, language: string }} params
+ * @returns {Promise<{ modules: Array<{ title: string, summary?: string, submodules: Array<{ title: string, summary?: string }> }> }>}
+ */
+export async function buildStructure({ courseMd, topic, language }) {
+  if (typeof topic !== "string" || !topic.trim()) {
+    throw new Error("topic must be a non-empty string");
+  }
+  if (typeof courseMd !== "string" || !courseMd.trim()) {
+    throw new Error("courseMd must be a non-empty string");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are designing a personalized course on "${topic}".
+The course will be delivered in language code "${lang}".
+
+Below is the course brief — a markdown file with the wizard Q&A.
+
+<course-md>
+${courseMd}
+</course-md>
+
+Design a curriculum: a list of top-level modules, each with a few submodules.
+Constraints:
+- Reflect the learner's specific goals, prior knowledge, and constraints from the brief.
+- Skip modules irrelevant to those goals; do not produce a generic textbook outline.
+- Look up how this subject is typically taught and adapt rather than invent from scratch.
+- Use 4-10 top-level modules; each with 2-6 submodules.
+- All titles and summaries in language "${lang}".
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence.
+Shape:
+{"modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
+  const text = await runOnce(prompt);
+  const parsed = extractJson(text);
+  if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
+    throw new Error("LLM response missing non-empty 'modules' array");
+  }
+  const modules = parsed.modules.map((m) => {
+    if (typeof m?.title !== "string" || !m.title.trim()) {
+      throw new Error("module missing title");
+    }
+    const submodules = Array.isArray(m.submodules) ? m.submodules : [];
+    return {
+      title: m.title.trim(),
+      summary: typeof m.summary === "string" ? m.summary.trim() : "",
+      submodules: submodules
+        .filter((s) => s && typeof s.title === "string" && s.title.trim())
+        .map((s) => ({
+          title: s.title.trim(),
+          summary: typeof s.summary === "string" ? s.summary.trim() : "",
+        })),
+    };
+  });
+  return { modules };
+}
+
+/**
  * Generate clarifying questions for a course topic, in the course's language.
  * @param {{ topic: string, language: string }} params
  * @returns {Promise<{ questions: string[] }>}

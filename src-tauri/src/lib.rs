@@ -56,6 +56,44 @@ fn save_wizard_answers(
     courses::save_wizard_answers(&conn, &paths, &course_id, &answers).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn build_structure(
+    db_state: tauri::State<'_, Db>,
+    paths: tauri::State<'_, AppPaths>,
+    sidecar_state: tauri::State<'_, Sidecar>,
+    course_id: String,
+) -> Result<courses::StructureFile, String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let course_md = courses::read_course_md(&paths, &course_id).map_err(|e| e.to_string())?;
+
+    let params = serde_json::json!({
+        "topic": course.topic,
+        "language": course.language,
+        "courseMd": course_md,
+    });
+    let result = sidecar_state
+        .call("build_structure", params, Duration::from_secs(300))
+        .map_err(|e| e.to_string())?;
+    let raw: courses::SidecarTree = serde_json::from_value(result).map_err(|e| e.to_string())?;
+
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    courses::install_structure(&conn, &paths, &course_id, raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_structure(
+    db_state: tauri::State<'_, Db>,
+    course_id: String,
+) -> Result<courses::StructureFile, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())
+}
+
 fn sidecar_script_path() -> PathBuf {
     // In dev: src-tauri/ is CARGO_MANIFEST_DIR; sidecar/ is its sibling.
     // TODO(prod): switch to app.path().resource_dir() once we bundle the sidecar.
@@ -93,7 +131,9 @@ pub fn run() {
             list_courses,
             create_course,
             sidecar_call,
-            save_wizard_answers
+            save_wizard_answers,
+            build_structure,
+            get_structure
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

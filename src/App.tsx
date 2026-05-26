@@ -114,6 +114,89 @@ function CreateCourse({
   );
 }
 
+function StructureBuilder({
+  course,
+  onBuilt,
+}: {
+  course: Course;
+  onBuilt: () => void | Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function build() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<StructureFile>("build_structure", { courseId: course.id });
+      await onBuilt();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="wizard">
+      <p>
+        Ответы визарда сохранены. Сейчас агент исследует тему и предложит структуру курса.
+        Это займёт 30 секунд — 2 минуты.
+      </p>
+      <button onClick={build} disabled={busy}>
+        {busy ? "Строю структуру…" : "Сгенерировать структуру"}
+      </button>
+      {error && <p style={{ color: "#c00" }}>Ошибка: {error}</p>}
+    </div>
+  );
+}
+
+function Structure({ course }: { course: Course }) {
+  const [tree, setTree] = useState<StructureFile | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<StructureFile>("get_structure", { courseId: course.id })
+      .then((s) => !cancelled && setTree(s))
+      .catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+
+  if (error) return <div className="placeholder">Ошибка загрузки: {error}</div>;
+  if (!tree) return <div className="placeholder">Загружаю структуру…</div>;
+  if (tree.modules.length === 0)
+    return <div className="placeholder">Структура пустая.</div>;
+  return (
+    <div className="structure">
+      <ol className="modules">
+        {tree.modules.map((m, i) => (
+          <li key={m.id} className="module">
+            <div className="module-title">
+              <span className="num">{i + 1}.</span> {m.title}
+            </div>
+            {m.summary && <div className="module-summary">{m.summary}</div>}
+            {m.submodules.length > 0 && (
+              <ol className="submodules">
+                {m.submodules.map((s, j) => (
+                  <li key={s.id} className="submodule">
+                    <div className="submodule-title">
+                      {i + 1}.{j + 1} {s.title}
+                    </div>
+                    {s.summary && <div className="submodule-summary">{s.summary}</div>}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function SmokeTest() {
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -165,6 +248,18 @@ function SmokeTest() {
   );
 }
 
+type ModuleNode = {
+  id: string;
+  title: string;
+  summary: string;
+  submodules: ModuleNode[];
+};
+
+type StructureFile = {
+  course_id: string;
+  modules: ModuleNode[];
+};
+
 function CourseView({ course, onChanged }: { course?: Course; onChanged: () => void | Promise<void> }) {
   if (!course) return <div className="placeholder">Курс не найден</div>;
   return (
@@ -175,11 +270,9 @@ function CourseView({ course, onChanged }: { course?: Course; onChanged: () => v
       </div>
       {course.status === "wizard" && <Wizard course={course} onSaved={onChanged} />}
       {course.status === "structuring" && (
-        <div className="placeholder">Ответы сохранены. Генерация структуры — следующий этап (M3).</div>
+        <StructureBuilder course={course} onBuilt={onChanged} />
       )}
-      {course.status === "ready" && (
-        <div className="placeholder">Структура готова. Здесь появится дерево модулей.</div>
-      )}
+      {course.status === "ready" && <Structure course={course} />}
     </div>
   );
 }
