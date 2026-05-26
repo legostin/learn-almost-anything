@@ -1,116 +1,168 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #1a1a1a;
+  background: #f6f6f6;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
-.container {
+body,
+html,
+#root {
   margin: 0;
-  padding-top: 10vh;
+  padding: 0;
+  height: 100%;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 260px;
+  border-right: 1px solid #e2e2e2;
+  background: #fafafa;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  padding: 12px;
+  gap: 12px;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.new-course {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.new-course:hover {
+  border-color: #888;
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
+.course-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
+.course-list li {
+  padding: 8px 10px;
+  border-radius: 6px;
   cursor: pointer;
 }
-
-button:hover {
-  border-color: #396cd8;
+.course-list li:hover {
+  background: #efefef;
 }
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.course-list li.active {
+  background: #e6efff;
 }
 
-input,
-button {
-  outline: none;
+.course-topic {
+  font-weight: 500;
+}
+.course-meta {
+  font-size: 12px;
+  color: #777;
+}
+.empty-hint {
+  color: #999;
+  font-style: italic;
+  cursor: default !important;
 }
 
-#greet-input {
-  margin-right: 5px;
+.main {
+  flex: 1;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.placeholder {
+  color: #888;
+  margin-top: 16px;
+}
+
+.create-course {
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.create-course label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.create-course input {
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.create-course .actions {
+  display: flex;
+  gap: 8px;
+}
+.create-course button {
+  padding: 8px 14px;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.create-course button[type="submit"] {
+  background: #2a6df4;
+  color: #fff;
+  border-color: #2a6df4;
+}
+.create-course button[type="submit"]:disabled {
+  background: #b0c4f5;
+  border-color: #b0c4f5;
+  cursor: not-allowed;
+}
+
+.course-view h2 {
+  margin: 0 0 8px;
+}
+.course-meta-full {
+  color: #777;
+  font-size: 13px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
-    background-color: #2f2f2f;
+    background: #1c1c1c;
   }
-
-  a:hover {
-    color: #24c8db;
+  .sidebar {
+    background: #232323;
+    border-right-color: #333;
   }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .new-course,
+  .create-course input,
+  .create-course button {
+    background: #2a2a2a;
+    color: #f6f6f6;
+    border-color: #444;
   }
-  button:active {
-    background-color: #0f0f0f69;
+  .course-list li:hover {
+    background: #2e2e2e;
+  }
+  .course-list li.active {
+    background: #2a3d66;
+  }
+  .placeholder,
+  .course-meta,
+  .empty-hint,
+  .course-meta-full {
+    color: #999;
   }
 }

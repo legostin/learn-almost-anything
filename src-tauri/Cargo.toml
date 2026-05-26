@@ -22,4 +22,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+refinery = { version = "0.8", features = ["rusqlite"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
 

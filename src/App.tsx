@@ -1,50 +1,128 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type Course = {
+  id: string;
+  topic: string;
+  language: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+};
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+type View = { kind: "empty" } | { kind: "creating" } | { kind: "course"; id: string };
+
+function App() {
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [view, setView] = useState<View>({ kind: "empty" });
+
+  async function refresh() {
+    const list = await invoke<Course[]>("list_courses");
+    setCourses(list);
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <button className="new-course" onClick={() => setView({ kind: "creating" })}>
+          + Новый курс
+        </button>
+        <ul className="course-list">
+          {courses.map((c) => (
+            <li
+              key={c.id}
+              className={view.kind === "course" && view.id === c.id ? "active" : ""}
+              onClick={() => setView({ kind: "course", id: c.id })}
+            >
+              <div className="course-topic">{c.topic}</div>
+              <div className="course-meta">
+                {c.language} · {c.status}
+              </div>
+            </li>
+          ))}
+          {courses.length === 0 && <li className="empty-hint">Курсов пока нет</li>}
+        </ul>
+      </aside>
+
+      <main className="main">
+        {view.kind === "empty" && (
+          <div className="placeholder">Выберите курс или создайте новый</div>
+        )}
+        {view.kind === "creating" && (
+          <CreateCourse
+            onCreated={async (id) => {
+              await refresh();
+              setView({ kind: "course", id });
+            }}
+            onCancel={() => setView({ kind: "empty" })}
+          />
+        )}
+        {view.kind === "course" && <CourseView course={courses.find((c) => c.id === view.id)} />}
+      </main>
+    </div>
+  );
+}
+
+function CreateCourse({
+  onCreated,
+  onCancel,
+}: {
+  onCreated: (id: string) => void;
+  onCancel: () => void;
+}) {
+  const [topic, setTopic] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!topic.trim() || busy) return;
+    setBusy(true);
+    const language = navigator.language.slice(0, 2) || "en";
+    const id = await invoke<string>("create_course", { topic: topic.trim(), language });
+    onCreated(id);
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
+    <form className="create-course" onSubmit={submit}>
+      <h2>Новый курс</h2>
+      <label>
+        Тема
         <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+          autoFocus
+          value={topic}
+          onChange={(e) => setTopic(e.target.value)}
+          placeholder="например: академическая живопись"
         />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+      </label>
+      <div className="actions">
+        <button type="submit" disabled={!topic.trim() || busy}>
+          Создать
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy}>
+          Отмена
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function CourseView({ course }: { course?: Course }) {
+  if (!course) return <div className="placeholder">Курс не найден</div>;
+  return (
+    <div className="course-view">
+      <h2>{course.topic}</h2>
+      <div className="course-meta-full">
+        Язык: {course.language} · Статус: {course.status}
+      </div>
+      <div className="placeholder">
+        Структура курса ещё не сгенерирована. Здесь появится визард — следующий этап.
+      </div>
+    </div>
   );
 }
 
