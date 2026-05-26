@@ -163,6 +163,52 @@ html,
 .course-view h2 {
   margin: 0 0 8px;
 }
+
+.wizard {
+  margin-top: 16px;
+  max-width: 720px;
+}
+.wizard p {
+  color: #444;
+}
+.wizard.error p {
+  color: #c00;
+}
+.wizard button {
+  padding: 8px 14px;
+  border: 1px solid #2a6df4;
+  background: #2a6df4;
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.wizard button:disabled {
+  background: #b0c4f5;
+  border-color: #b0c4f5;
+  cursor: not-allowed;
+}
+.qna {
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 16px 0;
+}
+.qna li .q {
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.qna li textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
 .course-meta-full {
   color: #777;
   font-size: 13px;
@@ -200,6 +246,14 @@ html,
   }
   .smoke-status {
     color: #aaa;
+  }
+  .wizard p {
+    color: #ccc;
+  }
+  .qna li textarea {
+    background: #2a2a2a;
+    color: #f6f6f6;
+    border-color: #444;
   }
   .placeholder,
   .course-meta,

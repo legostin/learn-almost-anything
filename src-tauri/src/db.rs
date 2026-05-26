@@ -70,3 +70,38 @@ pub fn insert_course(
     )?;
     Ok(())
 }
+
+pub fn get_course(conn: &Connection, id: &str) -> Result<Option<Course>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, topic, language, status, created_at, updated_at FROM courses WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(Course {
+                id: r.get(0)?,
+                topic: r.get(1)?,
+                language: r.get(2)?,
+                status: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+            })
+        },
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
+pub fn set_course_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, status, now],
+    )?;
+    Ok(())
+}

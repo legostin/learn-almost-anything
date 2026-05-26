@@ -19,6 +19,7 @@ const log = (...args) => process.stderr.write("[sidecar] " + args.join(" ") + "\
 const methods = {
   ping: async () => ({ pong: true, time: Date.now() }),
   claude_chat: async (params) => claude.chat(params),
+  wizard_questions: async (params) => claude.wizardQuestions(params),
 };
 
 const rl = createInterface({ input: process.stdin });

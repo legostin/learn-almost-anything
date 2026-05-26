@@ -63,7 +63,9 @@ function App() {
             onCancel={() => setView({ kind: "empty" })}
           />
         )}
-        {view.kind === "course" && <CourseView course={courses.find((c) => c.id === view.id)} />}
+        {view.kind === "course" && (
+          <CourseView course={courses.find((c) => c.id === view.id)} onChanged={refresh} />
+        )}
       </main>
     </div>
   );
@@ -163,7 +165,7 @@ function SmokeTest() {
   );
 }
 
-function CourseView({ course }: { course?: Course }) {
+function CourseView({ course, onChanged }: { course?: Course; onChanged: () => void | Promise<void> }) {
   if (!course) return <div className="placeholder">Курс не найден</div>;
   return (
     <div className="course-view">
@@ -171,9 +173,108 @@ function CourseView({ course }: { course?: Course }) {
       <div className="course-meta-full">
         Язык: {course.language} · Статус: {course.status}
       </div>
-      <div className="placeholder">
-        Структура курса ещё не сгенерирована. Здесь появится визард — следующий этап.
+      {course.status === "wizard" && <Wizard course={course} onSaved={onChanged} />}
+      {course.status === "structuring" && (
+        <div className="placeholder">Ответы сохранены. Генерация структуры — следующий этап (M3).</div>
+      )}
+      {course.status === "ready" && (
+        <div className="placeholder">Структура готова. Здесь появится дерево модулей.</div>
+      )}
+    </div>
+  );
+}
+
+type WizardState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "answering"; questions: string[]; answers: string[] }
+  | { kind: "saving" }
+  | { kind: "error"; message: string };
+
+function Wizard({ course, onSaved }: { course: Course; onSaved: () => void | Promise<void> }) {
+  const [state, setState] = useState<WizardState>({ kind: "idle" });
+
+  async function startWizard() {
+    setState({ kind: "loading" });
+    try {
+      const r = await invoke<{ questions: string[] }>("sidecar_call", {
+        method: "wizard_questions",
+        params: { topic: course.topic, language: course.language },
+      });
+      setState({
+        kind: "answering",
+        questions: r.questions,
+        answers: r.questions.map(() => ""),
+      });
+    } catch (e) {
+      setState({ kind: "error", message: String(e) });
+    }
+  }
+
+  async function save() {
+    if (state.kind !== "answering") return;
+    const answers = state.questions.map((question, i) => ({
+      question,
+      answer: state.answers[i] ?? "",
+    }));
+    setState({ kind: "saving" });
+    try {
+      await invoke("save_wizard_answers", { courseId: course.id, answers });
+      await onSaved();
+    } catch (e) {
+      setState({ kind: "error", message: String(e) });
+    }
+  }
+
+  if (state.kind === "idle") {
+    return (
+      <div className="wizard">
+        <p>
+          Прежде чем строить программу, агент задаст несколько уточняющих вопросов.
+          Это займёт ~10-30 секунд.
+        </p>
+        <button onClick={startWizard}>Начать визард</button>
       </div>
+    );
+  }
+  if (state.kind === "loading") {
+    return <div className="wizard"><p>Подумаю над вопросами…</p></div>;
+  }
+  if (state.kind === "saving") {
+    return <div className="wizard"><p>Сохраняю ответы…</p></div>;
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="wizard error">
+        <p>Ошибка: {state.message}</p>
+        <button onClick={() => setState({ kind: "idle" })}>Попробовать снова</button>
+      </div>
+    );
+  }
+  const canSave = state.answers.some((a) => a.trim().length > 0);
+  return (
+    <div className="wizard">
+      <p>Ответь на вопросы — пропускай те, что не подходят.</p>
+      <ol className="qna">
+        {state.questions.map((q, i) => (
+          <li key={i}>
+            <div className="q">{q}</div>
+            <textarea
+              value={state.answers[i]}
+              onChange={(e) => {
+                const next = state.answers.slice();
+                next[i] = e.target.value;
+                setState({ ...state, answers: next });
+              }}
+              rows={3}
+              placeholder="Твой ответ…"
+            />
+          </li>
+        ))}
+      </ol>
+      <button onClick={save} disabled={!canSave}>
+        Сохранить ответы
+      </button>
     </div>
   );
 }

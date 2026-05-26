@@ -4,9 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use uuid::Uuid;
 
+mod courses;
 mod db;
 mod sidecar;
 
+use courses::{AppPaths, QnA};
 use db::{Course, Db};
 use sidecar::Sidecar;
 
@@ -43,6 +45,17 @@ fn sidecar_call(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn save_wizard_answers(
+    db_state: tauri::State<'_, Db>,
+    paths: tauri::State<'_, AppPaths>,
+    course_id: String,
+    answers: Vec<QnA>,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    courses::save_wizard_answers(&conn, &paths, &course_id, &answers).map_err(|e| e.to_string())
+}
+
 fn sidecar_script_path() -> PathBuf {
     // In dev: src-tauri/ is CARGO_MANIFEST_DIR; sidecar/ is its sibling.
     // TODO(prod): switch to app.path().resource_dir() once we bundle the sidecar.
@@ -66,6 +79,10 @@ pub fn run() {
             })?;
             app.manage(db);
 
+            app.manage(AppPaths {
+                courses_root: dir.join("courses"),
+            });
+
             let sidecar = Sidecar::spawn(&sidecar_script_path()).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
             })?;
@@ -75,7 +92,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_courses,
             create_course,
-            sidecar_call
+            sidecar_call,
+            save_wizard_answers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
