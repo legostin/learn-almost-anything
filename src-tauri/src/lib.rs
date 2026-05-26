@@ -1,7 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tauri::Manager;
+use serde_json::json;
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 mod courses;
@@ -12,15 +15,17 @@ use courses::{AppPaths, QnA};
 use db::{Course, Db};
 use sidecar::Sidecar;
 
+const JOB_EVENT: &str = "agent_job";
+
 #[tauri::command]
-fn list_courses(state: tauri::State<'_, Db>) -> Result<Vec<Course>, String> {
+fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::list_courses(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_course(
-    state: tauri::State<'_, Db>,
+    state: tauri::State<'_, Arc<Db>>,
     topic: String,
     language: String,
 ) -> Result<String, String> {
@@ -36,7 +41,7 @@ fn create_course(
 
 #[tauri::command]
 fn sidecar_call(
-    state: tauri::State<'_, Sidecar>,
+    state: tauri::State<'_, Arc<Sidecar>>,
     method: String,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -47,8 +52,8 @@ fn sidecar_call(
 
 #[tauri::command]
 fn save_wizard_answers(
-    db_state: tauri::State<'_, Db>,
-    paths: tauri::State<'_, AppPaths>,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
     course_id: String,
     answers: Vec<QnA>,
 ) -> Result<(), String> {
@@ -56,38 +61,110 @@ fn save_wizard_answers(
     courses::save_wizard_answers(&conn, &paths, &course_id, &answers).map_err(|e| e.to_string())
 }
 
+fn emit_job_event(app: &AppHandle, course_id: &str, kind: &str, payload: serde_json::Value) {
+    let mut event = json!({
+        "courseId": course_id,
+        "kind": kind,
+    });
+    if let serde_json::Value::Object(map) = payload {
+        for (k, v) in map {
+            event[k] = v;
+        }
+    }
+    let _ = app.emit(JOB_EVENT, event);
+}
+
 #[tauri::command]
-fn build_structure(
-    db_state: tauri::State<'_, Db>,
-    paths: tauri::State<'_, AppPaths>,
-    sidecar_state: tauri::State<'_, Sidecar>,
+fn start_wizard_questions(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
     course_id: String,
-) -> Result<courses::StructureFile, String> {
+) -> Result<(), String> {
     let course = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
         db::get_course(&conn, &course_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("course not found: {course_id}"))?
     };
-    let course_md = courses::read_course_md(&paths, &course_id).map_err(|e| e.to_string())?;
+    let sidecar = sidecar_state.inner().clone();
+    let app2 = app.clone();
+    let cid = course_id.clone();
 
-    let params = serde_json::json!({
-        "topic": course.topic,
-        "language": course.language,
-        "courseMd": course_md,
+    thread::spawn(move || {
+        let params = json!({
+            "topic": course.topic,
+            "language": course.language,
+        });
+        let payload = match sidecar.call("wizard_questions", params, Duration::from_secs(180)) {
+            Ok(v) => json!({ "ok": true, "result": v }),
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+        emit_job_event(&app2, &cid, "wizard_questions", payload);
     });
-    let result = sidecar_state
-        .call("build_structure", params, Duration::from_secs(300))
-        .map_err(|e| e.to_string())?;
-    let raw: courses::SidecarTree = serde_json::from_value(result).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    courses::install_structure(&conn, &paths, &course_id, raw).map_err(|e| e.to_string())
+#[tauri::command]
+fn start_build_structure(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    course_id: String,
+) -> Result<(), String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let course_md = courses::read_course_md(&paths_state, &course_id).map_err(|e| e.to_string())?;
+
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let app2 = app.clone();
+    let cid = course_id.clone();
+
+    thread::spawn(move || {
+        let params = json!({
+            "topic": course.topic,
+            "language": course.language,
+            "courseMd": course_md,
+        });
+        let payload = match sidecar.call("build_structure", params, Duration::from_secs(300)) {
+            Ok(v) => match serde_json::from_value::<courses::SidecarTree>(v) {
+                Ok(raw) => {
+                    let conn = match db.0.lock() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            emit_job_event(
+                                &app2,
+                                &cid,
+                                "build_structure",
+                                json!({ "ok": false, "error": e.to_string() }),
+                            );
+                            return;
+                        }
+                    };
+                    match courses::install_structure(&conn, &paths, &cid, raw) {
+                        Ok(_) => json!({ "ok": true }),
+                        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                    }
+                }
+                Err(e) => json!({ "ok": false, "error": format!("sidecar payload: {e}") }),
+            },
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+        emit_job_event(&app2, &cid, "build_structure", payload);
+    });
+    Ok(())
 }
 
 #[tauri::command]
 fn get_structure(
-    db_state: tauri::State<'_, Db>,
+    db_state: tauri::State<'_, Arc<Db>>,
     course_id: String,
 ) -> Result<courses::StructureFile, String> {
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
@@ -115,16 +192,16 @@ pub fn run() {
             let db = db::open(&db_path).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("db init failed: {e}"))
             })?;
-            app.manage(db);
+            app.manage(Arc::new(db));
 
-            app.manage(AppPaths {
+            app.manage(Arc::new(AppPaths {
                 courses_root: dir.join("courses"),
-            });
+            }));
 
             let sidecar = Sidecar::spawn(&sidecar_script_path()).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
             })?;
-            app.manage(sidecar);
+            app.manage(Arc::new(sidecar));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -132,7 +209,8 @@ pub fn run() {
             create_course,
             sidecar_call,
             save_wizard_answers,
-            build_structure,
+            start_wizard_questions,
+            start_build_structure,
             get_structure
         ])
         .run(tauri::generate_context!())

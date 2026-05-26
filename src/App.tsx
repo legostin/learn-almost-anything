@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 type Course = {
@@ -11,20 +12,90 @@ type Course = {
   updated_at: number;
 };
 
+type Question = { text: string; options: string[] };
+
+type ModuleNode = {
+  id: string;
+  title: string;
+  summary: string;
+  submodules: ModuleNode[];
+};
+
+type StructureFile = {
+  course_id: string;
+  modules: ModuleNode[];
+};
+
+type JobKind = "wizard_questions" | "build_structure";
+
+type JobState =
+  | { kind: JobKind; status: "running" }
+  | { kind: JobKind; status: "done"; result?: unknown }
+  | { kind: JobKind; status: "error"; error: string };
+
+type JobEvent = {
+  courseId: string;
+  kind: JobKind;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+};
+
 type View = { kind: "empty" } | { kind: "creating" } | { kind: "course"; id: string };
+
+const jobKey = (courseId: string, kind: JobKind) => `${courseId}:${kind}`;
 
 function App() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
+  const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     const list = await invoke<Course[]>("list_courses");
     setCourses(list);
-  }
+  }, []);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
+
+  useEffect(() => {
+    const unlistenP = listen<JobEvent>("agent_job", (e) => {
+      const { courseId, kind, ok, result, error } = e.payload;
+      setJobs((prev) => {
+        const next = new Map(prev);
+        next.set(
+          jobKey(courseId, kind),
+          ok
+            ? { kind, status: "done", result }
+            : { kind, status: "error", error: error ?? "unknown" }
+        );
+        return next;
+      });
+      // course.status may have flipped (e.g. build_structure → 'ready')
+      refresh();
+    });
+    return () => {
+      unlistenP.then((fn) => fn());
+    };
+  }, [refresh]);
+
+  async function startJob(courseId: string, kind: JobKind) {
+    setJobs((prev) => {
+      const next = new Map(prev);
+      next.set(jobKey(courseId, kind), { kind, status: "running" });
+      return next;
+    });
+    try {
+      await invoke(`start_${kind}`, { courseId });
+    } catch (e) {
+      setJobs((prev) => {
+        const next = new Map(prev);
+        next.set(jobKey(courseId, kind), { kind, status: "error", error: String(e) });
+        return next;
+      });
+    }
+  }
 
   return (
     <div className="app">
@@ -33,18 +104,25 @@ function App() {
           + Новый курс
         </button>
         <ul className="course-list">
-          {courses.map((c) => (
-            <li
-              key={c.id}
-              className={view.kind === "course" && view.id === c.id ? "active" : ""}
-              onClick={() => setView({ kind: "course", id: c.id })}
-            >
-              <div className="course-topic">{c.topic}</div>
-              <div className="course-meta">
-                {c.language} · {c.status}
-              </div>
-            </li>
-          ))}
+          {courses.map((c) => {
+            const hasRunning = ["wizard_questions", "build_structure"].some(
+              (k) => jobs.get(jobKey(c.id, k as JobKind))?.status === "running"
+            );
+            return (
+              <li
+                key={c.id}
+                className={view.kind === "course" && view.id === c.id ? "active" : ""}
+                onClick={() => setView({ kind: "course", id: c.id })}
+              >
+                <div className="course-topic">
+                  {c.topic} {hasRunning && <span className="spinner" title="Идёт генерация…">⏳</span>}
+                </div>
+                <div className="course-meta">
+                  {c.language} · {c.status}
+                </div>
+              </li>
+            );
+          })}
           {courses.length === 0 && <li className="empty-hint">Курсов пока нет</li>}
         </ul>
         <SmokeTest />
@@ -64,7 +142,12 @@ function App() {
           />
         )}
         {view.kind === "course" && (
-          <CourseView course={courses.find((c) => c.id === view.id)} onChanged={refresh} />
+          <CourseView
+            course={courses.find((c) => c.id === view.id)}
+            jobs={jobs}
+            onStartJob={(kind) => startJob(view.id, kind)}
+            onChanged={refresh}
+          />
         )}
       </main>
     </div>
@@ -114,39 +197,200 @@ function CreateCourse({
   );
 }
 
-function StructureBuilder({
+function CourseView({
   course,
-  onBuilt,
+  jobs,
+  onStartJob,
+  onChanged,
+}: {
+  course?: Course;
+  jobs: Map<string, JobState>;
+  onStartJob: (kind: JobKind) => void;
+  onChanged: () => void | Promise<void>;
+}) {
+  if (!course) return <div className="placeholder">Курс не найден</div>;
+  return (
+    <div className="course-view">
+      <h2>{course.topic}</h2>
+      <div className="course-meta-full">
+        Язык: {course.language} · Статус: {course.status}
+      </div>
+      {course.status === "wizard" && (
+        <Wizard
+          course={course}
+          job={jobs.get(jobKey(course.id, "wizard_questions"))}
+          onStart={() => onStartJob("wizard_questions")}
+          onSaved={onChanged}
+        />
+      )}
+      {course.status === "structuring" && (
+        <StructureBuilder
+          job={jobs.get(jobKey(course.id, "build_structure"))}
+          onStart={() => onStartJob("build_structure")}
+        />
+      )}
+      {course.status === "ready" && <Structure course={course} />}
+    </div>
+  );
+}
+
+function Wizard({
+  course,
+  job,
+  onStart,
+  onSaved,
 }: {
   course: Course;
-  onBuilt: () => void | Promise<void>;
+  job?: JobState;
+  onStart: () => void;
+  onSaved: () => void | Promise<void>;
 }) {
-  const [busy, setBusy] = useState(false);
+  if (!job || (job.status === "done" && !job.result)) {
+    return (
+      <div className="wizard">
+        <p>
+          Прежде чем строить программу, агент задаст несколько уточняющих вопросов с вариантами
+          ответов. Это займёт ~10-30 секунд — можно открыть другой курс или вернуться позже,
+          UI не блокируется.
+        </p>
+        <button onClick={onStart}>Начать визард</button>
+      </div>
+    );
+  }
+  if (job.status === "running") {
+    return (
+      <div className="wizard">
+        <p>Подумаю над вопросами…</p>
+      </div>
+    );
+  }
+  if (job.status === "error") {
+    return (
+      <div className="wizard error">
+        <p>Ошибка: {job.error}</p>
+        <button onClick={onStart}>Попробовать снова</button>
+      </div>
+    );
+  }
+  // status === "done"
+  const result = job.result as { questions?: Question[] } | undefined;
+  const questions = result?.questions ?? [];
+  if (questions.length === 0) {
+    return (
+      <div className="wizard">
+        <p>Агент не вернул вопросов.</p>
+        <button onClick={onStart}>Попробовать снова</button>
+      </div>
+    );
+  }
+  return <AnsweringForm course={course} questions={questions} onSaved={onSaved} />;
+}
+
+type Answer = { selectedIndex: number | null; custom: string };
+
+function AnsweringForm({
+  course,
+  questions,
+  onSaved,
+}: {
+  course: Course;
+  questions: Question[];
+  onSaved: () => void | Promise<void>;
+}) {
+  const [answers, setAnswers] = useState<Answer[]>(
+    questions.map(() => ({ selectedIndex: null, custom: "" }))
+  );
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function build() {
-    setBusy(true);
+  function setAnswer(i: number, patch: Partial<Answer>) {
+    setAnswers((prev) => prev.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+  }
+
+  function resolveAnswer(i: number): string {
+    const a = answers[i];
+    const custom = a.custom.trim();
+    if (custom) return custom;
+    if (a.selectedIndex !== null) return questions[i].options[a.selectedIndex] ?? "";
+    return "";
+  }
+
+  const canSave = answers.some((_, i) => resolveAnswer(i).length > 0);
+
+  async function save() {
+    const pairs = questions.map((q, i) => ({
+      question: q.text,
+      answer: resolveAnswer(i),
+    }));
+    setSaving(true);
     setError(null);
     try {
-      await invoke<StructureFile>("build_structure", { courseId: course.id });
-      await onBuilt();
+      await invoke("save_wizard_answers", { courseId: course.id, answers: pairs });
+      await onSaved();
     } catch (e) {
       setError(String(e));
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   }
 
   return (
     <div className="wizard">
-      <p>
-        Ответы визарда сохранены. Сейчас агент исследует тему и предложит структуру курса.
-        Это займёт 30 секунд — 2 минуты.
-      </p>
-      <button onClick={build} disabled={busy}>
-        {busy ? "Строю структуру…" : "Сгенерировать структуру"}
+      <p>Выбери вариант или впиши свой ответ. Пустые вопросы пропускаем.</p>
+      <ol className="qna">
+        {questions.map((q, i) => (
+          <li key={i}>
+            <div className="q">{q.text}</div>
+            <div className="options">
+              {q.options.map((opt, j) => (
+                <label key={j} className="option">
+                  <input
+                    type="radio"
+                    name={`q-${i}`}
+                    checked={answers[i].selectedIndex === j && !answers[i].custom.trim()}
+                    onChange={() => setAnswer(i, { selectedIndex: j, custom: "" })}
+                  />
+                  <span>{opt}</span>
+                </label>
+              ))}
+            </div>
+            <input
+              className="custom-answer"
+              type="text"
+              value={answers[i].custom}
+              placeholder="Свой ответ (если ни один не подходит)…"
+              onChange={(e) => setAnswer(i, { custom: e.target.value })}
+            />
+          </li>
+        ))}
+      </ol>
+      <button onClick={save} disabled={!canSave || saving}>
+        {saving ? "Сохраняю…" : "Сохранить ответы"}
       </button>
       {error && <p style={{ color: "#c00" }}>Ошибка: {error}</p>}
+    </div>
+  );
+}
+
+function StructureBuilder({
+  job,
+  onStart,
+}: {
+  job?: JobState;
+  onStart: () => void;
+}) {
+  const running = job?.status === "running";
+  const errored = job?.status === "error";
+  return (
+    <div className="wizard">
+      <p>
+        Ответы визарда сохранены. Агент исследует тему и предложит структуру курса.
+        Это займёт 30 секунд — 2 минуты. UI не блокируется — можно переключить курс.
+      </p>
+      <button onClick={onStart} disabled={running}>
+        {running ? "Строю структуру…" : "Сгенерировать структуру"}
+      </button>
+      {errored && <p style={{ color: "#c00" }}>Ошибка: {(job as any).error}</p>}
     </div>
   );
 }
@@ -157,6 +401,8 @@ function Structure({ course }: { course: Course }) {
 
   useEffect(() => {
     let cancelled = false;
+    setTree(null);
+    setError(null);
     invoke<StructureFile>("get_structure", { courseId: course.id })
       .then((s) => !cancelled && setTree(s))
       .catch((e) => !cancelled && setError(String(e)));
@@ -244,130 +490,6 @@ function SmokeTest() {
         </button>
       </div>
       {status && <div className="smoke-status">{status}</div>}
-    </div>
-  );
-}
-
-type ModuleNode = {
-  id: string;
-  title: string;
-  summary: string;
-  submodules: ModuleNode[];
-};
-
-type StructureFile = {
-  course_id: string;
-  modules: ModuleNode[];
-};
-
-function CourseView({ course, onChanged }: { course?: Course; onChanged: () => void | Promise<void> }) {
-  if (!course) return <div className="placeholder">Курс не найден</div>;
-  return (
-    <div className="course-view">
-      <h2>{course.topic}</h2>
-      <div className="course-meta-full">
-        Язык: {course.language} · Статус: {course.status}
-      </div>
-      {course.status === "wizard" && <Wizard course={course} onSaved={onChanged} />}
-      {course.status === "structuring" && (
-        <StructureBuilder course={course} onBuilt={onChanged} />
-      )}
-      {course.status === "ready" && <Structure course={course} />}
-    </div>
-  );
-}
-
-type WizardState =
-  | { kind: "idle" }
-  | { kind: "loading" }
-  | { kind: "answering"; questions: string[]; answers: string[] }
-  | { kind: "saving" }
-  | { kind: "error"; message: string };
-
-function Wizard({ course, onSaved }: { course: Course; onSaved: () => void | Promise<void> }) {
-  const [state, setState] = useState<WizardState>({ kind: "idle" });
-
-  async function startWizard() {
-    setState({ kind: "loading" });
-    try {
-      const r = await invoke<{ questions: string[] }>("sidecar_call", {
-        method: "wizard_questions",
-        params: { topic: course.topic, language: course.language },
-      });
-      setState({
-        kind: "answering",
-        questions: r.questions,
-        answers: r.questions.map(() => ""),
-      });
-    } catch (e) {
-      setState({ kind: "error", message: String(e) });
-    }
-  }
-
-  async function save() {
-    if (state.kind !== "answering") return;
-    const answers = state.questions.map((question, i) => ({
-      question,
-      answer: state.answers[i] ?? "",
-    }));
-    setState({ kind: "saving" });
-    try {
-      await invoke("save_wizard_answers", { courseId: course.id, answers });
-      await onSaved();
-    } catch (e) {
-      setState({ kind: "error", message: String(e) });
-    }
-  }
-
-  if (state.kind === "idle") {
-    return (
-      <div className="wizard">
-        <p>
-          Прежде чем строить программу, агент задаст несколько уточняющих вопросов.
-          Это займёт ~10-30 секунд.
-        </p>
-        <button onClick={startWizard}>Начать визард</button>
-      </div>
-    );
-  }
-  if (state.kind === "loading") {
-    return <div className="wizard"><p>Подумаю над вопросами…</p></div>;
-  }
-  if (state.kind === "saving") {
-    return <div className="wizard"><p>Сохраняю ответы…</p></div>;
-  }
-  if (state.kind === "error") {
-    return (
-      <div className="wizard error">
-        <p>Ошибка: {state.message}</p>
-        <button onClick={() => setState({ kind: "idle" })}>Попробовать снова</button>
-      </div>
-    );
-  }
-  const canSave = state.answers.some((a) => a.trim().length > 0);
-  return (
-    <div className="wizard">
-      <p>Ответь на вопросы — пропускай те, что не подходят.</p>
-      <ol className="qna">
-        {state.questions.map((q, i) => (
-          <li key={i}>
-            <div className="q">{q}</div>
-            <textarea
-              value={state.answers[i]}
-              onChange={(e) => {
-                const next = state.answers.slice();
-                next[i] = e.target.value;
-                setState({ ...state, answers: next });
-              }}
-              rows={3}
-              placeholder="Твой ответ…"
-            />
-          </li>
-        ))}
-      </ol>
-      <button onClick={save} disabled={!canSave}>
-        Сохранить ответы
-      </button>
     </div>
   );
 }

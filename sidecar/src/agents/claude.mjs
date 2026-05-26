@@ -105,8 +105,9 @@ Shape:
 
 /**
  * Generate clarifying questions for a course topic, in the course's language.
+ * Each question has a small set of realistic answer options.
  * @param {{ topic: string, language: string }} params
- * @returns {Promise<{ questions: string[] }>}
+ * @returns {Promise<{ questions: Array<{ text: string, options: string[] }> }>}
  */
 export async function wizardQuestions({ topic, language }) {
   if (typeof topic !== "string" || !topic.trim()) {
@@ -120,21 +121,40 @@ Generate 5-10 clarifying questions to ask the learner BEFORE you build the
 curriculum. The questions should uncover the things that most change how a
 good program for this specific person would look: prior knowledge, concrete
 goals, available time, constraints, tools/materials, preferred depth, and
-anything topic-specific that matters. Ask only questions that meaningfully
-shape the program — skip pleasantries.
+anything topic-specific that matters. Skip pleasantries.
 
-Write the questions in language "${lang}".
+For EACH question, also provide 3-5 realistic, mutually-distinct answer
+options the learner can pick from. The options should:
+- cover the common cases for this topic (not generic "low/medium/high");
+- be concrete and topic-specific (e.g. for painting: "масло", "акварель",
+  "карандаш и уголь" — not "art supplies");
+- be short (a phrase, not a paragraph);
+- be in language "${lang}".
 
-Output ONLY a JSON object on a single line, with no prose, no markdown fence,
-no explanation. Shape: {"questions": ["...", "..."]}`;
+The user will also have a free-text fallback, so do NOT add an "other" option.
+
+Write everything in language "${lang}".
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence.
+Shape: {"questions":[{"text":"...","options":["...","..."]}]}`;
   const text = await runOnce(prompt);
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.questions)) {
     throw new Error("LLM response missing 'questions' array");
   }
   const questions = parsed.questions
-    .filter((q) => typeof q === "string" && q.trim().length > 0)
-    .map((q) => q.trim());
-  if (questions.length === 0) throw new Error("LLM returned zero questions");
+    .map((q) => {
+      if (!q || typeof q.text !== "string") return null;
+      const text = q.text.trim();
+      if (!text) return null;
+      const options = Array.isArray(q.options)
+        ? q.options
+            .filter((o) => typeof o === "string" && o.trim().length > 0)
+            .map((o) => o.trim())
+        : [];
+      return { text, options };
+    })
+    .filter(Boolean);
+  if (questions.length === 0) throw new Error("LLM returned zero valid questions");
   return { questions };
 }
