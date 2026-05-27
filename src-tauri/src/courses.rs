@@ -110,11 +110,17 @@ pub struct SidecarTree {
     pub modules: Vec<SidecarModule>,
 }
 
+fn default_pending() -> String {
+    "pending".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModuleNode {
     pub id: String,
     pub title: String,
     pub summary: String,
+    #[serde(default = "default_pending")]
+    pub generation_state: String,
     pub submodules: Vec<ModuleNode>,
 }
 
@@ -138,6 +144,7 @@ pub fn install_structure(
             id: Uuid::new_v4().to_string(),
             title: m.title,
             summary: m.summary.unwrap_or_default(),
+            generation_state: default_pending(),
             submodules: m
                 .submodules
                 .into_iter()
@@ -145,6 +152,7 @@ pub fn install_structure(
                     id: Uuid::new_v4().to_string(),
                     title: s.title,
                     summary: s.summary.unwrap_or_default(),
+                    generation_state: default_pending(),
                     submodules: vec![],
                 })
                 .collect(),
@@ -295,6 +303,7 @@ pub fn save_structure(
                 id: sub_id,
                 title: sub_title,
                 summary: sub_summary,
+                generation_state: default_pending(),
                 submodules: vec![],
             });
         }
@@ -302,6 +311,7 @@ pub fn save_structure(
             id: mod_id,
             title,
             summary,
+            generation_state: default_pending(),
             submodules: out_subs,
         });
     }
@@ -437,6 +447,39 @@ pub fn write_refinement_memory(
     Ok(())
 }
 
+pub fn write_submodule_article(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    article: &str,
+) -> Result<PathBuf, CourseError> {
+    let dir = paths
+        .course_dir(course_id)
+        .join("modules")
+        .join(mod_id)
+        .join(sub_id);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("article.md");
+    fs::write(&path, article)?;
+    Ok(path)
+}
+
+/// Find a submodule's id and the id of its parent module within a tree.
+pub fn find_submodule_path<'a>(
+    file: &'a StructureFile,
+    sub_id: &str,
+) -> Option<(&'a ModuleNode, &'a ModuleNode)> {
+    for m in &file.modules {
+        for s in &m.submodules {
+            if s.id == sub_id {
+                return Some((m, s));
+            }
+        }
+    }
+    None
+}
+
 /// Convert ModuleNode tree → ModuleUpdate list (fresh, no ids preserved).
 pub fn tree_to_updates(modules: &[ModuleNode]) -> Vec<ModuleUpdate> {
     modules
@@ -473,6 +516,7 @@ pub fn load_structure(
             id: m.id.clone(),
             title: m.title,
             summary: m.summary.unwrap_or_default(),
+            generation_state: m.generation_state,
             submodules: vec![],
         };
         match m.parent_id {

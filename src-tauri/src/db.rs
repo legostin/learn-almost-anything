@@ -175,3 +175,56 @@ pub fn delete_module(conn: &Connection, id: &str) -> Result<(), rusqlite::Error>
     conn.execute("DELETE FROM modules WHERE id = ?1", [id])?;
     Ok(())
 }
+
+pub fn set_module_generation_state(
+    conn: &Connection,
+    id: &str,
+    state: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET generation_state = ?2 WHERE id = ?1",
+        rusqlite::params![id, state],
+    )?;
+    Ok(())
+}
+
+pub fn get_module_generation_state(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT generation_state FROM modules WHERE id = ?1",
+        [id],
+        |r| r.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
+/// (module_id, submodule_id) of the first submodule in 'pending' state, ordered
+/// by parent position then submodule position. None if everything is generated
+/// or generating.
+pub fn first_pending_submodule(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT m.parent_id, m.id FROM modules m \
+         JOIN modules p ON p.id = m.parent_id \
+         WHERE m.course_id = ?1 \
+           AND m.parent_id IS NOT NULL \
+           AND m.generation_state = 'pending' \
+         ORDER BY p.position, m.position \
+         LIMIT 1",
+        [course_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}

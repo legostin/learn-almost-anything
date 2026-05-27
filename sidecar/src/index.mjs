@@ -33,6 +33,7 @@ const methods = {
   wizard_questions: async (params) => pickAgent(params).wizardQuestions(params),
   build_structure: async (params) => pickAgent(params).buildStructure(params),
   refine_structure: async (params) => pickAgent(params).refineStructure(params),
+  generate_submodule: async (params) => pickAgent(params).generateSubmodule(params),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };

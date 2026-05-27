@@ -109,6 +109,61 @@ ${terminologyGuide(lang)}`;
   return { questions };
 }
 
+/**
+ * @param {{topic:string, language:string, courseMd:string, structure:object, memoryFiles:{filename:string,content:string}[], modulePath:{title:string,summary:string}, submodulePath:{title:string,summary:string}}} params
+ */
+export async function generateSubmodule({
+  topic,
+  language,
+  courseMd,
+  structure,
+  memoryFiles,
+  modulePath,
+  submodulePath,
+}) {
+  if (!modulePath?.title || !submodulePath?.title) {
+    throw new Error("modulePath and submodulePath must include titles");
+  }
+  const lang = (language || "en").trim();
+  const memoryBlock =
+    memoryFiles && memoryFiles.length
+      ? `Past user feedback (apply to tone and content):\n${memoryFiles
+          .map((f) => `--- ${f.filename} ---\n${f.content}`)
+          .join("\n\n")}\n\n`
+      : "";
+  const prompt = `You are writing one submodule of a personalized course on
+"${topic}" (language: ${lang}).
+
+Course brief (wizard Q&A):
+<course-md>
+${courseMd}
+</course-md>
+
+Full curriculum (for context — do not repeat other modules):
+<structure>
+${JSON.stringify(structure, null, 2)}
+</structure>
+
+${memoryBlock}You are writing this specific submodule:
+- Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
+- This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
+
+Write a detailed, engaging article in language "${lang}". ~600-1200 words.
+Use Markdown headings (## / ###), short paragraphs, and concrete examples
+specific to this learner (not generic textbook prose). Do not repeat the
+overall course intro — assume the learner has the curriculum in front of them.
+
+${terminologyGuide(lang)}
+
+Output ONLY the article markdown, no preamble, no JSON, no code fences around
+the whole thing.`;
+  const article = await runOnce(prompt);
+  if (!article || !article.trim()) {
+    throw new Error("Codex returned empty article");
+  }
+  return { article: article.trim() };
+}
+
 function buildRefinePrompt({
   topic,
   language,

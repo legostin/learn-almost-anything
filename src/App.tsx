@@ -18,10 +18,13 @@ type Course = {
 
 type Question = { text: string; options: string[] };
 
+type GenState = "pending" | "generating" | "ready" | "failed";
+
 type ModuleNode = {
   id: string;
   title: string;
   summary: string;
+  generation_state: GenState;
   submodules: ModuleNode[];
 };
 
@@ -40,7 +43,7 @@ type ChatMessage = {
   modules: ModuleNode[];
 };
 
-type JobKind = "wizard_questions" | "build_structure";
+type JobKind = "wizard_questions" | "build_structure" | "generate_submodule";
 
 type JobState =
   | { kind: JobKind; status: "running" }
@@ -76,7 +79,7 @@ function App() {
   }, [refresh]);
 
   useEffect(() => {
-    const unlistenP = listen<JobEvent>("agent_job", (e) => {
+    const unlistenP = listen<JobEvent>("agent_job", async (e) => {
       const { courseId, kind, ok, result, error } = e.payload;
       setJobs((prev) => {
         const next = new Map(prev);
@@ -88,8 +91,19 @@ function App() {
         );
         return next;
       });
+      // Goal hook: after an initial structure build, kick off the first
+      // submodule generation so the learner has something to start with.
+      // Do this BEFORE refresh so when Structure mounts the row is already
+      // flipped to 'generating'.
+      if (kind === "build_structure" && ok) {
+        try {
+          await invoke("start_first_pending_submodule", { courseId });
+        } catch {
+          /* swallowed; UI shows nothing extra */
+        }
+      }
       // course.status may have flipped (e.g. build_structure → 'ready')
-      refresh();
+      await refresh();
     });
     return () => {
       unlistenP.then((fn) => fn());
@@ -532,6 +546,15 @@ function Structure({ course }: { course: Course }) {
     }
   }
 
+  async function reloadTree() {
+    try {
+      const t = await invoke<StructureFile>("get_structure", { courseId: course.id });
+      setTree(t);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     setTree(null);
@@ -557,8 +580,12 @@ function Structure({ course }: { course: Course }) {
     const unl = listen<JobEvent>("agent_job", async (e) => {
       const p = e.payload as any;
       if (p.courseId !== course.id) return;
-      if (p.kind !== "refine_structure") return;
-      await reloadChat();
+      if (p.kind === "refine_structure") {
+        await reloadChat();
+      } else if (p.kind === "generate_submodule") {
+        // Submodule generation finished (ok or failed) — pull fresh state.
+        await reloadTree();
+      }
     });
     return () => {
       unl.then((f) => f());
@@ -589,6 +616,11 @@ function Structure({ course }: { course: Course }) {
       });
       setTree(fresh);
       await reloadChat();
+      // Goal hook: after the user accepts a refined plan, kick off the
+      // first submodule generation automatically.
+      invoke("start_first_pending_submodule", { courseId: course.id })
+        .then(() => reloadTree())
+        .catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {
@@ -738,12 +770,13 @@ function StructureTree({ tree }: { tree: StructureFile }) {
           {m.submodules.length > 0 && (
             <ol className="submodules">
               {m.submodules.map((s, j) => (
-                <li key={s.id} className="submodule">
+                <li key={s.id} className={`submodule state-${s.generation_state}`}>
                   <div className="submodule-title">
                     <span className="num">
                       {i + 1}.{j + 1}
                     </span>
                     {s.title}
+                    <SubmoduleStateIcon state={s.generation_state} />
                   </div>
                   {s.summary && <div className="submodule-summary">{s.summary}</div>}
                 </li>
@@ -754,6 +787,28 @@ function StructureTree({ tree }: { tree: StructureFile }) {
       ))}
     </ol>
   );
+}
+
+function SubmoduleStateIcon({ state }: { state: GenState }) {
+  const t = useT();
+  if (state === "generating") {
+    return <span className="state-icon generating" title={t("generatingTitle")} />;
+  }
+  if (state === "ready") {
+    return (
+      <span className="state-icon ready" title="ready" aria-label="ready">
+        ✓
+      </span>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <span className="state-icon failed" title="failed" aria-label="failed">
+        !
+      </span>
+    );
+  }
+  return null;
 }
 
 function SmokeTest() {

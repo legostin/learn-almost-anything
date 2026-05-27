@@ -308,6 +308,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
             id: Uuid::new_v4().to_string(),
             title: m.title,
             summary: m.summary.unwrap_or_default(),
+            generation_state: "pending".to_string(),
             submodules: m
                 .submodules
                 .into_iter()
@@ -315,12 +316,172 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
                     id: Uuid::new_v4().to_string(),
                     title: s.title,
                     summary: s.summary.unwrap_or_default(),
+                    generation_state: "pending".to_string(),
                     submodules: vec![],
                 })
                 .collect(),
         })
         .collect();
     Ok((raw.reply, modules))
+}
+
+fn spawn_generate_submodule(
+    app: &AppHandle,
+    db: Arc<Db>,
+    paths: Arc<AppPaths>,
+    sidecar: Arc<Sidecar>,
+    course: db::Course,
+    submodule_id: String,
+) -> Result<(), String> {
+    // Set state to 'generating' before spawning so UI can reflect it on the
+    // very next refresh.
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        db::set_module_generation_state(&conn, &submodule_id, "generating")
+            .map_err(|e| e.to_string())?;
+    }
+
+    let course_md = courses::read_course_md(&paths, &course.id).map_err(|e| e.to_string())?;
+    let structure = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        courses::load_structure(&conn, &course.id).map_err(|e| e.to_string())?
+    };
+    let (mod_node, sub_node) = courses::find_submodule_path(&structure, &submodule_id)
+        .ok_or_else(|| format!("submodule not found: {submodule_id}"))?;
+    let module_id = mod_node.id.clone();
+    let module_title = mod_node.title.clone();
+    let module_summary = mod_node.summary.clone();
+    let sub_title = sub_node.title.clone();
+    let sub_summary = sub_node.summary.clone();
+    let memory_files =
+        courses::read_memory_files(&paths, &course.id).map_err(|e| e.to_string())?;
+    let memory_for_prompt: Vec<serde_json::Value> = memory_files
+        .iter()
+        .map(|(name, content)| json!({ "filename": name, "content": content }))
+        .collect();
+    let structure_value = serde_json::to_value(&structure).map_err(|e| e.to_string())?;
+
+    let app2 = app.clone();
+    let cid = course.id.clone();
+    let mid = module_id.clone();
+    let sid = submodule_id.clone();
+    thread::spawn(move || {
+        let params = json!({
+            "backend": course.agent,
+            "topic": course.topic,
+            "language": course.language,
+            "courseMd": course_md,
+            "structure": structure_value,
+            "memoryFiles": memory_for_prompt,
+            "modulePath": { "title": module_title, "summary": module_summary },
+            "submodulePath": { "title": sub_title, "summary": sub_summary },
+        });
+        let result = sidecar.call("generate_submodule", params, Duration::from_secs(360));
+        let payload = match result {
+            Ok(v) => match v.get("article").and_then(|a| a.as_str()) {
+                Some(article) if !article.is_empty() => {
+                    let write_res =
+                        courses::write_submodule_article(&paths, &cid, &mid, &sid, article);
+                    match write_res {
+                        Ok(_) => {
+                            let conn = db.0.lock();
+                            if let Ok(c) = conn {
+                                let _ = db::set_module_generation_state(&c, &sid, "ready");
+                            }
+                            json!({ "ok": true, "submoduleId": sid })
+                        }
+                        Err(e) => {
+                            let conn = db.0.lock();
+                            if let Ok(c) = conn {
+                                let _ = db::set_module_generation_state(&c, &sid, "failed");
+                            }
+                            json!({ "ok": false, "error": e.to_string() })
+                        }
+                    }
+                }
+                _ => {
+                    let conn = db.0.lock();
+                    if let Ok(c) = conn {
+                        let _ = db::set_module_generation_state(&c, &sid, "failed");
+                    }
+                    json!({ "ok": false, "error": "sidecar returned empty article" })
+                }
+            },
+            Err(e) => {
+                let conn = db.0.lock();
+                if let Ok(c) = conn {
+                    let _ = db::set_module_generation_state(&c, &sid, "failed");
+                }
+                json!({ "ok": false, "error": e.to_string() })
+            }
+        };
+        emit_job_event(&app2, &cid, "generate_submodule", payload);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn start_generate_submodule(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    course_id: String,
+    submodule_id: String,
+) -> Result<(), String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let current_state = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_module_generation_state(&conn, &submodule_id).map_err(|e| e.to_string())?
+    };
+    match current_state.as_deref() {
+        None => return Err(format!("submodule not found: {submodule_id}")),
+        Some("generating") => return Ok(()), // already running — no-op
+        _ => {}
+    }
+    spawn_generate_submodule(
+        &app,
+        db_state.inner().clone(),
+        paths_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        course,
+        submodule_id,
+    )
+}
+
+#[tauri::command]
+fn start_first_pending_submodule(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    course_id: String,
+) -> Result<Option<String>, String> {
+    let (course, first) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        let first = db::first_pending_submodule(&conn, &course_id).map_err(|e| e.to_string())?;
+        (course, first)
+    };
+    let Some((_, sub_id)) = first else {
+        return Ok(None);
+    };
+    spawn_generate_submodule(
+        &app,
+        db_state.inner().clone(),
+        paths_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        course,
+        sub_id.clone(),
+    )?;
+    Ok(Some(sub_id))
 }
 
 #[tauri::command]
@@ -415,7 +576,9 @@ pub fn run() {
             save_structure,
             list_chat,
             start_structure_refine,
-            accept_structure_refinement
+            accept_structure_refinement,
+            start_generate_submodule,
+            start_first_pending_submodule
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
