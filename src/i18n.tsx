@@ -54,6 +54,9 @@ const STRINGS = {
     loadError: "Ошибка загрузки: {error}",
     loadingStructure: "Загружаю структуру…",
     emptyStructure: "Структура пустая.",
+    generateNextSub: "Сгенерировать следующий сабмодуль",
+    generatingFirst: "Запускаю генерацию…",
+    allSubsDone: "Все сабмодули сгенерированы",
 
     refineTitle: "Доработать с агентом",
     refineSub:
@@ -121,6 +124,9 @@ const STRINGS = {
     loadError: "Load error: {error}",
     loadingStructure: "Loading structure…",
     emptyStructure: "Structure is empty.",
+    generateNextSub: "Generate next submodule",
+    generatingFirst: "Starting generation…",
+    allSubsDone: "All submodules generated",
 
     refineTitle: "Refine with agent",
     refineSub:

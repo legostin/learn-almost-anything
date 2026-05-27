@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLang, useT } from "./i18n";
@@ -536,6 +536,9 @@ function Structure({ course }: { course: Course }) {
   const [error, setError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [accepting, setAccepting] = useState<string | null>(null);
+  const [kicking, setKicking] = useState(false);
+  // Avoid re-triggering on every tree update when nothing has been generated.
+  const autoTriggeredFor = useRef<string | null>(null);
 
   async function reloadChat() {
     try {
@@ -607,6 +610,38 @@ function Structure({ course }: { course: Course }) {
     }
   }
 
+  async function kickFirstPending() {
+    setKicking(true);
+    try {
+      const sid = await invoke<string | null>("start_first_pending_submodule", {
+        courseId: course.id,
+      });
+      if (sid) await reloadTree();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setKicking(false);
+    }
+  }
+
+  // Auto-kick on first entry to a 'ready' course where nothing has been
+  // generated yet — covers the case where the build_structure → first-sub
+  // auto-trigger missed (initial wizard happened on an older build).
+  useEffect(() => {
+    if (!tree) return;
+    if (autoTriggeredFor.current === course.id) return;
+    const allSubs = tree.modules.flatMap((m) => m.submodules);
+    if (allSubs.length === 0) return;
+    const hasActivity = allSubs.some(
+      (s) => s.generation_state === "generating" || s.generation_state === "ready"
+    );
+    const hasPending = allSubs.some((s) => s.generation_state === "pending");
+    if (hasActivity || !hasPending) return;
+    autoTriggeredFor.current = course.id;
+    kickFirstPending();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree, course.id]);
+
   async function accept(messageId: string) {
     setAccepting(messageId);
     try {
@@ -631,12 +666,32 @@ function Structure({ course }: { course: Course }) {
   if (error && !tree) return <div className="placeholder">{t("loadError", { error })}</div>;
   if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
+  const allSubs = tree.modules.flatMap((m) => m.submodules);
+  const pendingCount = allSubs.filter((s) => s.generation_state === "pending").length;
+  const isGenerating = allSubs.some((s) => s.generation_state === "generating");
+
   return (
     <div className="structure">
       {tree.modules.length === 0 ? (
         <div className="placeholder">{t("emptyStructure")}</div>
       ) : (
-        <StructureTree tree={tree} />
+        <>
+          {allSubs.length > 0 && (
+            <div className="structure-toolbar">
+              {pendingCount === 0 && !isGenerating ? (
+                <span className="toolbar-note">{t("allSubsDone")}</span>
+              ) : (
+                <button
+                  onClick={kickFirstPending}
+                  disabled={isGenerating || kicking || pendingCount === 0}
+                >
+                  {kicking || isGenerating ? t("generatingFirst") : t("generateNextSub")}
+                </button>
+              )}
+            </div>
+          )}
+          <StructureTree tree={tree} />
+        </>
       )}
 
       <RefineChat
