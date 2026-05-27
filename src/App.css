@@ -575,6 +575,16 @@ button {
   border-color: var(--border);
   cursor: not-allowed;
 }
+.structure-toolbar button.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.structure-toolbar button.ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text);
+  background: transparent;
+}
 .toolbar-note {
   font-size: 12px;
   color: var(--text-muted);

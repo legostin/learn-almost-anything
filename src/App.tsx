@@ -537,6 +537,7 @@ function Structure({ course }: { course: Course }) {
   const [input, setInput] = useState("");
   const [accepting, setAccepting] = useState<string | null>(null);
   const [kicking, setKicking] = useState(false);
+  const [showRefine, setShowRefine] = useState(false);
   // Avoid re-triggering on every tree update when nothing has been generated.
   const autoTriggeredFor = useRef<string | null>(null);
 
@@ -564,6 +565,7 @@ function Structure({ course }: { course: Course }) {
     setChat([]);
     setError(null);
     setInput("");
+    setShowRefine(false);
     Promise.all([
       invoke<StructureFile>("get_structure", { courseId: course.id }),
       invoke<ChatMessage[]>("list_chat", { courseId: course.id }),
@@ -651,6 +653,10 @@ function Structure({ course }: { course: Course }) {
       });
       setTree(fresh);
       await reloadChat();
+      // Collapse the refine dialog — user wanted a clean view of the
+      // accepted plan, not the history of how we got here.
+      setShowRefine(false);
+      autoTriggeredFor.current = null; // allow auto-kick for the new tree
       // Goal hook: after the user accepts a refined plan, kick off the
       // first submodule generation automatically.
       invoke("start_first_pending_submodule", { courseId: course.id })
@@ -676,9 +682,9 @@ function Structure({ course }: { course: Course }) {
         <div className="placeholder">{t("emptyStructure")}</div>
       ) : (
         <>
-          {allSubs.length > 0 && (
-            <div className="structure-toolbar">
-              {pendingCount === 0 && !isGenerating ? (
+          <div className="structure-toolbar">
+            {allSubs.length > 0 &&
+              (pendingCount === 0 && !isGenerating ? (
                 <span className="toolbar-note">{t("allSubsDone")}</span>
               ) : (
                 <button
@@ -687,23 +693,31 @@ function Structure({ course }: { course: Course }) {
                 >
                   {kicking || isGenerating ? t("generatingFirst") : t("generateNextSub")}
                 </button>
-              )}
-            </div>
-          )}
+              ))}
+            <button
+              className="ghost"
+              onClick={() => setShowRefine((v) => !v)}
+              aria-expanded={showRefine}
+            >
+              {showRefine ? t("closeRefine") : t("refinePlanButton")}
+            </button>
+          </div>
           <StructureTree tree={tree} />
         </>
       )}
 
-      <RefineChat
-        course={course}
-        chat={chat}
-        input={input}
-        onInputChange={setInput}
-        onSend={send}
-        onAccept={accept}
-        thinking={isAgentThinking}
-        accepting={accepting}
-      />
+      {showRefine && (
+        <RefineChat
+          course={course}
+          chat={chat}
+          input={input}
+          onInputChange={setInput}
+          onSend={send}
+          onAccept={accept}
+          thinking={isAgentThinking}
+          accepting={accepting}
+        />
+      )}
       {error && tree && <p className="error-banner">{t("errorPrefix", { error })}</p>}
     </div>
   );

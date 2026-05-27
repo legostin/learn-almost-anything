@@ -57,6 +57,8 @@ const STRINGS = {
     generateNextSub: "Сгенерировать следующий сабмодуль",
     generatingFirst: "Запускаю генерацию…",
     allSubsDone: "Все сабмодули сгенерированы",
+    refinePlanButton: "Доработать план",
+    closeRefine: "Свернуть",
 
     refineTitle: "Доработать с агентом",
     refineSub:
@@ -127,6 +129,8 @@ const STRINGS = {
     generateNextSub: "Generate next submodule",
     generatingFirst: "Starting generation…",
     allSubsDone: "All submodules generated",
+    refinePlanButton: "Refine plan",
+    closeRefine: "Collapse",
 
     refineTitle: "Refine with agent",
     refineSub:
