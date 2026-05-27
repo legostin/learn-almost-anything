@@ -103,6 +103,122 @@ Write everything in language "${lang}".`;
   return { questions };
 }
 
+function buildRefinePrompt({
+  topic,
+  language,
+  courseMd,
+  currentStructure,
+  memoryFiles,
+  chatHistory,
+  userMessage,
+}) {
+  const lang = (language || "en").trim();
+  const memoryBlock =
+    memoryFiles && memoryFiles.length
+      ? `Past user feedback stored in memory (most recent last):\n${memoryFiles
+          .map((f) => `--- ${f.filename} ---\n${f.content}`)
+          .join("\n\n")}\n\n`
+      : "";
+  const chatBlock =
+    chatHistory && chatHistory.length
+      ? `Refinement chat so far (most recent last):\n${chatHistory
+          .map((m) => `${m.role}: ${m.text}`)
+          .join("\n")}\n\n`
+      : "";
+  return `You are iterating on a course curriculum on "${topic}" (language: ${lang}).
+
+Course brief (wizard Q&A):
+<course-md>
+${courseMd}
+</course-md>
+
+Current accepted structure:
+<structure>
+${JSON.stringify(currentStructure, null, 2)}
+</structure>
+
+${memoryBlock}${chatBlock}User's latest message: ${userMessage}
+
+Decide:
+A) If the user's intent is clear enough — propose a FULL revised tree. Briefly
+   explain in "reply" what you changed and why. Respect everything from the
+   course brief and memory.
+B) If unclear or you'd like to negotiate — ask one specific clarifying question
+   in "reply". Set "modules" to []. Do NOT propose half a tree.
+
+All titles and summaries in language "${lang}". When proposing, return the
+FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.`;
+}
+
+function normalizeRefineResponse(parsed) {
+  if (!parsed || typeof parsed.reply !== "string") {
+    throw new Error("response missing 'reply'");
+  }
+  const reply = parsed.reply.trim();
+  const rawModules = Array.isArray(parsed.modules) ? parsed.modules : [];
+  const modules = rawModules
+    .filter((m) => m && typeof m.title === "string" && m.title.trim())
+    .map((m) => ({
+      title: m.title.trim(),
+      summary: typeof m.summary === "string" ? m.summary.trim() : "",
+      submodules: Array.isArray(m.submodules)
+        ? m.submodules
+            .filter((s) => s && typeof s.title === "string" && s.title.trim())
+            .map((s) => ({
+              title: s.title.trim(),
+              summary: typeof s.summary === "string" ? s.summary.trim() : "",
+            }))
+        : [],
+    }));
+  return { reply, modules };
+}
+
+const refineSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    reply: { type: "string" },
+    modules: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          summary: { type: "string" },
+          submodules: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                title: { type: "string" },
+                summary: { type: "string" },
+              },
+              required: ["title", "summary"],
+            },
+          },
+        },
+        required: ["title", "summary", "submodules"],
+      },
+    },
+  },
+  required: ["reply", "modules"],
+};
+
+/**
+ * @param {{topic:string, language:string, courseMd:string, currentStructure:object, memoryFiles:{filename:string,content:string}[], chatHistory:{role:string,text:string}[], userMessage:string}} params
+ */
+export async function refineStructure(params) {
+  if (typeof params?.userMessage !== "string" || !params.userMessage.trim()) {
+    throw new Error("userMessage must be a non-empty string");
+  }
+  const prompt = buildRefinePrompt(params);
+  const text = await runOnce(prompt, refineSchema);
+  const parsed = JSON.parse(text);
+  return normalizeRefineResponse(parsed);
+}
+
 /**
  * @param {{ courseMd: string, topic: string, language: string }} params
  */
