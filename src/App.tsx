@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLang, useT } from "./i18n";
@@ -58,7 +59,19 @@ type JobEvent = {
   error?: string;
 };
 
-type View = { kind: "empty" } | { kind: "creating" } | { kind: "course"; id: string };
+type View =
+  | { kind: "empty" }
+  | { kind: "creating" }
+  | { kind: "course"; id: string }
+  | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
+
+type StageName = "draft" | "review" | "annotate";
+
+type StageEvent = {
+  courseId: string;
+  submoduleId: string;
+  stage: StageName;
+};
 
 const jobKey = (courseId: string, kind: JobKind) => `${courseId}:${kind}`;
 
@@ -67,6 +80,7 @@ function App() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
+  const [stages, setStages] = useState<Map<string, StageName>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -104,11 +118,45 @@ function App() {
       }
       // course.status may have flipped (e.g. build_structure → 'ready')
       await refresh();
+      // Terminal event for submodule generation — clear stage tracking.
+      if (kind === "generate_submodule") {
+        const subId = (e.payload as any).submoduleId as string | undefined;
+        if (subId) {
+          setStages((prev) => {
+            if (!prev.has(subId)) return prev;
+            const next = new Map(prev);
+            next.delete(subId);
+            return next;
+          });
+        }
+      }
     });
     return () => {
       unlistenP.then((fn) => fn());
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const unlistenP = listen<StageEvent>("agent_stage", (e) => {
+      const { submoduleId, stage } = e.payload;
+      setStages((prev) => {
+        const next = new Map(prev);
+        next.set(submoduleId, stage);
+        return next;
+      });
+    });
+    return () => {
+      unlistenP.then((fn) => fn());
+    };
+  }, []);
+
+  async function startSubmoduleGen(courseId: string, submoduleId: string) {
+    try {
+      await invoke("start_generate_submodule", { courseId, submoduleId });
+    } catch (e) {
+      console.error("start_generate_submodule failed", e);
+    }
+  }
 
   async function startJob(courseId: string, kind: JobKind) {
     setJobs((prev) => {
@@ -190,6 +238,20 @@ function App() {
             jobs={jobs}
             onStartJob={(kind) => startJob(view.id, kind)}
             onChanged={refresh}
+            onOpenSub={(moduleId, submoduleId) =>
+              setView({ kind: "submodule", courseId: view.id, moduleId, submoduleId })
+            }
+            onStartSubGen={(submoduleId) => startSubmoduleGen(view.id, submoduleId)}
+          />
+        )}
+        {view.kind === "submodule" && (
+          <SubmoduleView
+            course={courses.find((c) => c.id === view.courseId)}
+            moduleId={view.moduleId}
+            submoduleId={view.submoduleId}
+            stage={stages.get(view.submoduleId) ?? null}
+            onBack={() => setView({ kind: "course", id: view.courseId })}
+            onStartGen={(subId) => startSubmoduleGen(view.courseId, subId)}
           />
         )}
       </main>
@@ -326,11 +388,15 @@ function CourseView({
   jobs,
   onStartJob,
   onChanged,
+  onOpenSub,
+  onStartSubGen,
 }: {
   course?: Course;
   jobs: Map<string, JobState>;
   onStartJob: (kind: JobKind) => void;
   onChanged: () => void | Promise<void>;
+  onOpenSub: (moduleId: string, submoduleId: string) => void;
+  onStartSubGen: (submoduleId: string) => void | Promise<void>;
 }) {
   const t = useT();
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
@@ -363,7 +429,13 @@ function CourseView({
           onStart={() => onStartJob("build_structure")}
         />
       )}
-      {course.status === "ready" && <Structure course={course} />}
+      {course.status === "ready" && (
+        <Structure
+          course={course}
+          onOpenSub={onOpenSub}
+          onStartSubGen={onStartSubGen}
+        />
+      )}
     </div>
   );
 }
@@ -529,14 +601,21 @@ function StructureBuilder({
   );
 }
 
-function Structure({ course }: { course: Course }) {
+function Structure({
+  course,
+  onOpenSub,
+  onStartSubGen,
+}: {
+  course: Course;
+  onOpenSub: (moduleId: string, submoduleId: string) => void;
+  onStartSubGen: (submoduleId: string) => void | Promise<void>;
+}) {
   const t = useT();
   const [tree, setTree] = useState<StructureFile | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [accepting, setAccepting] = useState<string | null>(null);
-  const [kicking, setKicking] = useState(false);
   const [showRefine, setShowRefine] = useState(false);
   // Avoid re-triggering on every tree update when nothing has been generated.
   const autoTriggeredFor = useRef<string | null>(null);
@@ -613,7 +692,6 @@ function Structure({ course }: { course: Course }) {
   }
 
   async function kickFirstPending() {
-    setKicking(true);
     try {
       const sid = await invoke<string | null>("start_first_pending_submodule", {
         courseId: course.id,
@@ -621,8 +699,6 @@ function Structure({ course }: { course: Course }) {
       if (sid) await reloadTree();
     } catch (e) {
       setError(String(e));
-    } finally {
-      setKicking(false);
     }
   }
 
@@ -672,10 +748,6 @@ function Structure({ course }: { course: Course }) {
   if (error && !tree) return <div className="placeholder">{t("loadError", { error })}</div>;
   if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
-  const allSubs = tree.modules.flatMap((m) => m.submodules);
-  const pendingCount = allSubs.filter((s) => s.generation_state === "pending").length;
-  const isGenerating = allSubs.some((s) => s.generation_state === "generating");
-
   return (
     <div className="structure">
       {tree.modules.length === 0 ? (
@@ -683,17 +755,6 @@ function Structure({ course }: { course: Course }) {
       ) : (
         <>
           <div className="structure-toolbar">
-            {allSubs.length > 0 &&
-              (pendingCount === 0 && !isGenerating ? (
-                <span className="toolbar-note">{t("allSubsDone")}</span>
-              ) : (
-                <button
-                  onClick={kickFirstPending}
-                  disabled={isGenerating || kicking || pendingCount === 0}
-                >
-                  {kicking || isGenerating ? t("generatingFirst") : t("generateNextSub")}
-                </button>
-              ))}
             <button
               className="ghost"
               onClick={() => setShowRefine((v) => !v)}
@@ -702,7 +763,18 @@ function Structure({ course }: { course: Course }) {
               {showRefine ? t("closeRefine") : t("refinePlanButton")}
             </button>
           </div>
-          <StructureTree tree={tree} />
+          <StructureTree
+            tree={tree}
+            onOpenSub={onOpenSub}
+            onStartSubGen={(subId) => {
+              const mod = tree.modules.find((m) =>
+                m.submodules.some((s) => s.id === subId)
+              );
+              if (!mod) return;
+              onStartSubGen(subId);
+              onOpenSub(mod.id, subId);
+            }}
+          />
         </>
       )}
 
@@ -827,7 +899,15 @@ function RefineChat({
   );
 }
 
-function StructureTree({ tree }: { tree: StructureFile }) {
+function StructureTree({
+  tree,
+  onOpenSub,
+  onStartSubGen,
+}: {
+  tree: StructureFile;
+  onOpenSub?: (moduleId: string, submoduleId: string) => void;
+  onStartSubGen?: (submoduleId: string) => void;
+}) {
   return (
     <ol className="modules">
       {tree.modules.map((m, i) => (
@@ -840,14 +920,34 @@ function StructureTree({ tree }: { tree: StructureFile }) {
             <ol className="submodules">
               {m.submodules.map((s, j) => (
                 <li key={s.id} className={`submodule state-${s.generation_state}`}>
-                  <div className="submodule-title">
-                    <span className="num">
-                      {i + 1}.{j + 1}
-                    </span>
-                    {s.title}
-                    <SubmoduleStateIcon state={s.generation_state} />
+                  <div className="submodule-row">
+                    <div
+                      className="submodule-title"
+                      onClick={() => onOpenSub?.(m.id, s.id)}
+                      role={onOpenSub ? "button" : undefined}
+                    >
+                      <span className="num">
+                        {i + 1}.{j + 1}
+                      </span>
+                      {s.title}
+                      <SubmoduleStateIcon state={s.generation_state} />
+                    </div>
+                    {onOpenSub && onStartSubGen && (
+                      <SubmoduleAction
+                        state={s.generation_state}
+                        onOpen={() => onOpenSub(m.id, s.id)}
+                        onGenerate={() => onStartSubGen(s.id)}
+                      />
+                    )}
                   </div>
-                  {s.summary && <div className="submodule-summary">{s.summary}</div>}
+                  {s.summary && (
+                    <div
+                      className="submodule-summary"
+                      onClick={() => onOpenSub?.(m.id, s.id)}
+                    >
+                      {s.summary}
+                    </div>
+                  )}
                 </li>
               ))}
             </ol>
@@ -855,6 +955,296 @@ function StructureTree({ tree }: { tree: StructureFile }) {
         </li>
       ))}
     </ol>
+  );
+}
+
+function SubmoduleAction({
+  state,
+  onOpen,
+  onGenerate,
+}: {
+  state: GenState;
+  onOpen: () => void;
+  onGenerate: () => void;
+}) {
+  const t = useT();
+  if (state === "ready") {
+    return (
+      <button
+        className="sub-action open"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen();
+        }}
+      >
+        {t("subOpen")}
+      </button>
+    );
+  }
+  if (state === "generating") {
+    return (
+      <button
+        className="sub-action busy"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen();
+        }}
+      >
+        <span className="spinner" />
+      </button>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <button
+        className="sub-action retry"
+        onClick={(e) => {
+          e.stopPropagation();
+          onGenerate();
+        }}
+      >
+        {t("subRetry")}
+      </button>
+    );
+  }
+  // pending
+  return (
+    <button
+      className="sub-action gen"
+      onClick={(e) => {
+        e.stopPropagation();
+        onGenerate();
+      }}
+    >
+      {t("subGenerate")}
+    </button>
+  );
+}
+
+type SubmoduleContent = {
+  article: string;
+  widgets: Record<string, WidgetData>;
+  review_notes: string;
+};
+
+type WidgetData = {
+  type: string;
+  placeholder?: boolean;
+  description?: string;
+  alt?: string;
+};
+
+function SubmoduleView({
+  course,
+  moduleId,
+  submoduleId,
+  stage,
+  onBack,
+  onStartGen,
+}: {
+  course?: Course;
+  moduleId: string;
+  submoduleId: string;
+  stage: StageName | null;
+  onBack: () => void;
+  onStartGen: (submoduleId: string) => void | Promise<void>;
+}) {
+  const t = useT();
+  const [tree, setTree] = useState<StructureFile | null>(null);
+  const [content, setContent] = useState<SubmoduleContent | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const reloadTree = useCallback(async () => {
+    if (!course) return;
+    try {
+      const s = await invoke<StructureFile>("get_structure", { courseId: course.id });
+      setTree(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [course]);
+
+  const reloadContent = useCallback(async () => {
+    if (!course) return;
+    try {
+      const c = await invoke<SubmoduleContent>("read_submodule_article", {
+        courseId: course.id,
+        moduleId,
+        submoduleId,
+      });
+      setContent(c);
+    } catch (e) {
+      // article.md not yet on disk — leave content null
+      setContent(null);
+    }
+  }, [course, moduleId, submoduleId]);
+
+  useEffect(() => {
+    setContent(null);
+    setError(null);
+    reloadTree();
+  }, [reloadTree, submoduleId]);
+
+  const sub = tree?.modules
+    .find((m) => m.id === moduleId)
+    ?.submodules.find((s) => s.id === submoduleId);
+  const state = sub?.generation_state ?? "pending";
+
+  useEffect(() => {
+    if (state === "ready") reloadContent();
+  }, [state, reloadContent]);
+
+  useEffect(() => {
+    if (!course) return;
+    const unl = listen<JobEvent>("agent_job", async (e) => {
+      const p = e.payload as any;
+      if (p.courseId !== course.id) return;
+      if (p.kind !== "generate_submodule") return;
+      if (p.submoduleId && p.submoduleId !== submoduleId) return;
+      await reloadTree();
+    });
+    return () => {
+      unl.then((f) => f());
+    };
+  }, [course, submoduleId, reloadTree]);
+
+  if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
+  if (!sub && !tree) return <div className="placeholder">{t("loadingStructure")}</div>;
+  if (!sub) return <div className="placeholder">{t("courseNotFound")}</div>;
+
+  const moduleIdx = tree!.modules.findIndex((m) => m.id === moduleId);
+  const subIdx =
+    tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
+
+  return (
+    <div className="submodule-view">
+      <button className="sub-back" onClick={onBack}>
+        {t("backToCourse")}
+      </button>
+      <div className="sub-numbering">
+        {moduleIdx + 1}.{subIdx + 1}
+      </div>
+      <h1 className="sub-h1">{sub.title}</h1>
+      {sub.summary && <div className="sub-lead">{sub.summary}</div>}
+
+      {(state === "pending" || state === "failed") && (
+        <div className="sub-empty">
+          <p>
+            {state === "failed" ? t("stageFailedHint") : t("stagePendingHint")}
+          </p>
+          <button onClick={() => onStartGen(submoduleId)}>
+            {state === "failed" ? t("subRetry") : t("subGenerate")}
+          </button>
+          {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+        </div>
+      )}
+
+      {state === "generating" && (
+        <div className="sub-generating">
+          <StageStrip current={stage ?? "draft"} />
+          <div className="sub-generating-label">
+            <span className="spinner" /> {t("stageRunning")}
+          </div>
+        </div>
+      )}
+
+      {state === "ready" && (
+        <>
+          {!content && <div className="placeholder">{t("loadingStructure")}</div>}
+          {content && (
+            <ArticleReader article={content.article} widgets={content.widgets} />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const STAGE_ORDER: StageName[] = ["draft", "review", "annotate"];
+
+function StageStrip({ current }: { current: StageName }) {
+  const t = useT();
+  const idx = STAGE_ORDER.indexOf(current);
+  const labels: Record<StageName, string> = {
+    draft: t("stageDraft"),
+    review: t("stageReview"),
+    annotate: t("stageAnnotate"),
+  };
+  return (
+    <ol className="stage-strip">
+      {STAGE_ORDER.map((s, i) => {
+        const isDone = i < idx;
+        const isActive = i === idx;
+        return (
+          <li
+            key={s}
+            className={`stage ${isDone ? "done" : ""} ${isActive ? "active" : ""}`}
+          >
+            <span className="stage-dot">{isDone ? "✓" : i + 1}</span>
+            <span className="stage-label">{labels[s]}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function ArticleReader({
+  article,
+  widgets,
+}: {
+  article: string;
+  widgets: Record<string, WidgetData>;
+}) {
+  const parts = splitWidgetMarkers(article);
+  return (
+    <article className="reader">
+      {parts.map((p, i) =>
+        p.kind === "md" ? (
+          <ReactMarkdown key={i}>{p.text}</ReactMarkdown>
+        ) : (
+          <WidgetPlaceholder key={i} id={p.id} widget={widgets[p.id]} />
+        )
+      )}
+    </article>
+  );
+}
+
+function splitWidgetMarkers(md: string) {
+  const out: Array<{ kind: "md"; text: string } | { kind: "widget"; id: string }> = [];
+  const re = /^::widget\{([^}]+)\}$/gm;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md))) {
+    if (m.index > last) out.push({ kind: "md", text: md.slice(last, m.index) });
+    const id = /id="([^"]+)"/.exec(m[1])?.[1] ?? "unknown";
+    out.push({ kind: "widget", id });
+    last = m.index + m[0].length;
+  }
+  if (last < md.length) out.push({ kind: "md", text: md.slice(last) });
+  return out;
+}
+
+function WidgetPlaceholder({ id, widget }: { id: string; widget?: WidgetData }) {
+  const t = useT();
+  return (
+    <figure className="widget widget-image">
+      <div className="widget-image-box">
+        <span className="widget-label">{t("widgetImage")}</span>
+        <span className="widget-id">#{id}</span>
+      </div>
+      {widget?.description && (
+        <figcaption>
+          {widget.description}
+          {widget.alt && (
+            <span className="widget-alt">
+              {" "}
+              · {t("widgetImageAlt")} {widget.alt}
+            </span>
+          )}
+        </figcaption>
+      )}
+    </figure>
   );
 }
 
