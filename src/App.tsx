@@ -71,7 +71,11 @@ type StageEvent = {
   courseId: string;
   submoduleId: string;
   stage: StageName;
+  label?: string;
+  detail?: string;
 };
+
+type StageDetail = { stage: StageName; label?: string; detail?: string };
 
 const jobKey = (courseId: string, kind: JobKind) => `${courseId}:${kind}`;
 
@@ -80,7 +84,7 @@ function App() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
-  const [stages, setStages] = useState<Map<string, StageName>>(new Map());
+  const [stages, setStages] = useState<Map<string, StageDetail>>(new Map());
   const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -146,10 +150,21 @@ function App() {
 
   useEffect(() => {
     const unlistenP = listen<StageEvent>("agent_stage", (e) => {
-      const { submoduleId, stage } = e.payload;
+      const { submoduleId, stage, label, detail } = e.payload;
       setStages((prev) => {
         const next = new Map(prev);
-        next.set(submoduleId, stage);
+        const prevDetail = prev.get(submoduleId);
+        // Stage-only event (no label) resets sub-state. Progress event keeps stage,
+        // updates label/detail.
+        if (!label) {
+          next.set(submoduleId, { stage });
+        } else {
+          next.set(submoduleId, {
+            stage: stage ?? prevDetail?.stage ?? "draft",
+            label,
+            detail,
+          });
+        }
         return next;
       });
     });
@@ -257,7 +272,7 @@ function App() {
             course={courses.find((c) => c.id === view.courseId)}
             moduleId={view.moduleId}
             submoduleId={view.submoduleId}
-            stage={stages.get(view.submoduleId) ?? null}
+            stageDetail={stages.get(view.submoduleId) ?? null}
             lastError={subErrors.get(view.submoduleId) ?? null}
             onBack={() => setView({ kind: "course", id: view.courseId })}
             onStartGen={(subId) => startSubmoduleGen(view.courseId, subId)}
@@ -1047,7 +1062,7 @@ function SubmoduleView({
   course,
   moduleId,
   submoduleId,
-  stage,
+  stageDetail,
   lastError,
   onBack,
   onStartGen,
@@ -1055,7 +1070,7 @@ function SubmoduleView({
   course?: Course;
   moduleId: string;
   submoduleId: string;
-  stage: StageName | null;
+  stageDetail: StageDetail | null;
   lastError: string | null;
   onBack: () => void;
   onStartGen: (submoduleId: string) => void | Promise<void>;
@@ -1155,10 +1170,8 @@ function SubmoduleView({
 
       {state === "generating" && (
         <div className="sub-generating">
-          <StageStrip current={stage ?? "draft"} />
-          <div className="sub-generating-label">
-            <span className="spinner" /> {t("stageRunning")}
-          </div>
+          <StageStrip current={stageDetail?.stage ?? "draft"} />
+          <LiveActivity stageDetail={stageDetail} />
         </div>
       )}
 
@@ -1175,6 +1188,47 @@ function SubmoduleView({
 }
 
 const STAGE_ORDER: StageName[] = ["draft", "review", "annotate"];
+
+const ACT_KEYS: Record<string, string> = {
+  thinking: "actThinking",
+  writing: "actWriting",
+  searching: "actSearching",
+  reviewing: "actReviewing",
+  marking: "actMarking",
+  running: "actRunning",
+};
+
+function LiveActivity({ stageDetail }: { stageDetail: StageDetail | null }) {
+  const t = useT();
+  if (!stageDetail) {
+    return (
+      <div className="sub-generating-label">
+        <span className="spinner" /> {t("stageRunning")}
+      </div>
+    );
+  }
+  const labelKey = stageDetail.label ? ACT_KEYS[stageDetail.label] : null;
+  const verb = labelKey ? t(labelKey as any) : stageDetail.label;
+  return (
+    <div className="live-activity">
+      <div className="sub-generating-label">
+        <span className="spinner" />{" "}
+        {verb ? (
+          <>
+            {t("stageRunning")} <span className="verb">·&nbsp;{verb}</span>
+          </>
+        ) : (
+          t("stageRunning")
+        )}
+      </div>
+      {stageDetail.detail && (
+        <div className="live-detail" title={stageDetail.detail}>
+          {stageDetail.detail}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function StageStrip({ current }: { current: StageName }) {
   const t = useT();

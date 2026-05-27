@@ -78,6 +78,26 @@ fn emit_stage_event(app: &AppHandle, course_id: &str, submodule_id: &str, stage:
     );
 }
 
+fn emit_progress_event(
+    app: &AppHandle,
+    course_id: &str,
+    submodule_id: &str,
+    stage: &str,
+    label: &str,
+    detail: Option<&str>,
+) {
+    let mut payload = json!({
+        "courseId": course_id,
+        "submoduleId": submodule_id,
+        "stage": stage,
+        "label": label,
+    });
+    if let Some(d) = detail {
+        payload["detail"] = json!(d);
+    }
+    let _ = app.emit(STAGE_EVENT, payload);
+}
+
 fn emit_job_event(app: &AppHandle, course_id: &str, kind: &str, payload: serde_json::Value) {
     let mut event = json!({
         "courseId": course_id,
@@ -399,9 +419,23 @@ fn spawn_generate_submodule(
             "submodulePath": { "title": sub_title, "summary": sub_summary },
         });
 
+        let make_progress_cb = |stage: &'static str| {
+            let app3 = app2.clone();
+            let cid2 = cid.clone();
+            let sid2 = sid.clone();
+            move |p: sidecar::ProgressPayload| {
+                emit_progress_event(&app3, &cid2, &sid2, stage, &p.label, p.detail.as_deref());
+            }
+        };
+
         // Stage 1 — draft
         emit_stage_event(&app2, &cid, &sid, "draft");
-        let draft = match sidecar.call("submodule_draft", common.clone(), Duration::from_secs(240)) {
+        let draft = match sidecar.call_with_progress(
+            "submodule_draft",
+            common.clone(),
+            Duration::from_secs(240),
+            make_progress_cb("draft"),
+        ) {
             Ok(v) => v,
             Err(e) => return fail(&db, &app2, &cid, &sid, format!("draft: {e}")),
         };
@@ -414,7 +448,12 @@ fn spawn_generate_submodule(
         emit_stage_event(&app2, &cid, &sid, "review");
         let mut review_params = common.clone();
         review_params["article"] = json!(draft_article);
-        let reviewed = match sidecar.call("submodule_review", review_params, Duration::from_secs(240)) {
+        let reviewed = match sidecar.call_with_progress(
+            "submodule_review",
+            review_params,
+            Duration::from_secs(240),
+            make_progress_cb("review"),
+        ) {
             Ok(v) => v,
             Err(e) => return fail(&db, &app2, &cid, &sid, format!("review: {e}")),
         };
@@ -435,10 +474,11 @@ fn spawn_generate_submodule(
         emit_stage_event(&app2, &cid, &sid, "annotate");
         let mut annotate_params = common.clone();
         annotate_params["article"] = json!(reviewed_article);
-        let (final_article, widgets, mut combined_notes) = match sidecar.call(
+        let (final_article, widgets, mut combined_notes) = match sidecar.call_with_progress(
             "submodule_annotate",
             annotate_params,
             Duration::from_secs(180),
+            make_progress_cb("annotate"),
         ) {
             Ok(v) => (
                 v.get("article")

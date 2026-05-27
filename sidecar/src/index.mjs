@@ -4,6 +4,8 @@
 //   Request:   { "id": <string>, "method": <string>, "params": <object> }
 //   Response:  { "id": <string>, "result": <any> }
 //   Error:     { "id": <string>, "error": <string> }
+//   Progress:  { "progress": { "id": <string>, "label": <string>, "detail"?: <string> } }
+//     — sent zero or more times BEFORE the matching Response, for live UI status
 //
 // Stdout = protocol channel only. All diagnostics go to stderr.
 //
@@ -34,9 +36,9 @@ const methods = {
   build_structure: async (params) => pickAgent(params).buildStructure(params),
   refine_structure: async (params) => pickAgent(params).refineStructure(params),
   generate_submodule: async (params) => pickAgent(params).generateSubmodule(params),
-  submodule_draft: async (params) => pickAgent(params).submoduleDraft(params),
-  submodule_review: async (params) => pickAgent(params).submoduleReview(params),
-  submodule_annotate: async (params) => pickAgent(params).submoduleAnnotate(params),
+  submodule_draft: async (params, ctx) => pickAgent(params).submoduleDraft(params, ctx),
+  submodule_review: async (params, ctx) => pickAgent(params).submoduleReview(params, ctx),
+  submodule_annotate: async (params, ctx) => pickAgent(params).submoduleAnnotate(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };
@@ -73,8 +75,20 @@ rl.on("line", async (line) => {
     return;
   }
   inflight++;
+  const ctx = {
+    progress(payload) {
+      if (!payload) return;
+      send({
+        progress: {
+          id,
+          label: String(payload.label ?? ""),
+          ...(payload.detail !== undefined ? { detail: String(payload.detail) } : {}),
+        },
+      });
+    },
+  };
   try {
-    const result = await handler(params ?? {});
+    const result = await handler(params ?? {}, ctx);
     send({ id, result });
   } catch (e) {
     log("handler error for", method, "—", e?.stack || String(e));

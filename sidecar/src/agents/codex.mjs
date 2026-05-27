@@ -29,6 +29,45 @@ async function runOnce(prompt, outputSchema) {
   return turn.finalResponse;
 }
 
+async function runStreamed(prompt, outputSchema, onProgress) {
+  if (!onProgress) return await runOnce(prompt, outputSchema);
+  const thread = codex.startThread(baseThreadOptions);
+  const stream = await thread.runStreamed(
+    prompt,
+    outputSchema ? { outputSchema } : undefined
+  );
+  let final = "";
+  for await (const ev of stream.events) {
+    if (ev.type === "item.started" || ev.type === "item.updated") {
+      const item = ev.item;
+      if (!item) continue;
+      if (item.type === "web_search" && item.query) {
+        onProgress({ label: "searching", detail: item.query });
+      } else if (item.type === "reasoning" && typeof item.text === "string" && item.text.trim()) {
+        const tail = item.text.replace(/\s+/g, " ").trim().slice(-100);
+        onProgress({ label: "thinking", detail: tail });
+      } else if (
+        item.type === "agent_message" &&
+        typeof item.text === "string" &&
+        item.text.trim()
+      ) {
+        const tail = item.text.replace(/\s+/g, " ").trim().slice(-100);
+        onProgress({ label: "writing", detail: tail });
+      } else if (item.type === "command_execution" && item.command) {
+        onProgress({ label: "running", detail: String(item.command).slice(0, 100) });
+      }
+    } else if (ev.type === "item.completed") {
+      const item = ev.item;
+      if (item?.type === "agent_message" && typeof item.text === "string") {
+        final = item.text;
+      }
+    } else if (ev.type === "error") {
+      throw new Error(ev.message || "codex stream error");
+    }
+  }
+  return final;
+}
+
 /**
  * @param {{ prompt: string }} params
  */
@@ -126,20 +165,23 @@ ${formatted}
 }
 
 /** Stage 1 — draft a fresh article. */
-export async function submoduleDraft(params) {
-  return { article: await draftArticleInternal(params) };
+export async function submoduleDraft(params, ctx) {
+  return { article: await draftArticleInternal(params, ctx?.progress) };
 }
 
-async function draftArticleInternal({
-  topic,
-  language,
-  courseMd,
-  structure,
-  memoryFiles,
-  modulePath,
-  submodulePath,
-  previousArticles,
-}) {
+async function draftArticleInternal(
+  {
+    topic,
+    language,
+    courseMd,
+    structure,
+    memoryFiles,
+    modulePath,
+    submodulePath,
+    previousArticles,
+  },
+  onProgress
+) {
   const lang = (language || "en").trim();
   const memoryBlock =
     memoryFiles && memoryFiles.length
@@ -175,7 +217,8 @@ ${terminologyGuide(lang)}
 
 Output ONLY the article markdown, no preamble, no JSON, no code fences around
 the whole thing.`;
-  const article = await runOnce(prompt);
+  onProgress?.({ label: "thinking" });
+  const article = await runStreamed(prompt, undefined, onProgress);
   if (!article || !article.trim()) {
     throw new Error("Codex returned empty article");
   }
@@ -193,11 +236,14 @@ const reviewSchema = {
 };
 
 /** Stage 2 — editor + fact-check + consistency pass. */
-export async function submoduleReview(params) {
-  return await reviewArticle(params);
+export async function submoduleReview(params, ctx) {
+  return await reviewArticle(params, ctx?.progress);
 }
 
-async function reviewArticle({ article, language, topic, previousArticles }) {
+async function reviewArticle(
+  { article, language, topic, previousArticles },
+  onProgress
+) {
   const lang = (language || "en").trim();
   const prompt = `You are reviewing one submodule article from a course on
 "${topic}" (language: ${lang}). Act as a careful editor + fact-checker.
@@ -224,7 +270,8 @@ ${terminologyGuide(lang)}
 
 Return the full revised article in "article" and a brief log of fixes in
 "notes" (empty string if nothing changed materially).`;
-  const text = await runOnce(prompt, reviewSchema);
+  onProgress?.({ label: "reviewing" });
+  const text = await runStreamed(prompt, reviewSchema, onProgress);
   const parsed = JSON.parse(text);
   return {
     article:
@@ -262,11 +309,11 @@ const annotateSchema = {
 };
 
 /** Stage 3 — insert image-placeholder widget markers. */
-export async function submoduleAnnotate(params) {
-  return await annotateImages(params);
+export async function submoduleAnnotate(params, ctx) {
+  return await annotateImages(params, ctx?.progress);
 }
 
-async function annotateImages({ article, language, topic }) {
+async function annotateImages({ article, language, topic }, onProgress) {
   const lang = (language || "en").trim();
   const prompt = `You are marking where images should appear in a course
 submodule article on "${topic}" (language: ${lang}).
@@ -296,7 +343,8 @@ ${terminologyGuide(lang)}
 
 If no images would help, return article unchanged and widgets as an empty
 object {}.`;
-  const text = await runOnce(prompt, annotateSchema);
+  onProgress?.({ label: "marking" });
+  const text = await runStreamed(prompt, annotateSchema, onProgress);
   const parsed = JSON.parse(text);
   return {
     article:

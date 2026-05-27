@@ -5,7 +5,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,15 +32,32 @@ struct Request<'a> {
 }
 
 #[derive(Deserialize)]
-struct Response {
+struct Envelope {
+    #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    progress: Option<ProgressPayload>,
 }
 
-type Pending = Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>;
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProgressPayload {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+pub enum SidecarMsg {
+    Progress(ProgressPayload),
+    Done(Result<Value, String>),
+}
+
+type Pending = Arc<Mutex<HashMap<String, mpsc::Sender<SidecarMsg>>>>;
 
 pub struct Sidecar {
     child: Mutex<Child>,
@@ -72,16 +89,24 @@ impl Sidecar {
                 if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Response>(&line) {
-                    Ok(resp) => {
-                        let Some(id) = resp.id else { continue };
+                match serde_json::from_str::<Envelope>(&line) {
+                    Ok(env) => {
+                        if let Some(progress) = env.progress {
+                            let pid = progress.id.clone();
+                            // Don't remove the entry — more messages will come.
+                            if let Some(tx) = pending_reader.lock().unwrap().get(&pid) {
+                                let _ = tx.send(SidecarMsg::Progress(progress));
+                            }
+                            continue;
+                        }
+                        let Some(id) = env.id else { continue };
                         let tx = pending_reader.lock().unwrap().remove(&id);
                         if let Some(tx) = tx {
-                            let payload = match resp.error {
+                            let payload = match env.error {
                                 Some(e) => Err(e),
-                                None => Ok(resp.result.unwrap_or(Value::Null)),
+                                None => Ok(env.result.unwrap_or(Value::Null)),
                             };
-                            let _ = tx.send(payload);
+                            let _ = tx.send(SidecarMsg::Done(payload));
                         }
                     }
                     Err(e) => eprintln!("[sidecar-reader] bad line: {e}: {line}"),
@@ -104,6 +129,19 @@ impl Sidecar {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, SidecarError> {
+        self.call_with_progress(method, params, timeout, |_| {})
+    }
+
+    pub fn call_with_progress<F>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        on_progress: F,
+    ) -> Result<Value, SidecarError>
+    where
+        F: Fn(ProgressPayload),
+    {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
@@ -121,16 +159,25 @@ impl Sidecar {
             stdin.flush()?;
         }
 
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(SidecarError::Remote(e)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
                 self.pending.lock().unwrap().remove(&id);
-                Err(SidecarError::Timeout)
+                return Err(SidecarError::Timeout);
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.pending.lock().unwrap().remove(&id);
-                Err(SidecarError::Dropped)
+            match rx.recv_timeout(deadline - now) {
+                Ok(SidecarMsg::Progress(p)) => on_progress(p),
+                Ok(SidecarMsg::Done(Ok(v))) => return Ok(v),
+                Ok(SidecarMsg::Done(Err(e))) => return Err(SidecarError::Remote(e)),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    return Err(SidecarError::Timeout);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    return Err(SidecarError::Dropped);
+                }
             }
         }
     }

@@ -839,6 +839,37 @@ button {
   align-items: center;
   gap: 8px;
 }
+.sub-generating-label .verb {
+  color: var(--text);
+  font-weight: 500;
+}
+.live-activity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 560px;
+}
+.live-detail {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  background: var(--surface-2);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  /* RTL keeps the *latest* characters visible when ellipsing long text. */
+}
+.live-detail::first-letter {
+  /* counter the RTL trick — punctuation stays correct */
+  direction: ltr;
+}
 
 .stage-strip {
   list-style: none;

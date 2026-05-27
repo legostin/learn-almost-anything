@@ -11,9 +11,25 @@ function terminologyGuide(lang) {
 }
 
 async function runOnce(prompt) {
+  return await runStreamed(prompt);
+}
+
+async function runStreamed(prompt, onProgress) {
   let text = "";
   for await (const message of query({ prompt, options: { maxTurns: 1 } })) {
-    if (message.type === "result" && message.subtype === "success") {
+    if (message.type === "assistant") {
+      const content = message.message?.content;
+      const chunk = Array.isArray(content)
+        ? content
+            .filter((b) => b?.type === "text")
+            .map((b) => b.text || "")
+            .join(" ")
+        : "";
+      if (chunk && onProgress) {
+        const tail = chunk.replace(/\s+/g, " ").trim().slice(-100);
+        if (tail) onProgress({ label: "writing", detail: tail });
+      }
+    } else if (message.type === "result" && message.subtype === "success") {
       text = message.result;
     }
   }
@@ -70,31 +86,23 @@ ${formatted}
  * Stage 1 — draft a fresh article using all available context.
  * @returns {Promise<{ article: string }>}
  */
-export async function submoduleDraft({
-  topic,
-  language,
-  courseMd,
-  structure,
-  memoryFiles,
-  modulePath,
-  submodulePath,
-  previousArticles,
-}) {
-  return { article: await draftArticleInternal({
-    topic, language, courseMd, structure, memoryFiles, modulePath, submodulePath, previousArticles,
-  }) };
+export async function submoduleDraft(params, ctx) {
+  return { article: await draftArticleInternal(params, ctx?.progress) };
 }
 
-async function draftArticleInternal({
-  topic,
-  language,
-  courseMd,
-  structure,
-  memoryFiles,
-  modulePath,
-  submodulePath,
-  previousArticles,
-}) {
+async function draftArticleInternal(
+  {
+    topic,
+    language,
+    courseMd,
+    structure,
+    memoryFiles,
+    modulePath,
+    submodulePath,
+    previousArticles,
+  },
+  onProgress
+) {
   const lang = (language || "en").trim();
   const memoryBlock =
     memoryFiles && memoryFiles.length
@@ -130,7 +138,8 @@ ${terminologyGuide(lang)}
 
 Output ONLY the article markdown, no preamble, no JSON, no code fences around
 the whole thing.`;
-  const article = await runOnce(prompt);
+  onProgress?.({ label: "thinking" });
+  const article = await runStreamed(prompt, onProgress);
   if (!article || !article.trim()) {
     throw new Error("LLM returned empty article");
   }
@@ -138,11 +147,14 @@ the whole thing.`;
 }
 
 /** Stage 2 — editor + fact-check + consistency pass. */
-export async function submoduleReview(params) {
-  return await reviewArticle(params);
+export async function submoduleReview(params, ctx) {
+  return await reviewArticle(params, ctx?.progress);
 }
 
-async function reviewArticle({ article, language, topic, previousArticles }) {
+async function reviewArticle(
+  { article, language, topic, previousArticles },
+  onProgress
+) {
   const lang = (language || "en").trim();
   const prompt = `You are reviewing one submodule article from a course on
 "${topic}" (language: ${lang}). Act as a careful editor + fact-checker.
@@ -169,7 +181,8 @@ ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line:
 {"article":"<full revised article markdown>","notes":"<1-3 sentences describing what you fixed; empty string if nothing>"}`;
-  const text = await runOnce(prompt);
+  onProgress?.({ label: "reviewing" });
+  const text = await runStreamed(prompt, onProgress);
   const parsed = extractJson(text);
   return {
     article:
@@ -181,11 +194,11 @@ Output ONLY a JSON object on a single line:
 }
 
 /** Stage 3 — insert image-placeholder widget markers. */
-export async function submoduleAnnotate(params) {
-  return await annotateImages(params);
+export async function submoduleAnnotate(params, ctx) {
+  return await annotateImages(params, ctx?.progress);
 }
 
-async function annotateImages({ article, language, topic }) {
+async function annotateImages({ article, language, topic }, onProgress) {
   const lang = (language || "en").trim();
   const prompt = `You are marking where images should appear in a course
 submodule article on "${topic}" (language: ${lang}).
@@ -215,7 +228,8 @@ ${terminologyGuide(lang)}
 Output ONLY a JSON object on a single line:
 {"article":"<article with widget markers inserted, otherwise verbatim>","widgets":{"img-1":{"type":"image","placeholder":true,"description":"<concrete description in ${lang}>","alt":"<short alt in ${lang}>"}}}
 If no images would help, return {"article":<unchanged article>,"widgets":{}}.`;
-  const text = await runOnce(prompt);
+  onProgress?.({ label: "marking" });
+  const text = await runStreamed(prompt, onProgress);
   const parsed = extractJson(text);
   return {
     article:
