@@ -1251,6 +1251,21 @@ function SubmoduleView({
     };
   }, [course, submoduleId, reloadTree]);
 
+  // Refresh tree as soon as Rust emits the first stage event for this sub —
+  // that's when the row flips from 'pending' to 'generating' and we should
+  // transition the page from the empty card to the stage strip.
+  useEffect(() => {
+    if (!course) return;
+    const unl = listen<StageEvent>("agent_stage", async (e) => {
+      const p = e.payload;
+      if (p.courseId !== course.id || p.submoduleId !== submoduleId) return;
+      if (state !== "generating") await reloadTree();
+    });
+    return () => {
+      unl.then((f) => f());
+    };
+  }, [course, submoduleId, reloadTree, state]);
+
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
   if (!sub && !tree) return <div className="placeholder">{t("loadingStructure")}</div>;
   if (!sub) return <div className="placeholder">{t("courseNotFound")}</div>;
@@ -1278,7 +1293,12 @@ function SubmoduleView({
           {state === "failed" && lastError && (
             <pre className="sub-error">{lastError}</pre>
           )}
-          <button onClick={() => onStartGen(submoduleId)}>
+          <button
+            onClick={async () => {
+              await onStartGen(submoduleId);
+              await reloadTree();
+            }}
+          >
             {state === "failed" ? t("subRetry") : t("subGenerate")}
           </button>
           {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
