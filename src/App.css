@@ -1031,6 +1031,70 @@ button {
   font-family: var(--font-mono);
 }
 
+.widget-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.widget-diagram-box {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  overflow-x: auto;
+  display: flex;
+  justify-content: center;
+}
+.widget-diagram-box svg {
+  max-width: 100%;
+  height: auto;
+}
+.widget-diagram-error {
+  width: 100%;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.widget-diagram-error-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--danger);
+}
+.widget-diagram-error-msg {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--danger);
+  white-space: pre-wrap;
+  margin: 0;
+}
+.widget-diagram-error details {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.widget-diagram-source {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: pre;
+  margin: 6px 0 0;
+}
+.widget-unknown {
+  padding: 12px 16px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
 .state-icon {
   display: inline-flex;
   align-items: center;

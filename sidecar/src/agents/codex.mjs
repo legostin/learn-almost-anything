@@ -164,10 +164,45 @@ ${formatted}
 `;
 }
 
-/** Stage 1 — draft a fresh article. */
+/** Stage 1 — draft a fresh article + initial widgets (images + diagrams). */
 export async function submoduleDraft(params, ctx) {
-  return { article: await draftArticleInternal(params, ctx?.progress) };
+  return await draftArticleInternal(params, ctx?.progress);
 }
+
+const draftSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    article: { type: "string" },
+    imageWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          alt: { type: "string" },
+        },
+        required: ["id", "description", "alt"],
+      },
+    },
+    diagramWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          source: { type: "string" },
+          caption: { type: "string" },
+        },
+        required: ["id", "source", "caption"],
+      },
+    },
+  },
+  required: ["article", "imageWidgets", "diagramWidgets"],
+};
 
 async function draftArticleInternal(
   {
@@ -213,16 +248,61 @@ overall course intro — assume the learner has the curriculum in front of them.
 When relevant, reference what was established in earlier submodules to build
 continuity. Never contradict them.
 
-${terminologyGuide(lang)}
+You may add visual-aid widgets where they meaningfully help. Mark insertion
+points with a single line, alone, with blank lines above and below:
 
-Output ONLY the article markdown, no preamble, no JSON, no code fences around
-the whole thing.`;
+  ::widget{type="image" id="img-1"}      (real-world photo or illustration)
+  ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
+
+Use 0-4 widgets total — skip them if the topic is purely textual prose.
+Diagrams are great for processes, hierarchies, state machines, sequences,
+component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
+
+Return widgets in two separate arrays:
+- imageWidgets: [{id, description (what to depict in ${lang}), alt (short alt in ${lang})}]
+- diagramWidgets: [{id, source (Mermaid source), caption (short caption in ${lang})}]
+
+If a category is unused, return an empty array [].
+
+${terminologyGuide(lang)}`;
   onProgress?.({ label: "thinking" });
-  const article = await runStreamed(prompt, undefined, onProgress);
-  if (!article || !article.trim()) {
-    throw new Error("Codex returned empty article");
+  const text = await runStreamed(prompt, draftSchema, onProgress);
+  const parsed = JSON.parse(text);
+  if (!parsed?.article || typeof parsed.article !== "string") {
+    throw new Error("Codex returned no article");
   }
-  return article.trim();
+  return {
+    article: parsed.article.trim(),
+    widgets: mergeWidgets(parsed.imageWidgets, parsed.diagramWidgets),
+  };
+}
+
+function mergeWidgets(imageWidgets, diagramWidgets) {
+  const out = {};
+  if (Array.isArray(imageWidgets)) {
+    for (const w of imageWidgets) {
+      if (w && typeof w.id === "string" && w.id.trim()) {
+        out[w.id.trim()] = {
+          type: "image",
+          placeholder: true,
+          description: typeof w.description === "string" ? w.description.trim() : "",
+          alt: typeof w.alt === "string" ? w.alt.trim() : "",
+        };
+      }
+    }
+  }
+  if (Array.isArray(diagramWidgets)) {
+    for (const w of diagramWidgets) {
+      if (w && typeof w.id === "string" && w.id.trim()) {
+        out[w.id.trim()] = {
+          type: "diagram",
+          source: typeof w.source === "string" ? w.source.trim() : "",
+          caption: typeof w.caption === "string" ? w.caption.trim() : "",
+        };
+      }
+    }
+  }
+  return out;
 }
 
 const reviewSchema = {
@@ -282,106 +362,72 @@ Return the full revised article in "article" and a brief log of fixes in
   };
 }
 
-// OpenAI strict structured output requires every property in `properties`
-// to also appear in `required` and does NOT support objects with dynamic
-// keys (`additionalProperties: <schema>`). So widgets is a tagged array
-// instead of an object keyed by id — we re-key it in JS after parsing.
-const annotateSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    article: { type: "string" },
-    widgets: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          id: { type: "string" },
-          type: { type: "string" },
-          placeholder: { type: "boolean" },
-          description: { type: "string" },
-          alt: { type: "string" },
-        },
-        required: ["id", "type", "placeholder", "description", "alt"],
-      },
-    },
-  },
-  required: ["article", "widgets"],
-};
-
-/** Stage 3 — insert image-placeholder widget markers. */
+/**
+ * Stage 3 — validate widgets. JS-only Mermaid sanity check; flags bad
+ * diagrams so the UI can render an error block. No LLM call yet — kept
+ * thin to allow LLM-assisted fix later.
+ */
 export async function submoduleAnnotate(params, ctx) {
-  return await annotateImages(params, ctx?.progress);
-}
-
-async function annotateImages({ article, language, topic }, onProgress) {
-  const lang = (language || "en").trim();
-  const prompt = `You are marking where images should appear in a course
-submodule article on "${topic}" (language: ${lang}).
-
-Insert image placeholder widgets at the BEST spots — places where a diagram,
-photo, illustration, schema, or chart would meaningfully help comprehension.
-Use 1-4 placeholders depending on how visual the topic is (zero is acceptable
-for purely abstract topics).
-
-Widget marker syntax — a single line, alone, with blank lines above and below:
-
-::widget{type="image" id="img-1"}
-
-Use ids "img-1", "img-2", ... — small integers.
-
-Each placeholder also gets metadata in the widgets map. "description" must be
-a precise instruction for whoever will later source the image — what should be
-depicted, the style, what to avoid. "alt" is short alt text. "placeholder" is
-true for all of these (we'll later replace with real images).
-
-Article:
-<article>
-${article}
-</article>
-
-${terminologyGuide(lang)}
-
-If no images would help, return article unchanged and widgets as an empty
-array [].
-
-The "widgets" field is an ARRAY for schema compatibility. Each entry must
-include its own "id" (e.g. "img-1") that matches the marker in the article.`;
-  onProgress?.({ label: "marking" });
-  const text = await runStreamed(prompt, annotateSchema, onProgress);
-  const parsed = JSON.parse(text);
-  const widgetsMap = {};
-  if (Array.isArray(parsed?.widgets)) {
-    for (const w of parsed.widgets) {
-      if (w && typeof w.id === "string" && w.id.trim()) {
-        const { id, ...rest } = w;
-        widgetsMap[id.trim()] = rest;
+  ctx?.progress?.({ label: "validating" });
+  const widgets = params?.widgets || {};
+  const out = {};
+  let bad = 0;
+  let checked = 0;
+  for (const [id, w] of Object.entries(widgets)) {
+    if (w?.type === "diagram") {
+      checked++;
+      const issue = mermaidIssue(w.source);
+      if (issue) {
+        bad++;
+        out[id] = { ...w, error: issue };
+        ctx?.progress?.({ label: "validating", detail: `${id}: ${issue}` });
+      } else {
+        out[id] = w;
       }
+    } else {
+      out[id] = w;
     }
   }
-  return {
-    article:
-      typeof parsed?.article === "string" && parsed.article.trim()
-        ? parsed.article.trim()
-        : article,
-    widgets: widgetsMap,
-  };
+  const notes = bad > 0 ? `Mermaid validation: ${bad}/${checked} diagram(s) flagged.` : "";
+  return { article: params.article, widgets: out, notes };
+}
+
+function mermaidIssue(source) {
+  const s = (source || "").trim();
+  if (!s) return "empty source";
+  const KNOWN = new Set([
+    "graph", "flowchart", "sequenceDiagram", "classDiagram",
+    "stateDiagram", "stateDiagram-v2", "erDiagram", "journey",
+    "gantt", "pie", "gitGraph", "C4Context", "mindmap", "timeline",
+    "quadrantChart", "block-beta", "sankey-beta", "xychart-beta",
+    "packet-beta", "requirementDiagram",
+  ]);
+  const first = s.split(/\s+/, 1)[0];
+  if (!KNOWN.has(first)) return `unknown diagram type "${first}"`;
+  const counts = (re) => (s.match(re) || []).length;
+  if (counts(/\[/g) !== counts(/\]/g)) return "unbalanced square brackets";
+  if (counts(/\{/g) !== counts(/\}/g)) return "unbalanced curly brackets";
+  if (counts(/\(/g) !== counts(/\)/g)) return "unbalanced parentheses";
+  return null;
 }
 
 /**
- * @param {{topic:string, language:string, courseMd:string, structure:object, memoryFiles:{filename:string,content:string}[], modulePath:{title:string,summary:string}, submodulePath:{title:string,summary:string}, previousArticles:{moduleTitle:string,submoduleTitle:string,article:string}[]}} params
+ * Composite kept for back-compat / smoke tests. Rust drives the stages
+ * individually for per-stage progress events.
  */
 export async function generateSubmodule(params) {
   if (!params.modulePath?.title || !params.submodulePath?.title) {
     throw new Error("modulePath and submodulePath must include titles");
   }
-  const draft = await draftArticleInternal(params);
-  const reviewed = await reviewArticle({ ...params, article: draft });
-  const annotated = await annotateImages({ ...params, article: reviewed.article });
+  const drafted = await draftArticleInternal(params);
+  const reviewed = await reviewArticle({ ...params, article: drafted.article });
+  const validated = await submoduleAnnotate(
+    { article: reviewed.article, widgets: drafted.widgets },
+    undefined
+  );
   return {
-    article: annotated.article,
-    widgets: annotated.widgets,
+    article: validated.article,
+    widgets: validated.widgets,
     review_notes: reviewed.notes,
   };
 }

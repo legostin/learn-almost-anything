@@ -83,11 +83,12 @@ ${formatted}
 }
 
 /**
- * Stage 1 — draft a fresh article using all available context.
- * @returns {Promise<{ article: string }>}
+ * Stage 1 — draft a fresh article. Now also picks visual aids (image
+ * placeholders and Mermaid diagrams) and embeds widget markers inline.
+ * @returns {Promise<{ article: string, widgets: object }>}
  */
 export async function submoduleDraft(params, ctx) {
-  return { article: await draftArticleInternal(params, ctx?.progress) };
+  return await draftArticleInternal(params, ctx?.progress);
 }
 
 async function draftArticleInternal(
@@ -134,16 +135,60 @@ overall course intro — assume the learner has the curriculum in front of them.
 When relevant, reference what was established in earlier submodules to build
 continuity. Never contradict them.
 
+You may add visual-aid widgets where they meaningfully help. Mark insertion
+points with a single line, alone, with blank lines above and below:
+
+  ::widget{type="image" id="img-1"}      (real-world photo or illustration)
+  ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
+
+Use 0-4 widgets total — skip them if the topic is purely textual prose.
+Diagrams are great for processes, hierarchies, state machines, sequences,
+component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
+
 ${terminologyGuide(lang)}
 
-Output ONLY the article markdown, no preamble, no JSON, no code fences around
-the whole thing.`;
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"article":"<markdown with widget markers>","widgets":[<widget objects>]}
+
+Each widget object:
+- image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>"}
+- diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
+
+If no widgets, use [].`;
   onProgress?.({ label: "thinking" });
-  const article = await runStreamed(prompt, onProgress);
-  if (!article || !article.trim()) {
-    throw new Error("LLM returned empty article");
+  const text = await runStreamed(prompt, onProgress);
+  const parsed = extractJson(text);
+  if (!parsed?.article || typeof parsed.article !== "string") {
+    throw new Error("LLM returned no article");
   }
-  return article.trim();
+  return {
+    article: parsed.article.trim(),
+    widgets: normalizeWidgets(parsed.widgets),
+  };
+}
+
+function normalizeWidgets(raw) {
+  const out = {};
+  if (!Array.isArray(raw)) return out;
+  for (const w of raw) {
+    if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
+    const id = w.id.trim();
+    if (w.type === "image") {
+      out[id] = {
+        type: "image",
+        placeholder: true,
+        description: typeof w.description === "string" ? w.description.trim() : "",
+        alt: typeof w.alt === "string" ? w.alt.trim() : "",
+      };
+    } else if (w.type === "diagram") {
+      out[id] = {
+        type: "diagram",
+        source: typeof w.source === "string" ? w.source.trim() : "",
+        caption: typeof w.caption === "string" ? w.caption.trim() : "",
+      };
+    }
+  }
+  return out;
 }
 
 /** Stage 2 — editor + fact-check + consistency pass. */
@@ -193,54 +238,61 @@ Output ONLY a JSON object on a single line:
   };
 }
 
-/** Stage 3 — insert image-placeholder widget markers. */
+/**
+ * Stage 3 — validate widgets. Currently a fast JS-side Mermaid sanity
+ * check; invalid diagrams get flagged so the UI can render an error
+ * instead of a broken SVG. Same exported name (submoduleAnnotate) for
+ * dispatcher back-compat — kept thin to allow future LLM-assisted fix.
+ */
 export async function submoduleAnnotate(params, ctx) {
-  return await annotateImages(params, ctx?.progress);
+  return await validateWidgets(params, ctx?.progress);
 }
 
-async function annotateImages({ article, language, topic }, onProgress) {
-  const lang = (language || "en").trim();
-  const prompt = `You are marking where images should appear in a course
-submodule article on "${topic}" (language: ${lang}).
+async function validateWidgets({ article, widgets }, onProgress) {
+  onProgress?.({ label: "validating" });
+  const out = {};
+  let checked = 0;
+  let bad = 0;
+  for (const [id, w] of Object.entries(widgets || {})) {
+    if (w?.type === "diagram") {
+      checked++;
+      const issue = mermaidIssue(w.source);
+      if (issue) {
+        bad++;
+        out[id] = { ...w, error: issue };
+        onProgress?.({ label: "validating", detail: `${id}: ${issue}` });
+      } else {
+        out[id] = w;
+      }
+    } else {
+      out[id] = w;
+    }
+  }
+  const notes = bad > 0 ? `Mermaid validation: ${bad}/${checked} diagram(s) flagged.` : "";
+  return { article, widgets: out, notes };
+}
 
-Insert image placeholder widgets at the BEST spots — places where a diagram,
-photo, illustration, schema, or chart would meaningfully help comprehension.
-Use 1-4 placeholders depending on how visual the topic is (zero is acceptable
-for purely abstract topics).
-
-Widget marker syntax — a single line, alone, with blank lines above and below:
-
-::widget{type="image" id="img-1"}
-
-Use ids "img-1", "img-2", ... — small integers.
-
-Each placeholder also gets metadata in the widgets map. "description" must be
-a precise instruction for whoever will later source the image — what should be
-depicted, the style, what to avoid. "alt" is short alt text.
-
-Article:
-<article>
-${article}
-</article>
-
-${terminologyGuide(lang)}
-
-Output ONLY a JSON object on a single line:
-{"article":"<article with widget markers inserted, otherwise verbatim>","widgets":{"img-1":{"type":"image","placeholder":true,"description":"<concrete description in ${lang}>","alt":"<short alt in ${lang}>"}}}
-If no images would help, return {"article":<unchanged article>,"widgets":{}}.`;
-  onProgress?.({ label: "marking" });
-  const text = await runStreamed(prompt, onProgress);
-  const parsed = extractJson(text);
-  return {
-    article:
-      typeof parsed?.article === "string" && parsed.article.trim()
-        ? parsed.article.trim()
-        : article,
-    widgets:
-      parsed && typeof parsed.widgets === "object" && parsed.widgets !== null
-        ? parsed.widgets
-        : {},
-  };
+// First-line shape check. Catches the most common LLM mistake of writing
+// prose instead of Mermaid, or using an unknown diagram type. Not a full
+// parser — but cheap and catches >90% of garbage.
+function mermaidIssue(source) {
+  const s = (source || "").trim();
+  if (!s) return "empty source";
+  const KNOWN = new Set([
+    "graph", "flowchart", "sequenceDiagram", "classDiagram",
+    "stateDiagram", "stateDiagram-v2", "erDiagram", "journey",
+    "gantt", "pie", "gitGraph", "C4Context", "mindmap", "timeline",
+    "quadrantChart", "block-beta", "sankey-beta", "xychart-beta",
+    "packet-beta", "requirementDiagram",
+  ]);
+  const first = s.split(/\s+/, 1)[0];
+  if (!KNOWN.has(first)) return `unknown diagram type "${first}"`;
+  // Roughly balanced brackets — catches truncated output.
+  const counts = (re) => (s.match(re) || []).length;
+  if (counts(/\[/g) !== counts(/\]/g)) return "unbalanced square brackets";
+  if (counts(/\{/g) !== counts(/\}/g)) return "unbalanced curly brackets";
+  if (counts(/\(/g) !== counts(/\)/g)) return "unbalanced parentheses";
+  return null;
 }
 
 /**
@@ -252,19 +304,19 @@ If no images would help, return {"article":<unchanged article>,"widgets":{}}.`;
  * @returns {Promise<{ article: string, widgets: object, review_notes: string }>}
  */
 /**
- * Composite — kept for back-compat / smoke tests. Rust now drives the three
+ * Composite — kept for back-compat / smoke tests. Rust drives the three
  * stages individually so it can emit per-stage progress events.
  */
 export async function generateSubmodule(params) {
   if (!params.modulePath?.title || !params.submodulePath?.title) {
     throw new Error("modulePath and submodulePath must include titles");
   }
-  const draft = await draftArticleInternal(params);
-  const reviewed = await reviewArticle({ ...params, article: draft });
-  const annotated = await annotateImages({ ...params, article: reviewed.article });
+  const drafted = await draftArticleInternal(params);
+  const reviewed = await reviewArticle({ ...params, article: drafted.article });
+  const validated = await validateWidgets({ article: reviewed.article, widgets: drafted.widgets });
   return {
-    article: annotated.article,
-    widgets: annotated.widgets,
+    article: validated.article,
+    widgets: validated.widgets,
     review_notes: reviewed.notes,
   };
 }

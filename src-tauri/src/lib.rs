@@ -428,7 +428,7 @@ fn spawn_generate_submodule(
             }
         };
 
-        // Stage 1 — draft
+        // Stage 1 — draft (article + initial widgets)
         emit_stage_event(&app2, &cid, &sid, "draft");
         let draft = match sidecar.call_with_progress(
             "submodule_draft",
@@ -443,6 +443,10 @@ fn spawn_generate_submodule(
             Some(s) if !s.is_empty() => s.to_string(),
             _ => return fail(&db, &app2, &cid, &sid, "draft returned empty article".into()),
         };
+        let draft_widgets = draft
+            .get("widgets")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
         // Stage 2 — review
         emit_stage_event(&app2, &cid, &sid, "review");
@@ -468,36 +472,53 @@ fn spawn_generate_submodule(
             .unwrap_or("")
             .to_string();
 
-        // Stage 3 — annotate images. Soft-fail: if this stage errors, we
-        // still ship the reviewed article without widget markers. Image
-        // placeholders are nice-to-have, not blocking.
+        // Stage 3 — validate widgets. JS-only Mermaid sanity check; no LLM
+        // call. Diagrams that fail validation are kept but flagged so the
+        // UI shows an error block. Soft-fail.
         emit_stage_event(&app2, &cid, &sid, "annotate");
-        let mut annotate_params = common.clone();
-        annotate_params["article"] = json!(reviewed_article);
+        let mut validate_params = json!({
+            "backend": course.agent,
+            "article": reviewed_article,
+            "widgets": draft_widgets,
+        });
         let (final_article, widgets, mut combined_notes) = match sidecar.call_with_progress(
             "submodule_annotate",
-            annotate_params,
-            Duration::from_secs(180),
+            validate_params.take(),
+            Duration::from_secs(60),
             make_progress_cb("annotate"),
         ) {
-            Ok(v) => (
-                v.get("article")
-                    .and_then(|a| a.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| reviewed_article.clone()),
-                v.get("widgets").cloned().unwrap_or_else(|| json!({})),
-                notes.clone(),
-            ),
+            Ok(v) => {
+                let extra_notes = v
+                    .get("notes")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mut combined = notes.clone();
+                if !extra_notes.is_empty() {
+                    if !combined.is_empty() {
+                        combined.push_str("\n\n");
+                    }
+                    combined.push_str(&extra_notes);
+                }
+                (
+                    v.get("article")
+                        .and_then(|a| a.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| reviewed_article.clone()),
+                    v.get("widgets").cloned().unwrap_or_else(|| draft_widgets.clone()),
+                    combined,
+                )
+            }
             Err(e) => {
-                eprintln!("[generate_submodule] annotate stage failed (soft): {e}");
+                eprintln!("[generate_submodule] validate stage failed (soft): {e}");
                 let mut n = notes.clone();
                 if !n.is_empty() {
                     n.push_str("\n\n");
                 }
                 n.push_str(&format!(
-                    "_Стадия разметки иллюстраций не выполнена: {e}. Статья сохранена без виджетов._"
+                    "_Стадия валидации виджетов не выполнена: {e}. Виджеты сохранены без проверки._"
                 ));
-                (reviewed_article.clone(), json!({}), n)
+                (reviewed_article.clone(), draft_widgets.clone(), n)
             }
         };
         let notes = std::mem::take(&mut combined_notes);

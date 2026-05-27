@@ -65,7 +65,7 @@ const STRINGS = {
     backToCourse: "← К курсу",
     stageDraft: "Черновик",
     stageReview: "Редактура",
-    stageAnnotate: "Иллюстрации",
+    stageAnnotate: "Валидация",
     stagePendingHint: "Сабмодуль ещё не сгенерирован.",
     stageFailedHint: "Прошлая генерация не удалась. Можно попробовать снова.",
     stageRunning: "Идёт генерация…",
@@ -74,9 +74,12 @@ const STRINGS = {
     actSearching: "ищет",
     actReviewing: "редактирует",
     actMarking: "размечает иллюстрации",
+    actValidating: "проверяет диаграммы",
     actRunning: "выполняет",
     widgetImage: "Картинка-заглушка",
     widgetImageAlt: "alt:",
+    widgetDiagramError: "Ошибка диаграммы",
+    widgetUnknown: "Неизвестный виджет",
 
     refineTitle: "Доработать с агентом",
     refineSub:
@@ -155,7 +158,7 @@ const STRINGS = {
     backToCourse: "← Back to course",
     stageDraft: "Draft",
     stageReview: "Review",
-    stageAnnotate: "Illustrations",
+    stageAnnotate: "Validation",
     stagePendingHint: "This submodule has not been generated yet.",
     stageFailedHint: "Previous generation failed. You can try again.",
     stageRunning: "Generation in progress…",
@@ -164,9 +167,12 @@ const STRINGS = {
     actSearching: "searching",
     actReviewing: "reviewing",
     actMarking: "marking up images",
+    actValidating: "validating diagrams",
     actRunning: "running",
     widgetImage: "Image placeholder",
     widgetImageAlt: "alt:",
+    widgetDiagramError: "Diagram error",
+    widgetUnknown: "Unknown widget",
 
     refineTitle: "Refine with agent",
     refineSub:

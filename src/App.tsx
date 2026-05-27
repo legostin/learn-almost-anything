@@ -1051,12 +1051,10 @@ type SubmoduleContent = {
   review_notes: string;
 };
 
-type WidgetData = {
-  type: string;
-  placeholder?: boolean;
-  description?: string;
-  alt?: string;
-};
+type WidgetData =
+  | { type: "image"; placeholder?: boolean; description?: string; alt?: string }
+  | { type: "diagram"; source: string; caption?: string; error?: string }
+  | { type: string; [k: string]: any };
 
 function SubmoduleView({
   course,
@@ -1195,6 +1193,7 @@ const ACT_KEYS: Record<string, string> = {
   searching: "actSearching",
   reviewing: "actReviewing",
   marking: "actMarking",
+  validating: "actValidating",
   running: "actRunning",
 };
 
@@ -1271,10 +1270,28 @@ function ArticleReader({
         p.kind === "md" ? (
           <ReactMarkdown key={i}>{p.text}</ReactMarkdown>
         ) : (
-          <WidgetPlaceholder key={i} id={p.id} widget={widgets[p.id]} />
+          <WidgetRenderer key={i} id={p.id} widget={widgets[p.id]} />
         )
       )}
     </article>
+  );
+}
+
+function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
+  const t = useT();
+  if (!widget) {
+    return (
+      <div className="widget widget-unknown">
+        {t("widgetUnknown")} <span className="widget-id">#{id}</span>
+      </div>
+    );
+  }
+  if (widget.type === "image") return <ImagePlaceholder id={id} widget={widget as any} />;
+  if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
+  return (
+    <div className="widget widget-unknown">
+      {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
+    </div>
   );
 }
 
@@ -1293,7 +1310,13 @@ function splitWidgetMarkers(md: string) {
   return out;
 }
 
-function WidgetPlaceholder({ id, widget }: { id: string; widget?: WidgetData }) {
+function ImagePlaceholder({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { description?: string; alt?: string };
+}) {
   const t = useT();
   return (
     <figure className="widget widget-image">
@@ -1312,6 +1335,73 @@ function WidgetPlaceholder({ id, widget }: { id: string; widget?: WidgetData }) 
           )}
         </figcaption>
       )}
+    </figure>
+  );
+}
+
+function DiagramWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { source: string; caption?: string; error?: string };
+}) {
+  const t = useT();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [renderError, setRenderError] = useState<string | null>(widget.error ?? null);
+
+  useEffect(() => {
+    if (widget.error) {
+      setRenderError(widget.error);
+      return;
+    }
+    if (!containerRef.current) return;
+    let cancelled = false;
+    setRenderError(null);
+    (async () => {
+      try {
+        const mermaidMod = await import("mermaid");
+        const mermaid = mermaidMod.default;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme:
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "default",
+          securityLevel: "loose",
+        });
+        const renderId = `mermaid-${id}-${Math.random().toString(36).slice(2, 8)}`;
+        const { svg } = await mermaid.render(renderId, widget.source);
+        if (!cancelled && containerRef.current) {
+          containerRef.current.innerHTML = svg;
+        }
+      } catch (e: any) {
+        if (!cancelled) setRenderError(String(e?.message ?? e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [widget.source, widget.error, id]);
+
+  return (
+    <figure className="widget widget-diagram">
+      {renderError ? (
+        <div className="widget-diagram-error">
+          <div className="widget-diagram-error-label">
+            {t("widgetDiagramError")} <span className="widget-id">#{id}</span>
+          </div>
+          <pre className="widget-diagram-error-msg">{renderError}</pre>
+          <details>
+            <summary>source</summary>
+            <pre className="widget-diagram-source">{widget.source}</pre>
+          </details>
+        </div>
+      ) : (
+        <div className="widget-diagram-box" ref={containerRef} />
+      )}
+      {widget.caption && <figcaption>{widget.caption}</figcaption>}
     </figure>
   );
 }
