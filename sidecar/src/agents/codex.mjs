@@ -125,7 +125,12 @@ ${formatted}
 `;
 }
 
-async function draftArticle({
+/** Stage 1 — draft a fresh article. */
+export async function submoduleDraft(params) {
+  return { article: await draftArticleInternal(params) };
+}
+
+async function draftArticleInternal({
   topic,
   language,
   courseMd,
@@ -186,6 +191,11 @@ const reviewSchema = {
   },
   required: ["article", "notes"],
 };
+
+/** Stage 2 — editor + fact-check + consistency pass. */
+export async function submoduleReview(params) {
+  return await reviewArticle(params);
+}
 
 async function reviewArticle({ article, language, topic, previousArticles }) {
   const lang = (language || "en").trim();
@@ -248,6 +258,11 @@ const annotateSchema = {
   required: ["article", "widgets"],
 };
 
+/** Stage 3 — insert image-placeholder widget markers. */
+export async function submoduleAnnotate(params) {
+  return await annotateImages(params);
+}
+
 async function annotateImages({ article, language, topic }) {
   const lang = (language || "en").trim();
   const prompt = `You are marking where images should appear in a course
@@ -299,7 +314,7 @@ export async function generateSubmodule(params) {
   if (!params.modulePath?.title || !params.submodulePath?.title) {
     throw new Error("modulePath and submodulePath must include titles");
   }
-  const draft = await draftArticle(params);
+  const draft = await draftArticleInternal(params);
   const reviewed = await reviewArticle({ ...params, article: draft });
   const annotated = await annotateImages({ ...params, article: reviewed.article });
   return {

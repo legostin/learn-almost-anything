@@ -66,7 +66,26 @@ ${formatted}
 `;
 }
 
-async function draftArticle({
+/**
+ * Stage 1 — draft a fresh article using all available context.
+ * @returns {Promise<{ article: string }>}
+ */
+export async function submoduleDraft({
+  topic,
+  language,
+  courseMd,
+  structure,
+  memoryFiles,
+  modulePath,
+  submodulePath,
+  previousArticles,
+}) {
+  return { article: await draftArticleInternal({
+    topic, language, courseMd, structure, memoryFiles, modulePath, submodulePath, previousArticles,
+  }) };
+}
+
+async function draftArticleInternal({
   topic,
   language,
   courseMd,
@@ -118,6 +137,11 @@ the whole thing.`;
   return article.trim();
 }
 
+/** Stage 2 — editor + fact-check + consistency pass. */
+export async function submoduleReview(params) {
+  return await reviewArticle(params);
+}
+
 async function reviewArticle({ article, language, topic, previousArticles }) {
   const lang = (language || "en").trim();
   const prompt = `You are reviewing one submodule article from a course on
@@ -154,6 +178,11 @@ Output ONLY a JSON object on a single line:
         : article,
     notes: typeof parsed?.notes === "string" ? parsed.notes.trim() : "",
   };
+}
+
+/** Stage 3 — insert image-placeholder widget markers. */
+export async function submoduleAnnotate(params) {
+  return await annotateImages(params);
 }
 
 async function annotateImages({ article, language, topic }) {
@@ -208,11 +237,15 @@ If no images would help, return {"article":<unchanged article>,"widgets":{}}.`;
  * @param {{topic:string, language:string, courseMd:string, structure:object, memoryFiles:{filename:string,content:string}[], modulePath:{title:string,summary:string}, submodulePath:{title:string,summary:string}, previousArticles:{moduleTitle:string,submoduleTitle:string,article:string}[]}} params
  * @returns {Promise<{ article: string, widgets: object, review_notes: string }>}
  */
+/**
+ * Composite — kept for back-compat / smoke tests. Rust now drives the three
+ * stages individually so it can emit per-stage progress events.
+ */
 export async function generateSubmodule(params) {
   if (!params.modulePath?.title || !params.submodulePath?.title) {
     throw new Error("modulePath and submodulePath must include titles");
   }
-  const draft = await draftArticle(params);
+  const draft = await draftArticleInternal(params);
   const reviewed = await reviewArticle({ ...params, article: draft });
   const annotated = await annotateImages({ ...params, article: reviewed.article });
   return {

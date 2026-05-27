@@ -499,6 +499,33 @@ pub fn write_submodule_review_notes(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+pub struct SubmoduleContent {
+    pub article: String,
+    pub widgets: serde_json::Value,
+    pub review_notes: String,
+}
+
+pub fn read_submodule_content(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+) -> Result<SubmoduleContent, CourseError> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    let article = fs::read_to_string(dir.join("article.md"))?;
+    let widgets = fs::read_to_string(dir.join("widgets.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let review_notes = fs::read_to_string(dir.join("review_notes.md")).unwrap_or_default();
+    Ok(SubmoduleContent {
+        article,
+        widgets,
+        review_notes,
+    })
+}
+
 /// Collect previously-generated submodule articles in curriculum order,
 /// stopping just before `until_sub_id`. Skips submodules whose article.md
 /// is not on disk yet.

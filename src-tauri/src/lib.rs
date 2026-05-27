@@ -16,6 +16,7 @@ use db::{Course, Db};
 use sidecar::Sidecar;
 
 const JOB_EVENT: &str = "agent_job";
+const STAGE_EVENT: &str = "agent_stage";
 
 #[tauri::command]
 fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String> {
@@ -64,6 +65,17 @@ fn save_wizard_answers(
 ) -> Result<(), String> {
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
     courses::save_wizard_answers(&conn, &paths, &course_id, &answers).map_err(|e| e.to_string())
+}
+
+fn emit_stage_event(app: &AppHandle, course_id: &str, submodule_id: &str, stage: &str) {
+    let _ = app.emit(
+        STAGE_EVENT,
+        json!({
+            "courseId": course_id,
+            "submoduleId": submodule_id,
+            "stage": stage,
+        }),
+    );
 }
 
 fn emit_job_event(app: &AppHandle, course_id: &str, kind: &str, payload: serde_json::Value) {
@@ -375,7 +387,7 @@ fn spawn_generate_submodule(
     };
 
     thread::spawn(move || {
-        let params = json!({
+        let common = json!({
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
@@ -386,31 +398,67 @@ fn spawn_generate_submodule(
             "modulePath": { "title": module_title, "summary": module_summary },
             "submodulePath": { "title": sub_title, "summary": sub_summary },
         });
-        // Three-stage pipeline runs inside the sidecar; budget accordingly.
-        let result = sidecar.call("generate_submodule", params, Duration::from_secs(720));
-        let v = match result {
+
+        // Stage 1 — draft
+        emit_stage_event(&app2, &cid, &sid, "draft");
+        let draft = match sidecar.call("submodule_draft", common.clone(), Duration::from_secs(240)) {
             Ok(v) => v,
-            Err(e) => return fail(&db, &app2, &cid, &sid, e.to_string()),
+            Err(e) => return fail(&db, &app2, &cid, &sid, format!("draft: {e}")),
         };
-        let article = match v.get("article").and_then(|a| a.as_str()) {
+        let draft_article = match draft.get("article").and_then(|a| a.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => return fail(&db, &app2, &cid, &sid, "sidecar returned empty article".into()),
+            _ => return fail(&db, &app2, &cid, &sid, "draft returned empty article".into()),
         };
-        if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &article) {
-            return fail(&db, &app2, &cid, &sid, e.to_string());
-        }
-        let widgets = v
+
+        // Stage 2 — review
+        emit_stage_event(&app2, &cid, &sid, "review");
+        let mut review_params = common.clone();
+        review_params["article"] = json!(draft_article);
+        let reviewed = match sidecar.call("submodule_review", review_params, Duration::from_secs(240)) {
+            Ok(v) => v,
+            Err(e) => return fail(&db, &app2, &cid, &sid, format!("review: {e}")),
+        };
+        let reviewed_article = reviewed
+            .get("article")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or(draft_article);
+        let notes = reviewed
+            .get("notes")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Stage 3 — annotate images
+        emit_stage_event(&app2, &cid, &sid, "annotate");
+        let mut annotate_params = common.clone();
+        annotate_params["article"] = json!(reviewed_article);
+        let annotated = match sidecar.call(
+            "submodule_annotate",
+            annotate_params,
+            Duration::from_secs(180),
+        ) {
+            Ok(v) => v,
+            Err(e) => return fail(&db, &app2, &cid, &sid, format!("annotate: {e}")),
+        };
+        let final_article = annotated
+            .get("article")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or(reviewed_article);
+        let widgets = annotated
             .get("widgets")
             .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+            .unwrap_or_else(|| json!({}));
+
+        // Persist
+        if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &final_article) {
+            return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
         if let Err(e) = courses::write_submodule_widgets(&paths, &cid, &mid, &sid, &widgets) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
         }
-        let notes = v
-            .get("review_notes")
-            .and_then(|n| n.as_str())
-            .unwrap_or("");
-        if let Err(e) = courses::write_submodule_review_notes(&paths, &cid, &mid, &sid, notes) {
+        if let Err(e) = courses::write_submodule_review_notes(&paths, &cid, &mid, &sid, &notes) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
         }
         if let Ok(c) = db.0.lock() {
@@ -424,6 +472,17 @@ fn spawn_generate_submodule(
         );
     });
     Ok(())
+}
+
+#[tauri::command]
+fn read_submodule_article(
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+) -> Result<courses::SubmoduleContent, String> {
+    courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -584,7 +643,8 @@ pub fn run() {
             start_structure_refine,
             accept_structure_refinement,
             start_generate_submodule,
-            start_first_pending_submodule
+            start_first_pending_submodule,
+            read_submodule_article
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

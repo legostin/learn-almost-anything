@@ -34,6 +34,9 @@ const methods = {
   build_structure: async (params) => pickAgent(params).buildStructure(params),
   refine_structure: async (params) => pickAgent(params).refineStructure(params),
   generate_submodule: async (params) => pickAgent(params).generateSubmodule(params),
+  submodule_draft: async (params) => pickAgent(params).submoduleDraft(params),
+  submodule_review: async (params) => pickAgent(params).submoduleReview(params),
+  submodule_annotate: async (params) => pickAgent(params).submoduleAnnotate(params),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };
