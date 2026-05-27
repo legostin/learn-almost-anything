@@ -17,7 +17,7 @@ type Course = {
   updated_at: number;
 };
 
-type Question = { text: string; options: string[] };
+type Question = { text: string; options: string[]; multi?: boolean };
 
 type GenState = "pending" | "generating" | "ready" | "failed";
 
@@ -513,7 +513,7 @@ function Wizard({
   return <AnsweringForm course={course} questions={questions} onSaved={onSaved} />;
 }
 
-type Answer = { selectedIndex: number | null; custom: string };
+type Answer = { selected: number[]; custom: string };
 
 function AnsweringForm({
   course,
@@ -526,7 +526,7 @@ function AnsweringForm({
 }) {
   const t = useT();
   const [answers, setAnswers] = useState<Answer[]>(
-    questions.map(() => ({ selectedIndex: null, custom: "" }))
+    questions.map(() => ({ selected: [], custom: "" }))
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -535,12 +535,30 @@ function AnsweringForm({
     setAnswers((prev) => prev.map((a, j) => (j === i ? { ...a, ...patch } : a)));
   }
 
+  function toggleOption(i: number, optIdx: number) {
+    const q = questions[i];
+    const isMulti = q.multi !== false;
+    const cur = answers[i].selected;
+    if (isMulti) {
+      const has = cur.includes(optIdx);
+      setAnswer(i, {
+        selected: has ? cur.filter((x) => x !== optIdx) : [...cur, optIdx].sort((a, b) => a - b),
+      });
+    } else {
+      setAnswer(i, { selected: cur[0] === optIdx ? [] : [optIdx] });
+    }
+  }
+
   function resolveAnswer(i: number): string {
+    const q = questions[i];
     const a = answers[i];
     const custom = a.custom.trim();
-    if (custom) return custom;
-    if (a.selectedIndex !== null) return questions[i].options[a.selectedIndex] ?? "";
-    return "";
+    const picked = a.selected.map((idx) => q.options[idx]).filter(Boolean);
+    if (picked.length === 0 && !custom) return "";
+    if (picked.length === 0) return custom;
+    const joined = picked.join(", ");
+    if (!custom) return joined;
+    return `${joined}; ${custom}`;
   }
 
   const canSave = answers.some((_, i) => resolveAnswer(i).length > 0);
@@ -566,31 +584,39 @@ function AnsweringForm({
     <div className="wizard">
       <p>{t("answeringIntro")}</p>
       <ol className="qna">
-        {questions.map((q, i) => (
-          <li key={i}>
-            <div className="q">{q.text}</div>
-            <div className="options">
-              {q.options.map((opt, j) => (
-                <label key={j} className="option">
-                  <input
-                    type="radio"
-                    name={`q-${i}`}
-                    checked={answers[i].selectedIndex === j && !answers[i].custom.trim()}
-                    onChange={() => setAnswer(i, { selectedIndex: j, custom: "" })}
-                  />
-                  <span>{opt}</span>
-                </label>
-              ))}
-            </div>
-            <input
-              className="custom-answer"
-              type="text"
-              value={answers[i].custom}
-              placeholder={t("customAnswerPlaceholder")}
-              onChange={(e) => setAnswer(i, { custom: e.target.value })}
-            />
-          </li>
-        ))}
+        {questions.map((q, i) => {
+          const isMulti = q.multi !== false;
+          return (
+            <li key={i}>
+              <div className="q">
+                {q.text}
+                <span className={`q-mode q-mode-${isMulti ? "multi" : "single"}`}>
+                  {isMulti ? t("optMulti") : t("optSingle")}
+                </span>
+              </div>
+              <div className="options">
+                {q.options.map((opt, j) => (
+                  <label key={j} className="option">
+                    <input
+                      type={isMulti ? "checkbox" : "radio"}
+                      name={isMulti ? undefined : `q-${i}`}
+                      checked={answers[i].selected.includes(j)}
+                      onChange={() => toggleOption(i, j)}
+                    />
+                    <span>{opt}</span>
+                  </label>
+                ))}
+              </div>
+              <input
+                className="custom-answer"
+                type="text"
+                value={answers[i].custom}
+                placeholder={t("customAnswerPlaceholder")}
+                onChange={(e) => setAnswer(i, { custom: e.target.value })}
+              />
+            </li>
+          );
+        })}
       </ol>
       <button onClick={save} disabled={!canSave || saving}>
         {saving ? t("saving") : t("saveAnswers")}

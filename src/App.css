@@ -492,6 +492,26 @@ button {
   font-size: 15px;
   margin-bottom: 12px;
   letter-spacing: -0.005em;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.q-mode {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.q-mode-multi {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.q-mode-single {
+  background: var(--surface-2);
+  color: var(--text-muted);
 }
 
 .options {
@@ -514,7 +534,8 @@ button {
 .option:hover {
   background: var(--surface-2);
 }
-.option input[type="radio"] {
+.option input[type="radio"],
+.option input[type="checkbox"] {
   accent-color: var(--primary);
   cursor: pointer;
   margin: 0;

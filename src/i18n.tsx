@@ -41,8 +41,10 @@ const STRINGS = {
     retry: "Попробовать снова",
     noQuestionsReturned: "Агент не вернул вопросов.",
 
-    answeringIntro: "Выбери вариант или впиши свой ответ. Пустые вопросы пропускаем.",
-    customAnswerPlaceholder: "Свой ответ (если ни один не подходит)…",
+    answeringIntro: "Отмечай подходящие варианты, можно несколько. Свой ответ — в поле ниже. Пустые вопросы пропускаем.",
+    customAnswerPlaceholder: "Свой ответ (можно дополнить выбранное)…",
+    optMulti: "несколько вариантов",
+    optSingle: "один вариант",
     saving: "Сохраняю…",
     saveAnswers: "Сохранить ответы",
 
@@ -134,8 +136,10 @@ const STRINGS = {
     retry: "Try again",
     noQuestionsReturned: "Agent returned no questions.",
 
-    answeringIntro: "Pick an option or type your own answer. Empty questions are skipped.",
-    customAnswerPlaceholder: "Your answer (if none of the options fit)…",
+    answeringIntro: "Tick the ones that apply, you can pick several. Add your own answer below. Empty questions are skipped.",
+    customAnswerPlaceholder: "Your answer (can complement what's selected)…",
+    optMulti: "several",
+    optSingle: "pick one",
     saving: "Saving…",
     saveAnswers: "Save answers",
 

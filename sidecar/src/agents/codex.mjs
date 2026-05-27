@@ -95,6 +95,15 @@ curriculum. Each question must have 3-5 short, mutually-distinct, concrete,
 topic-specific answer options the learner can pick from. The user will also
 have a free-text fallback so do NOT add an "other" option.
 
+For EACH question, set "multi": true by default — most questions about
+preferences, scopes, materials, goals, formats naturally accept several
+answers (e.g. "Какие жанры интересны?" — портрет AND пейзаж; "Какими
+материалами работаете?" — масло AND акварель). Set "multi": false ONLY when
+answers are genuinely mutually exclusive (e.g. "Сколько часов в неделю
+готовы уделять?", "Какой у вас текущий уровень?", "Это для работы или
+для хобби?"). When in doubt, use multi — forcing a single choice when
+several apply frustrates the learner.
+
 Write everything in language "${lang}".
 
 ${terminologyGuide(lang)}`;
@@ -118,8 +127,9 @@ ${terminologyGuide(lang)}`;
               maxItems: 5,
               items: { type: "string" },
             },
+            multi: { type: "boolean" },
           },
-          required: ["text", "options"],
+          required: ["text", "options", "multi"],
         },
       },
     },
@@ -141,7 +151,9 @@ ${terminologyGuide(lang)}`;
             .filter((o) => typeof o === "string" && o.trim().length > 0)
             .map((o) => o.trim())
         : [];
-      return { text, options };
+      // Default to multi when unspecified — multi-select is the wizard norm.
+      const multi = q.multi !== false;
+      return { text, options, multi };
     })
     .filter(Boolean);
   if (questions.length === 0) throw new Error("Codex returned zero valid questions");
