@@ -109,10 +109,23 @@ ${terminologyGuide(lang)}`;
   return { questions };
 }
 
-/**
- * @param {{topic:string, language:string, courseMd:string, structure:object, memoryFiles:{filename:string,content:string}[], modulePath:{title:string,summary:string}, submodulePath:{title:string,summary:string}}} params
- */
-export async function generateSubmodule({
+function prevArticlesBlock(previousArticles, lang) {
+  if (!previousArticles || previousArticles.length === 0) return "";
+  const formatted = previousArticles
+    .map((p) => `### ${p.moduleTitle} / ${p.submoduleTitle}\n${p.article}`)
+    .join("\n\n---\n\n");
+  return `Previously written submodules — read them for context and continuity.
+Refer back when natural, do NOT contradict anything in them, do NOT repeat
+their content verbatim. Write in language "${lang}" the same as them.
+
+<previous-articles>
+${formatted}
+</previous-articles>
+
+`;
+}
+
+async function draftArticle({
   topic,
   language,
   courseMd,
@@ -120,10 +133,8 @@ export async function generateSubmodule({
   memoryFiles,
   modulePath,
   submodulePath,
+  previousArticles,
 }) {
-  if (!modulePath?.title || !submodulePath?.title) {
-    throw new Error("modulePath and submodulePath must include titles");
-  }
   const lang = (language || "en").trim();
   const memoryBlock =
     memoryFiles && memoryFiles.length
@@ -144,7 +155,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${memoryBlock}You are writing this specific submodule:
+${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -152,6 +163,8 @@ Write a detailed, engaging article in language "${lang}". ~600-1200 words.
 Use Markdown headings (## / ###), short paragraphs, and concrete examples
 specific to this learner (not generic textbook prose). Do not repeat the
 overall course intro — assume the learner has the curriculum in front of them.
+When relevant, reference what was established in earlier submodules to build
+continuity. Never contradict them.
 
 ${terminologyGuide(lang)}
 
@@ -161,7 +174,139 @@ the whole thing.`;
   if (!article || !article.trim()) {
     throw new Error("Codex returned empty article");
   }
-  return { article: article.trim() };
+  return article.trim();
+}
+
+const reviewSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    article: { type: "string" },
+    notes: { type: "string" },
+  },
+  required: ["article", "notes"],
+};
+
+async function reviewArticle({ article, language, topic, previousArticles }) {
+  const lang = (language || "en").trim();
+  const prompt = `You are reviewing one submodule article from a course on
+"${topic}" (language: ${lang}). Act as a careful editor + fact-checker.
+
+Tasks, in order:
+1. Punctuation — fix any errors.
+2. Typography — proper quotes for the target language (e.g. «» in Russian,
+   "" in English), em-dashes — where appropriate, no double spaces, proper
+   ellipses (…), non-breaking spaces where idiomatic.
+3. Factual claims — verify them (use web search). If something is wrong,
+   fix it. If you cannot verify and the claim carries weight, soften the
+   language or remove the unsubstantiated bit.
+4. Internal consistency — check this article against the previous submodules
+   shown below. If there are contradictions (terminology, facts, level
+   assumptions, etc.), resolve them in favor of what's already established.
+5. Light polish for flow — do NOT rewrite the voice or restructure.
+
+${prevArticlesBlock(previousArticles, lang)}Article to review:
+<article>
+${article}
+</article>
+
+${terminologyGuide(lang)}
+
+Return the full revised article in "article" and a brief log of fixes in
+"notes" (empty string if nothing changed materially).`;
+  const text = await runOnce(prompt, reviewSchema);
+  const parsed = JSON.parse(text);
+  return {
+    article:
+      typeof parsed?.article === "string" && parsed.article.trim()
+        ? parsed.article.trim()
+        : article,
+    notes: typeof parsed?.notes === "string" ? parsed.notes.trim() : "",
+  };
+}
+
+const annotateSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    article: { type: "string" },
+    widgets: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          type: { type: "string" },
+          placeholder: { type: "boolean" },
+          description: { type: "string" },
+          alt: { type: "string" },
+        },
+        required: ["type", "description", "alt"],
+      },
+    },
+  },
+  required: ["article", "widgets"],
+};
+
+async function annotateImages({ article, language, topic }) {
+  const lang = (language || "en").trim();
+  const prompt = `You are marking where images should appear in a course
+submodule article on "${topic}" (language: ${lang}).
+
+Insert image placeholder widgets at the BEST spots — places where a diagram,
+photo, illustration, schema, or chart would meaningfully help comprehension.
+Use 1-4 placeholders depending on how visual the topic is (zero is acceptable
+for purely abstract topics).
+
+Widget marker syntax — a single line, alone, with blank lines above and below:
+
+::widget{type="image" id="img-1"}
+
+Use ids "img-1", "img-2", ... — small integers.
+
+Each placeholder also gets metadata in the widgets map. "description" must be
+a precise instruction for whoever will later source the image — what should be
+depicted, the style, what to avoid. "alt" is short alt text. "placeholder" is
+true for all of these (we'll later replace with real images).
+
+Article:
+<article>
+${article}
+</article>
+
+${terminologyGuide(lang)}
+
+If no images would help, return article unchanged and widgets as an empty
+object {}.`;
+  const text = await runOnce(prompt, annotateSchema);
+  const parsed = JSON.parse(text);
+  return {
+    article:
+      typeof parsed?.article === "string" && parsed.article.trim()
+        ? parsed.article.trim()
+        : article,
+    widgets:
+      parsed && typeof parsed.widgets === "object" && parsed.widgets !== null
+        ? parsed.widgets
+        : {},
+  };
+}
+
+/**
+ * @param {{topic:string, language:string, courseMd:string, structure:object, memoryFiles:{filename:string,content:string}[], modulePath:{title:string,summary:string}, submodulePath:{title:string,summary:string}, previousArticles:{moduleTitle:string,submoduleTitle:string,article:string}[]}} params
+ */
+export async function generateSubmodule(params) {
+  if (!params.modulePath?.title || !params.submodulePath?.title) {
+    throw new Error("modulePath and submodulePath must include titles");
+  }
+  const draft = await draftArticle(params);
+  const reviewed = await reviewArticle({ ...params, article: draft });
+  const annotated = await annotateImages({ ...params, article: reviewed.article });
+  return {
+    article: annotated.article,
+    widgets: annotated.widgets,
+    review_notes: reviewed.notes,
+  };
 }
 
 function buildRefinePrompt({

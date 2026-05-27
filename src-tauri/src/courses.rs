@@ -447,6 +447,14 @@ pub fn write_refinement_memory(
     Ok(())
 }
 
+pub fn submodule_dir(paths: &AppPaths, course_id: &str, mod_id: &str, sub_id: &str) -> PathBuf {
+    paths
+        .course_dir(course_id)
+        .join("modules")
+        .join(mod_id)
+        .join(sub_id)
+}
+
 pub fn write_submodule_article(
     paths: &AppPaths,
     course_id: &str,
@@ -454,15 +462,68 @@ pub fn write_submodule_article(
     sub_id: &str,
     article: &str,
 ) -> Result<PathBuf, CourseError> {
-    let dir = paths
-        .course_dir(course_id)
-        .join("modules")
-        .join(mod_id)
-        .join(sub_id);
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
     fs::create_dir_all(&dir)?;
     let path = dir.join("article.md");
     fs::write(&path, article)?;
     Ok(path)
+}
+
+pub fn write_submodule_widgets(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    widgets: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(widgets).unwrap_or_else(|_| "{}".to_string());
+    fs::write(dir.join("widgets.json"), json)?;
+    Ok(())
+}
+
+pub fn write_submodule_review_notes(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    notes: &str,
+) -> Result<(), CourseError> {
+    if notes.trim().is_empty() {
+        return Ok(());
+    }
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("review_notes.md"), notes)?;
+    Ok(())
+}
+
+/// Collect previously-generated submodule articles in curriculum order,
+/// stopping just before `until_sub_id`. Skips submodules whose article.md
+/// is not on disk yet.
+pub fn read_previous_articles(
+    paths: &AppPaths,
+    structure: &StructureFile,
+    until_sub_id: &str,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for m in &structure.modules {
+        for s in &m.submodules {
+            if s.id == until_sub_id {
+                return out;
+            }
+            let path = submodule_dir(paths, &structure.course_id, &m.id, &s.id).join("article.md");
+            if let Ok(article) = fs::read_to_string(&path) {
+                out.push(serde_json::json!({
+                    "moduleTitle": m.title,
+                    "submoduleTitle": s.title,
+                    "article": article,
+                }));
+            }
+        }
+    }
+    out
 }
 
 /// Find a submodule's id and the id of its parent module within a tree.

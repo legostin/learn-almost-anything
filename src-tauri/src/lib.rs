@@ -359,12 +359,21 @@ fn spawn_generate_submodule(
         .iter()
         .map(|(name, content)| json!({ "filename": name, "content": content }))
         .collect();
+    let previous_articles = courses::read_previous_articles(&paths, &structure, &submodule_id);
     let structure_value = serde_json::to_value(&structure).map_err(|e| e.to_string())?;
 
     let app2 = app.clone();
     let cid = course.id.clone();
     let mid = module_id.clone();
     let sid = submodule_id.clone();
+
+    let fail = |db: &Arc<Db>, app: &AppHandle, cid: &str, sid: &str, err: String| {
+        if let Ok(c) = db.0.lock() {
+            let _ = db::set_module_generation_state(&c, sid, "failed");
+        }
+        emit_job_event(app, cid, "generate_submodule", json!({ "ok": false, "error": err }));
+    };
+
     thread::spawn(move || {
         let params = json!({
             "backend": course.agent,
@@ -373,49 +382,46 @@ fn spawn_generate_submodule(
             "courseMd": course_md,
             "structure": structure_value,
             "memoryFiles": memory_for_prompt,
+            "previousArticles": previous_articles,
             "modulePath": { "title": module_title, "summary": module_summary },
             "submodulePath": { "title": sub_title, "summary": sub_summary },
         });
-        let result = sidecar.call("generate_submodule", params, Duration::from_secs(360));
-        let payload = match result {
-            Ok(v) => match v.get("article").and_then(|a| a.as_str()) {
-                Some(article) if !article.is_empty() => {
-                    let write_res =
-                        courses::write_submodule_article(&paths, &cid, &mid, &sid, article);
-                    match write_res {
-                        Ok(_) => {
-                            let conn = db.0.lock();
-                            if let Ok(c) = conn {
-                                let _ = db::set_module_generation_state(&c, &sid, "ready");
-                            }
-                            json!({ "ok": true, "submoduleId": sid })
-                        }
-                        Err(e) => {
-                            let conn = db.0.lock();
-                            if let Ok(c) = conn {
-                                let _ = db::set_module_generation_state(&c, &sid, "failed");
-                            }
-                            json!({ "ok": false, "error": e.to_string() })
-                        }
-                    }
-                }
-                _ => {
-                    let conn = db.0.lock();
-                    if let Ok(c) = conn {
-                        let _ = db::set_module_generation_state(&c, &sid, "failed");
-                    }
-                    json!({ "ok": false, "error": "sidecar returned empty article" })
-                }
-            },
-            Err(e) => {
-                let conn = db.0.lock();
-                if let Ok(c) = conn {
-                    let _ = db::set_module_generation_state(&c, &sid, "failed");
-                }
-                json!({ "ok": false, "error": e.to_string() })
-            }
+        // Three-stage pipeline runs inside the sidecar; budget accordingly.
+        let result = sidecar.call("generate_submodule", params, Duration::from_secs(720));
+        let v = match result {
+            Ok(v) => v,
+            Err(e) => return fail(&db, &app2, &cid, &sid, e.to_string()),
         };
-        emit_job_event(&app2, &cid, "generate_submodule", payload);
+        let article = match v.get("article").and_then(|a| a.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return fail(&db, &app2, &cid, &sid, "sidecar returned empty article".into()),
+        };
+        if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &article) {
+            return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
+        let widgets = v
+            .get("widgets")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Err(e) = courses::write_submodule_widgets(&paths, &cid, &mid, &sid, &widgets) {
+            return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
+        let notes = v
+            .get("review_notes")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        if let Err(e) = courses::write_submodule_review_notes(&paths, &cid, &mid, &sid, notes) {
+            return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
+        if let Ok(c) = db.0.lock() {
+            let _ = db::set_module_generation_state(&c, &sid, "ready");
+        }
+        emit_job_event(
+            &app2,
+            &cid,
+            "generate_submodule",
+            json!({ "ok": true, "submoduleId": sid }),
+        );
     });
     Ok(())
 }
