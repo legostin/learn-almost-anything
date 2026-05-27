@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0",
-    "@openai/codex-sdk": "^0.134.0"
+    "@openai/codex-sdk": "^0.134.0",
+    "jsdom": "^29.1.1"
   }
 }

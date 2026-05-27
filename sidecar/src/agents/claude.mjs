@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+import { repairPrompt, validateInteractive } from "../lib/interactive.mjs";
+
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
@@ -175,9 +177,10 @@ continuity. Never contradict them.
 You may add visual-aid widgets where they meaningfully help. Mark insertion
 points with a single line, alone, with blank lines above and below:
 
-  ::widget{type="image" id="img-1"}      (real-world photo or illustration)
-  ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
-  ::widget{type="video" id="vid-1"}      (an embedded video — see below)
+  ::widget{type="image" id="img-1"}        (real-world photo or illustration)
+  ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
+  ::widget{type="video" id="vid-1"}        (an embedded video — see below)
+  ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
 Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
@@ -189,6 +192,36 @@ videos on X" listicle, a blog post that says "watch this", a course
 syllabus that links it. NEVER pick a video purely by its YouTube title or
 search rank. Record the recommendation source in "recommended_by". If you
 can't find a recommended one, skip the video — better none than a random.
+
+INTERACTIVE WIDGETS: small self-contained HTML+CSS+JS that runs in a
+sandboxed iframe (no network, no cookies, no parent access). Use 0-2 per
+submodule, only when interactivity meaningfully aids comprehension —
+examples that fit well:
+  • algorithm step-through with Prev/Next buttons (sorting, search)
+  • fill-in-the-blank card with check-answer feedback
+  • multiple-choice flashcard with explanation reveal
+  • slider that animates or recomputes a derived value
+  • drag-to-match pairs
+
+Hard rules — your widget WILL BE REJECTED if it breaks any of these:
+  • Vanilla JS only. No frameworks, no <script src=…>, no imports, no eval,
+    no new Function, no fetch, no XMLHttpRequest.
+  • No reading/writing localStorage/sessionStorage/cookies.
+  • No accessing window.parent / window.top.
+  • Total html + css + js ≤ 8000 characters.
+  • All assets inline (use only DOM, addEventListener, requestAnimationFrame,
+    setTimeout, Math, etc.).
+  • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
+
+Provide:
+  - "html": body content only (NO <html>/<head>/<body> tags — UI wraps them).
+  - "css": stylesheet rules (will go into a <style> tag).
+  - "js": script code (will go into a <script> tag at end of body).
+  - "title": short label in ${lang}.
+  - "description": one or two sentences in ${lang} explaining what the
+    learner can do with this widget.
+  - "height": integer pixels, clamp 160-640. Pick a reasonable default
+    based on content (compact card ~220, animation canvas ~360).
 
 ${
   braveApiKey
@@ -225,6 +258,7 @@ Each widget object:
 - image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 - video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
+- interactive: {"id":"int-1","type":"interactive","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","html":"<body content>","css":"<stylesheet>","js":"<script>","height":320}
 
 Each source object: {"title":"<page title>","url":"<url>"}
 If no widgets, use []. If no sources, use [].`;
@@ -275,6 +309,19 @@ function normalizeWidgets(raw) {
         recommended_by:
           typeof w.recommended_by === "string" ? w.recommended_by.trim() : "",
         why: typeof w.why === "string" ? w.why.trim() : "",
+      };
+    } else if (w.type === "interactive") {
+      out[id] = {
+        type: "interactive",
+        title: typeof w.title === "string" ? w.title.trim() : "",
+        description: typeof w.description === "string" ? w.description.trim() : "",
+        html: typeof w.html === "string" ? w.html : "",
+        css: typeof w.css === "string" ? w.css : "",
+        js: typeof w.js === "string" ? w.js : "",
+        height:
+          typeof w.height === "number"
+            ? Math.max(160, Math.min(640, Math.round(w.height)))
+            : 320,
       };
     }
   }
@@ -354,25 +401,97 @@ export async function submoduleAnnotate(params, ctx) {
 async function validateWidgets({ article, widgets }, onProgress) {
   onProgress?.({ label: "validating" });
   const out = {};
-  let checked = 0;
-  let bad = 0;
+  let diagChecked = 0;
+  let diagBad = 0;
+  let intChecked = 0;
+  let intRepaired = 0;
+  let intBroken = 0;
   for (const [id, w] of Object.entries(widgets || {})) {
     if (w?.type === "diagram") {
-      checked++;
+      diagChecked++;
       const issue = mermaidIssue(w.source);
       if (issue) {
-        bad++;
+        diagBad++;
         out[id] = { ...w, error: issue };
         onProgress?.({ label: "validating", detail: `${id}: ${issue}` });
       } else {
         out[id] = w;
       }
+    } else if (w?.type === "interactive") {
+      intChecked++;
+      const { final, error, repairs } = await validateAndRepairInteractive(
+        w,
+        id,
+        onProgress
+      );
+      if (repairs > 0 && !error) intRepaired++;
+      if (error) {
+        intBroken++;
+        out[id] = { ...final, error };
+      } else {
+        out[id] = final;
+      }
     } else {
       out[id] = w;
     }
   }
-  const notes = bad > 0 ? `Mermaid validation: ${bad}/${checked} diagram(s) flagged.` : "";
+  const noteParts = [];
+  if (diagChecked > 0) noteParts.push(`Mermaid: ${diagBad}/${diagChecked} flagged`);
+  if (intChecked > 0)
+    noteParts.push(
+      `Interactive: ${intChecked} checked, ${intRepaired} repaired, ${intBroken} broken`
+    );
+  const notes = noteParts.length > 0 ? noteParts.join("; ") + "." : "";
   return { article, widgets: out, notes };
+}
+
+const INTERACTIVE_MAX_REPAIRS = 2;
+
+async function validateAndRepairInteractive(widget, id, onProgress) {
+  let current = widget;
+  let lastError = await validateInteractive(current);
+  if (!lastError) return { final: current, error: null, repairs: 0 };
+
+  onProgress?.({ label: "validating", detail: `${id}: ${lastError}` });
+
+  for (let attempt = 1; attempt <= INTERACTIVE_MAX_REPAIRS; attempt++) {
+    onProgress?.({
+      label: "validating",
+      detail: `${id}: repair ${attempt}/${INTERACTIVE_MAX_REPAIRS}`,
+    });
+    let repaired;
+    try {
+      repaired = await repairInteractive(current, lastError);
+    } catch (e) {
+      lastError = `repair call failed: ${e?.message || e}`;
+      break;
+    }
+    if (!repaired) {
+      lastError = `repair returned no widget`;
+      break;
+    }
+    current = { ...current, ...repaired };
+    lastError = await validateInteractive(current);
+    if (!lastError) return { final: current, error: null, repairs: attempt };
+    onProgress?.({ label: "validating", detail: `${id}: ${lastError}` });
+  }
+  return { final: current, error: lastError, repairs: INTERACTIVE_MAX_REPAIRS };
+}
+
+async function repairInteractive(widget, errorMsg) {
+  const prompt = repairPrompt(widget, errorMsg);
+  const text = await runStreamed(prompt);
+  const parsed = extractJson(text);
+  if (!parsed || typeof parsed !== "object") return null;
+  return {
+    html: typeof parsed.html === "string" ? parsed.html : widget.html,
+    css: typeof parsed.css === "string" ? parsed.css : widget.css,
+    js: typeof parsed.js === "string" ? parsed.js : widget.js,
+    height:
+      typeof parsed.height === "number"
+        ? Math.max(160, Math.min(640, Math.round(parsed.height)))
+        : widget.height,
+  };
 }
 
 // First-line shape check. Catches the most common LLM mistake of writing

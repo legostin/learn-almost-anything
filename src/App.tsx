@@ -1294,6 +1294,16 @@ type WidgetData =
   | { type: "image"; placeholder?: boolean; description?: string; alt?: string; url?: string; source?: string }
   | { type: "diagram"; source: string; caption?: string; error?: string }
   | { type: "video"; url: string; title?: string; recommended_by?: string; why?: string }
+  | {
+      type: "interactive";
+      title?: string;
+      description?: string;
+      html: string;
+      css: string;
+      js: string;
+      height?: number;
+      error?: string;
+    }
   | { type: string; [k: string]: any };
 
 type Source = { title: string; url: string };
@@ -1558,6 +1568,7 @@ function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
   if (widget.type === "image") return <ImagePlaceholder id={id} widget={widget as any} />;
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
   if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
+  if (widget.type === "interactive") return <InteractiveWidget id={id} widget={widget as any} />;
   return (
     <div className="widget widget-unknown">
       {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
@@ -1677,6 +1688,79 @@ function splitWidgetMarkers(md: string) {
   }
   if (last < md.length) out.push({ kind: "md", text: md.slice(last) });
   return out;
+}
+
+function InteractiveWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: {
+    title?: string;
+    description?: string;
+    html: string;
+    css: string;
+    js: string;
+    height?: number;
+    error?: string;
+  };
+}) {
+  const t = useT();
+  if (widget.error) {
+    return (
+      <figure className="widget widget-interactive widget-interactive-broken">
+        <div className="widget-interactive-error-label">
+          {t("widgetInteractiveBroken")} <span className="widget-id">#{id}</span>
+        </div>
+        {widget.title && <div className="widget-interactive-title">{widget.title}</div>}
+        {widget.description && (
+          <div className="widget-interactive-desc">{widget.description}</div>
+        )}
+        <pre className="widget-interactive-error-msg">{widget.error}</pre>
+        <details>
+          <summary>{t("widgetInteractiveShowSource")}</summary>
+          <pre className="widget-interactive-source">
+            {`<!-- html -->\n${widget.html}\n\n/* css */\n${widget.css}\n\n// js\n${widget.js}`}
+          </pre>
+        </details>
+      </figure>
+    );
+  }
+  const height = Math.max(160, Math.min(640, Math.round(widget.height ?? 320)));
+  const doc = buildInteractiveDoc(widget.html, widget.css, widget.js);
+  return (
+    <figure className="widget widget-interactive">
+      <div className="widget-interactive-header">
+        <span className="widget-interactive-tag">{t("widgetInteractive")}</span>
+        {widget.title && (
+          <span className="widget-interactive-title">{widget.title}</span>
+        )}
+      </div>
+      <iframe
+        className="widget-interactive-frame"
+        sandbox="allow-scripts"
+        srcDoc={doc}
+        title={widget.title || `interactive ${id}`}
+        style={{ height }}
+      />
+      {widget.description && (
+        <figcaption className="widget-interactive-desc">{widget.description}</figcaption>
+      )}
+    </figure>
+  );
+}
+
+function buildInteractiveDoc(html: string, css: string, js: string): string {
+  // CSP blocks every external resource; only inline scripts/styles allowed.
+  // The outer iframe sandbox already disables same-origin / parent access.
+  const csp =
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>
+:root{color-scheme:light dark}
+body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;font-size:14px;line-height:1.5;color:#1c1917;background:#fafaf9}
+@media (prefers-color-scheme: dark){body{background:#1c1917;color:#fafaf9}}
+${css}
+</style></head><body>${html}<script>${js}</script></body></html>`;
 }
 
 function ImagePlaceholder({

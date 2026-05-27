@@ -7,6 +7,8 @@
 
 import { Codex } from "@openai/codex-sdk";
 
+import { repairPrompt, validateInteractive } from "../lib/interactive.mjs";
+
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
 // long-lived state. Without a key, falls back to a shared instance.
@@ -303,6 +305,23 @@ const draftSchema = {
         required: ["id", "url", "title", "recommended_by", "why"],
       },
     },
+    interactiveWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          description: { type: "string" },
+          html: { type: "string" },
+          css: { type: "string" },
+          js: { type: "string" },
+          height: { type: "integer" },
+        },
+        required: ["id", "title", "description", "html", "css", "js", "height"],
+      },
+    },
     sources: {
       type: "array",
       items: {
@@ -316,7 +335,14 @@ const draftSchema = {
       },
     },
   },
-  required: ["article", "imageWidgets", "diagramWidgets", "videoWidgets", "sources"],
+  required: [
+    "article",
+    "imageWidgets",
+    "diagramWidgets",
+    "videoWidgets",
+    "interactiveWidgets",
+    "sources",
+  ],
 };
 
 async function draftArticleInternal(
@@ -367,9 +393,10 @@ continuity. Never contradict them.
 You may add visual-aid widgets where they meaningfully help. Mark insertion
 points with a single line, alone, with blank lines above and below:
 
-  ::widget{type="image" id="img-1"}      (real-world photo or illustration)
-  ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
-  ::widget{type="video" id="vid-1"}      (an embedded video — see below)
+  ::widget{type="image" id="img-1"}        (real-world photo or illustration)
+  ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
+  ::widget{type="video" id="vid-1"}        (an embedded video — see below)
+  ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
 Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
@@ -382,12 +409,31 @@ syllabus that links it. NEVER pick a video purely by its YouTube title or
 search rank. Record the recommendation source in "recommended_by". If you
 can't find a recommended one, skip the video — better none than a random.
 
-Return widgets in three separate arrays:
+INTERACTIVE WIDGETS: small self-contained HTML+CSS+JS that runs in a
+sandboxed iframe (no network, no cookies, no parent access). Use 0-2 per
+submodule, only when interactivity meaningfully aids comprehension —
+e.g. algorithm step-through (sorting, search), fill-in-the-blank with
+check-answer, multiple-choice flashcard, slider that animates a value,
+drag-to-match.
+
+Hard rules — your widget WILL BE REJECTED if it breaks any of these:
+  • Vanilla JS only. No frameworks, no <script src=…>, no imports, no eval,
+    no new Function, no fetch, no XMLHttpRequest.
+  • No localStorage/sessionStorage/cookies, no window.parent / window.top.
+  • Total html + css + js ≤ 8000 characters.
+  • All assets inline. Use DOM, addEventListener, requestAnimationFrame,
+    setTimeout, Math.
+  • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
+
+Return widgets in four separate arrays:
 - imageWidgets: [{id, description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
   why (one sentence in ${lang})}]
+- interactiveWidgets: [{id, title (in ${lang}), description (in ${lang}),
+  html (body content, NO html/head/body tags), css, js, height (integer
+  pixels, 160-640)}]
 
 If a category is unused, return an empty array [].
 
@@ -424,12 +470,17 @@ ${terminologyGuide(lang)}`;
   }
   return {
     article: parsed.article.trim(),
-    widgets: mergeWidgets(parsed.imageWidgets, parsed.diagramWidgets, parsed.videoWidgets),
+    widgets: mergeWidgets(
+      parsed.imageWidgets,
+      parsed.diagramWidgets,
+      parsed.videoWidgets,
+      parsed.interactiveWidgets
+    ),
     sources: normalizeSources(parsed.sources),
   };
 }
 
-function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets) {
+function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets, interactiveWidgets) {
   const out = {};
   if (Array.isArray(imageWidgets)) {
     for (const w of imageWidgets) {
@@ -471,6 +522,23 @@ function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets) {
         recommended_by:
           typeof w.recommended_by === "string" ? w.recommended_by.trim() : "",
         why: typeof w.why === "string" ? w.why.trim() : "",
+      };
+    }
+  }
+  if (Array.isArray(interactiveWidgets)) {
+    for (const w of interactiveWidgets) {
+      if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
+      out[w.id.trim()] = {
+        type: "interactive",
+        title: typeof w.title === "string" ? w.title.trim() : "",
+        description: typeof w.description === "string" ? w.description.trim() : "",
+        html: typeof w.html === "string" ? w.html : "",
+        css: typeof w.css === "string" ? w.css : "",
+        js: typeof w.js === "string" ? w.js : "",
+        height:
+          typeof w.height === "number"
+            ? Math.max(160, Math.min(640, Math.round(w.height)))
+            : 320,
       };
     }
   }
@@ -556,25 +624,112 @@ export async function submoduleAnnotate(params, ctx) {
   ctx?.progress?.({ label: "validating" });
   const widgets = params?.widgets || {};
   const out = {};
-  let bad = 0;
-  let checked = 0;
+  let diagChecked = 0;
+  let diagBad = 0;
+  let intChecked = 0;
+  let intRepaired = 0;
+  let intBroken = 0;
   for (const [id, w] of Object.entries(widgets)) {
     if (w?.type === "diagram") {
-      checked++;
+      diagChecked++;
       const issue = mermaidIssue(w.source);
       if (issue) {
-        bad++;
+        diagBad++;
         out[id] = { ...w, error: issue };
         ctx?.progress?.({ label: "validating", detail: `${id}: ${issue}` });
       } else {
         out[id] = w;
       }
+    } else if (w?.type === "interactive") {
+      intChecked++;
+      const { final, error, repairs } = await validateAndRepairInteractive(
+        w,
+        id,
+        ctx,
+        params?.braveApiKey
+      );
+      if (repairs > 0 && !error) intRepaired++;
+      if (error) {
+        intBroken++;
+        out[id] = { ...final, error };
+      } else {
+        out[id] = final;
+      }
     } else {
       out[id] = w;
     }
   }
-  const notes = bad > 0 ? `Mermaid validation: ${bad}/${checked} diagram(s) flagged.` : "";
+  const noteParts = [];
+  if (diagChecked > 0) noteParts.push(`Mermaid: ${diagBad}/${diagChecked} flagged`);
+  if (intChecked > 0)
+    noteParts.push(
+      `Interactive: ${intChecked} checked, ${intRepaired} repaired, ${intBroken} broken`
+    );
+  const notes = noteParts.length > 0 ? noteParts.join("; ") + "." : "";
   return { article: params.article, widgets: out, notes };
+}
+
+const INTERACTIVE_MAX_REPAIRS = 2;
+
+async function validateAndRepairInteractive(widget, id, ctx, braveApiKey) {
+  let current = widget;
+  let lastError = await validateInteractive(current);
+  if (!lastError) return { final: current, error: null, repairs: 0 };
+  ctx?.progress?.({ label: "validating", detail: `${id}: ${lastError}` });
+  for (let attempt = 1; attempt <= INTERACTIVE_MAX_REPAIRS; attempt++) {
+    ctx?.progress?.({
+      label: "validating",
+      detail: `${id}: repair ${attempt}/${INTERACTIVE_MAX_REPAIRS}`,
+    });
+    let repaired;
+    try {
+      repaired = await repairInteractiveCodex(current, lastError, braveApiKey);
+    } catch (e) {
+      lastError = `repair call failed: ${e?.message || e}`;
+      break;
+    }
+    if (!repaired) {
+      lastError = `repair returned no widget`;
+      break;
+    }
+    current = { ...current, ...repaired };
+    lastError = await validateInteractive(current);
+    if (!lastError) return { final: current, error: null, repairs: attempt };
+    ctx?.progress?.({ label: "validating", detail: `${id}: ${lastError}` });
+  }
+  return { final: current, error: lastError, repairs: INTERACTIVE_MAX_REPAIRS };
+}
+
+const repairSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    html: { type: "string" },
+    css: { type: "string" },
+    js: { type: "string" },
+    height: { type: "integer" },
+  },
+  required: ["html", "css", "js", "height"],
+};
+
+async function repairInteractiveCodex(widget, errorMsg, braveApiKey) {
+  const prompt = repairPrompt(widget, errorMsg);
+  const text = await runOnce(prompt, repairSchema, { braveApiKey });
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return {
+    html: typeof parsed.html === "string" ? parsed.html : widget.html,
+    css: typeof parsed.css === "string" ? parsed.css : widget.css,
+    js: typeof parsed.js === "string" ? parsed.js : widget.js,
+    height:
+      typeof parsed.height === "number"
+        ? Math.max(160, Math.min(640, Math.round(parsed.height)))
+        : widget.height,
+  };
 }
 
 function mermaidIssue(source) {

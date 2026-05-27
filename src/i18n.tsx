@@ -101,6 +101,9 @@ const STRINGS = {
     widgetVideoRecommended: "Рекомендация:",
     widgetVideoOpen: "Открыть видео",
     sourcesTitle: "Источники",
+    widgetInteractive: "Интерактив",
+    widgetInteractiveBroken: "Виджет не прошёл проверку",
+    widgetInteractiveShowSource: "Показать исходник",
 
     refineTitle: "Доработать с агентом",
     refineSub:
@@ -222,6 +225,9 @@ const STRINGS = {
     widgetVideoRecommended: "Recommended by:",
     widgetVideoOpen: "Open video",
     sourcesTitle: "Sources",
+    widgetInteractive: "Interactive",
+    widgetInteractiveBroken: "Widget failed validation",
+    widgetInteractiveShowSource: "Show source",
 
     refineTitle: "Refine with agent",
     refineSub:
