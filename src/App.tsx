@@ -87,6 +87,27 @@ function App() {
   const [stages, setStages] = useState<Map<string, StageDetail>>(new Map());
   const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentAvail, setAgentAvail] = useState<{ claude: boolean; codex: boolean } | null>(
+    null
+  );
+  const [braveConfigured, setBraveConfigured] = useState<boolean | null>(null);
+
+  const refreshCapabilities = useCallback(async () => {
+    try {
+      const [aa, ss] = await Promise.all([
+        invoke<{ claude: boolean; codex: boolean }>("check_agent_availability"),
+        invoke<{ brave_configured: boolean }>("get_settings_status"),
+      ]);
+      setAgentAvail(aa);
+      setBraveConfigured(ss.brave_configured);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCapabilities();
+  }, [refreshCapabilities]);
 
   const refresh = useCallback(async () => {
     const list = await invoke<Course[]>("list_courses");
@@ -243,11 +264,17 @@ function App() {
       </aside>
 
       <main className="main">
+        <CapabilityBanners
+          agentAvail={agentAvail}
+          braveConfigured={braveConfigured}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
         {view.kind === "empty" && (
           <div className="placeholder">{t("selectOrCreate")}</div>
         )}
         {view.kind === "creating" && (
           <CreateCourse
+            agentAvail={agentAvail}
             onCreated={async (id) => {
               await refresh();
               setView({ kind: "course", id });
@@ -284,9 +311,49 @@ function App() {
         )}
       </main>
 
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsModal
+          onClose={() => {
+            setSettingsOpen(false);
+            refreshCapabilities();
+          }}
+        />
+      )}
     </div>
   );
+}
+
+function CapabilityBanners({
+  agentAvail,
+  braveConfigured,
+  onOpenSettings,
+}: {
+  agentAvail: { claude: boolean; codex: boolean } | null;
+  braveConfigured: boolean | null;
+  onOpenSettings: () => void;
+}) {
+  const t = useT();
+  if (!agentAvail) return null; // still loading
+  const noAgents = !agentAvail.claude && !agentAvail.codex;
+  if (noAgents) {
+    return (
+      <div className="banner banner-error" role="alert">
+        <div className="banner-title">{t("noAgentsTitle")}</div>
+        <div className="banner-body">{t("noAgentsBody")}</div>
+      </div>
+    );
+  }
+  if (braveConfigured === false) {
+    return (
+      <div className="banner banner-warn">
+        <div className="banner-body">{t("braveMissingWarning")}</div>
+        <button className="banner-action" onClick={onOpenSettings}>
+          {t("openSettings")}
+        </button>
+      </div>
+    );
+  }
+  return null;
 }
 
 function SettingsIcon() {
@@ -388,20 +455,41 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 }
 
 function CreateCourse({
+  agentAvail,
   onCreated,
   onCancel,
 }: {
+  agentAvail: { claude: boolean; codex: boolean } | null;
   onCreated: (id: string) => void;
   onCancel: () => void;
 }) {
   const t = useT();
+  const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
   const [topic, setTopic] = useState("");
-  const [agent, setAgent] = useState<Agent>("claude");
+  const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
+
+  // If agentAvail loads after first render and the selected agent is
+  // unavailable, swap to whichever is available.
+  useEffect(() => {
+    if (!agentAvail) return;
+    if (agent === "claude" && !agentAvail.claude && agentAvail.codex) setAgent("codex");
+    else if (agent === "codex" && !agentAvail.codex && agentAvail.claude) setAgent("claude");
+  }, [agentAvail, agent]);
+
+  const claudeOk = agentAvail?.claude !== false;
+  const codexOk = agentAvail?.codex !== false;
+  const selectedAvail =
+    agentAvail === null
+      ? true
+      : agent === "claude"
+        ? agentAvail.claude
+        : agentAvail.codex;
+  const noAgents = agentAvail !== null && !claudeOk && !codexOk;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!topic.trim() || busy) return;
+    if (!topic.trim() || busy || !selectedAvail || noAgents) return;
     setBusy(true);
     const language = navigator.language.slice(0, 2) || "en";
     const id = await invoke<string>("create_course", {
@@ -427,36 +515,58 @@ function CreateCourse({
       <label>
         {t("agentLabel")}
         <div className="agent-picker">
-          <label className={`agent-option ${agent === "claude" ? "selected" : ""}`}>
+          <label
+            className={`agent-option ${agent === "claude" ? "selected" : ""} ${
+              !claudeOk ? "disabled" : ""
+            }`}
+          >
             <input
               type="radio"
               name="agent"
               value="claude"
               checked={agent === "claude"}
-              onChange={() => setAgent("claude")}
+              onChange={() => claudeOk && setAgent("claude")}
+              disabled={!claudeOk}
             />
             <div className="agent-meta">
-              <div className="agent-name">Claude</div>
+              <div className="agent-name">
+                Claude
+                <AgentAvailBadge available={claudeOk} />
+              </div>
               <div className="agent-desc">{t("claudeDesc")}</div>
             </div>
           </label>
-          <label className={`agent-option ${agent === "codex" ? "selected" : ""}`}>
+          <label
+            className={`agent-option ${agent === "codex" ? "selected" : ""} ${
+              !codexOk ? "disabled" : ""
+            }`}
+          >
             <input
               type="radio"
               name="agent"
               value="codex"
               checked={agent === "codex"}
-              onChange={() => setAgent("codex")}
+              onChange={() => codexOk && setAgent("codex")}
+              disabled={!codexOk}
             />
             <div className="agent-meta">
-              <div className="agent-name">Codex</div>
+              <div className="agent-name">
+                Codex
+                <AgentAvailBadge available={codexOk} />
+              </div>
               <div className="agent-desc">{t("codexDesc")}</div>
             </div>
           </label>
         </div>
       </label>
+      {noAgents && (
+        <div className="form-error">{t("noAgentsBody")}</div>
+      )}
       <div className="actions">
-        <button type="submit" disabled={!topic.trim() || busy}>
+        <button
+          type="submit"
+          disabled={!topic.trim() || busy || !selectedAvail || noAgents}
+        >
           {t("create")}
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
@@ -464,6 +574,15 @@ function CreateCourse({
         </button>
       </div>
     </form>
+  );
+}
+
+function AgentAvailBadge({ available }: { available: boolean }) {
+  const t = useT();
+  return (
+    <span className={`agent-avail ${available ? "ok" : "no"}`}>
+      {available ? t("agentAvailable") : t("agentUnavailable")}
+    </span>
   );
 }
 

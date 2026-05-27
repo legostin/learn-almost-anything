@@ -18,6 +18,14 @@ const STRINGS = {
     settings: "Настройки",
 
     selectOrCreate: "Выберите курс или создайте новый",
+    noAgentsTitle: "Нет ни одного агента",
+    noAgentsBody:
+      "Чтобы генерировать курсы, нужен хотя бы один локально установленный CLI и логин: claude (Pro/Max) или codex (ChatGPT Plus/Pro). Установи и залогинься — тогда вернись сюда.",
+    agentUnavailable: "не установлен",
+    agentAvailable: "доступен",
+    braveMissingWarning:
+      "Brave Search не настроен. Агент будет генерировать только по своей памяти — без актуальных источников, картинок и видео. Открой настройки и добавь ключ.",
+    openSettings: "Открыть настройки",
 
     createTitle: "Новый курс",
     topicLabel: "Тема",
@@ -131,6 +139,14 @@ const STRINGS = {
     settings: "Settings",
 
     selectOrCreate: "Select a course or create a new one",
+    noAgentsTitle: "No agent installed",
+    noAgentsBody:
+      "Generating courses requires at least one locally installed and logged-in CLI: claude (Pro/Max) or codex (ChatGPT Plus/Pro). Install and log in, then come back.",
+    agentUnavailable: "not installed",
+    agentAvailable: "available",
+    braveMissingWarning:
+      "Brave Search is not configured. The agent will write only from its own memory — no live sources, images or videos. Open settings to add a key.",
+    openSettings: "Open settings",
 
     createTitle: "New course",
     topicLabel: "Topic",

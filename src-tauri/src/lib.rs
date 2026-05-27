@@ -773,6 +773,31 @@ struct SettingsStatus {
     brave_configured: bool,
 }
 
+#[derive(serde::Serialize)]
+struct AgentAvailability {
+    claude: bool,
+    codex: bool,
+}
+
+fn cli_present(cmd: &str) -> bool {
+    std::process::Command::new(cmd)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn check_agent_availability() -> AgentAvailability {
+    AgentAvailability {
+        claude: cli_present("claude"),
+        codex: cli_present("codex"),
+    }
+}
+
 #[tauri::command]
 fn get_settings_status(state: tauri::State<'_, Arc<SettingsState>>) -> SettingsStatus {
     SettingsStatus {
@@ -994,7 +1019,8 @@ pub fn run() {
             read_submodule_article,
             delete_course,
             get_settings_status,
-            set_brave_key
+            set_brave_key,
+            check_agent_availability
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
