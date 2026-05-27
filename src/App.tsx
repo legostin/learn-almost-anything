@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useLang, useT } from "./i18n";
 import "./App.css";
 
 type Agent = "claude" | "codex";
@@ -59,9 +60,11 @@ type View = { kind: "empty" } | { kind: "creating" } | { kind: "course"; id: str
 const jobKey = (courseId: string, kind: JobKind) => `${courseId}:${kind}`;
 
 function App() {
+  const t = useT();
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     const list = await invoke<Course[]>("list_courses");
@@ -115,10 +118,18 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-dot" />
-          Learn Anything
+          <span className="brand-name">{t("brand")}</span>
+          <button
+            className="brand-settings"
+            onClick={() => setSettingsOpen(true)}
+            title={t("settings")}
+            aria-label={t("settings")}
+          >
+            <SettingsIcon />
+          </button>
         </div>
         <button className="new-course" onClick={() => setView({ kind: "creating" })}>
-          + Новый курс
+          {t("newCourse")}
         </button>
         <ul className="course-list">
           {courses.map((c) => {
@@ -133,7 +144,7 @@ function App() {
               >
                 <div className="course-topic">
                   {c.topic}
-                  {hasRunning && <span className="spinner" title="Идёт генерация…" />}
+                  {hasRunning && <span className="spinner" title={t("generatingTitle")} />}
                 </div>
                 <div className="course-meta">
                   {c.language} · {c.status}
@@ -141,14 +152,14 @@ function App() {
               </li>
             );
           })}
-          {courses.length === 0 && <li className="empty-hint">Курсов пока нет</li>}
+          {courses.length === 0 && <li className="empty-hint">{t("noCourses")}</li>}
         </ul>
         <SmokeTest />
       </aside>
 
       <main className="main">
         {view.kind === "empty" && (
-          <div className="placeholder">Выберите курс или создайте новый</div>
+          <div className="placeholder">{t("selectOrCreate")}</div>
         )}
         {view.kind === "creating" && (
           <CreateCourse
@@ -168,6 +179,50 @@ function App() {
           />
         )}
       </main>
+
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+    </div>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const [lang, setLang] = useLang();
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <h2>{t("settingsTitle")}</h2>
+        <div className="setting-group">
+          <div className="setting-label">{t("uiLanguage")}</div>
+          <div className="lang-picker">
+            <button
+              className={`lang-option ${lang === "ru" ? "active" : ""}`}
+              onClick={() => setLang("ru")}
+            >
+              {t("langRu")}
+            </button>
+            <button
+              className={`lang-option ${lang === "en" ? "active" : ""}`}
+              onClick={() => setLang("en")}
+            >
+              {t("langEn")}
+            </button>
+          </div>
+          <div className="setting-note">{t("uiLanguageNote")}</div>
+        </div>
+        <div className="modal-actions">
+          <button onClick={onClose}>{t("close")}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -179,6 +234,7 @@ function CreateCourse({
   onCreated: (id: string) => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   const [topic, setTopic] = useState("");
   const [agent, setAgent] = useState<Agent>("claude");
   const [busy, setBusy] = useState(false);
@@ -198,18 +254,18 @@ function CreateCourse({
 
   return (
     <form className="create-course" onSubmit={submit}>
-      <h2>Новый курс</h2>
+      <h2>{t("createTitle")}</h2>
       <label>
-        Тема
+        {t("topicLabel")}
         <input
           autoFocus
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
-          placeholder="например: академическая живопись"
+          placeholder={t("topicPlaceholder")}
         />
       </label>
       <label>
-        Агент
+        {t("agentLabel")}
         <div className="agent-picker">
           <label className={`agent-option ${agent === "claude" ? "selected" : ""}`}>
             <input
@@ -221,7 +277,7 @@ function CreateCourse({
             />
             <div className="agent-meta">
               <div className="agent-name">Claude</div>
-              <div className="agent-desc">Anthropic, подписка Pro/Max</div>
+              <div className="agent-desc">{t("claudeDesc")}</div>
             </div>
           </label>
           <label className={`agent-option ${agent === "codex" ? "selected" : ""}`}>
@@ -234,17 +290,17 @@ function CreateCourse({
             />
             <div className="agent-meta">
               <div className="agent-name">Codex</div>
-              <div className="agent-desc">OpenAI, ChatGPT-подписка, веб-поиск</div>
+              <div className="agent-desc">{t("codexDesc")}</div>
             </div>
           </label>
         </div>
       </label>
       <div className="actions">
         <button type="submit" disabled={!topic.trim() || busy}>
-          Создать
+          {t("create")}
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
-          Отмена
+          {t("cancel")}
         </button>
       </div>
     </form>
@@ -262,11 +318,12 @@ function CourseView({
   onStartJob: (kind: JobKind) => void;
   onChanged: () => void | Promise<void>;
 }) {
-  if (!course) return <div className="placeholder">Курс не найден</div>;
+  const t = useT();
+  if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
   const statusLabel: Record<string, string> = {
-    wizard: "визард",
-    structuring: "ждёт структуру",
-    ready: "готов",
+    wizard: t("statusWizard"),
+    structuring: t("statusStructuring"),
+    ready: t("statusReady"),
   };
   return (
     <div className="course-view">
@@ -308,30 +365,27 @@ function Wizard({
   onStart: () => void;
   onSaved: () => void | Promise<void>;
 }) {
+  const t = useT();
   if (!job || (job.status === "done" && !job.result)) {
     return (
       <div className="wizard">
-        <p>
-          Прежде чем строить программу, агент задаст несколько уточняющих вопросов с вариантами
-          ответов. Это займёт ~10-30 секунд — можно открыть другой курс или вернуться позже,
-          UI не блокируется.
-        </p>
-        <button onClick={onStart}>Начать визард</button>
+        <p>{t("wizardIntro")}</p>
+        <button onClick={onStart}>{t("startWizard")}</button>
       </div>
     );
   }
   if (job.status === "running") {
     return (
       <div className="wizard">
-        <p>Подумаю над вопросами…</p>
+        <p>{t("wizardThinking")}</p>
       </div>
     );
   }
   if (job.status === "error") {
     return (
       <div className="wizard error">
-        <p>Ошибка: {job.error}</p>
-        <button onClick={onStart}>Попробовать снова</button>
+        <p>{t("errorPrefix", { error: job.error })}</p>
+        <button onClick={onStart}>{t("retry")}</button>
       </div>
     );
   }
@@ -341,8 +395,8 @@ function Wizard({
   if (questions.length === 0) {
     return (
       <div className="wizard">
-        <p>Агент не вернул вопросов.</p>
-        <button onClick={onStart}>Попробовать снова</button>
+        <p>{t("noQuestionsReturned")}</p>
+        <button onClick={onStart}>{t("retry")}</button>
       </div>
     );
   }
@@ -360,6 +414,7 @@ function AnsweringForm({
   questions: Question[];
   onSaved: () => void | Promise<void>;
 }) {
+  const t = useT();
   const [answers, setAnswers] = useState<Answer[]>(
     questions.map(() => ({ selectedIndex: null, custom: "" }))
   );
@@ -399,7 +454,7 @@ function AnsweringForm({
 
   return (
     <div className="wizard">
-      <p>Выбери вариант или впиши свой ответ. Пустые вопросы пропускаем.</p>
+      <p>{t("answeringIntro")}</p>
       <ol className="qna">
         {questions.map((q, i) => (
           <li key={i}>
@@ -421,16 +476,16 @@ function AnsweringForm({
               className="custom-answer"
               type="text"
               value={answers[i].custom}
-              placeholder="Свой ответ (если ни один не подходит)…"
+              placeholder={t("customAnswerPlaceholder")}
               onChange={(e) => setAnswer(i, { custom: e.target.value })}
             />
           </li>
         ))}
       </ol>
       <button onClick={save} disabled={!canSave || saving}>
-        {saving ? "Сохраняю…" : "Сохранить ответы"}
+        {saving ? t("saving") : t("saveAnswers")}
       </button>
-      {error && <p style={{ color: "#c00" }}>Ошибка: {error}</p>}
+      {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
     </div>
   );
 }
@@ -442,23 +497,26 @@ function StructureBuilder({
   job?: JobState;
   onStart: () => void;
 }) {
+  const t = useT();
   const running = job?.status === "running";
   const errored = job?.status === "error";
   return (
     <div className="wizard">
-      <p>
-        Ответы визарда сохранены. Агент исследует тему и предложит структуру курса.
-        Это займёт 30 секунд — 2 минуты. UI не блокируется — можно переключить курс.
-      </p>
+      <p>{t("builderIntro")}</p>
       <button onClick={onStart} disabled={running}>
-        {running ? "Строю структуру…" : "Сгенерировать структуру"}
+        {running ? t("buildingStructure") : t("generateStructure")}
       </button>
-      {errored && <p style={{ color: "#c00" }}>Ошибка: {(job as any).error}</p>}
+      {errored && (
+        <p style={{ color: "var(--danger)" }}>
+          {t("errorPrefix", { error: (job as any).error })}
+        </p>
+      )}
     </div>
   );
 }
 
 function Structure({ course }: { course: Course }) {
+  const t = useT();
   const [tree, setTree] = useState<StructureFile | null>(null);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -538,13 +596,13 @@ function Structure({ course }: { course: Course }) {
     }
   }
 
-  if (error && !tree) return <div className="placeholder">Ошибка загрузки: {error}</div>;
-  if (!tree) return <div className="placeholder">Загружаю структуру…</div>;
+  if (error && !tree) return <div className="placeholder">{t("loadError", { error })}</div>;
+  if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
   return (
     <div className="structure">
       {tree.modules.length === 0 ? (
-        <div className="placeholder">Структура пустая.</div>
+        <div className="placeholder">{t("emptyStructure")}</div>
       ) : (
         <StructureTree tree={tree} />
       )}
@@ -559,7 +617,7 @@ function Structure({ course }: { course: Course }) {
         thinking={isAgentThinking}
         accepting={accepting}
       />
-      {error && tree && <p className="error-banner">Ошибка: {error}</p>}
+      {error && tree && <p className="error-banner">{t("errorPrefix", { error })}</p>}
     </div>
   );
 }
@@ -583,11 +641,10 @@ function RefineChat({
   thinking: boolean;
   accepting: string | null;
 }) {
+  const t = useT();
   const lastIdx = chat.length - 1;
   const placeholder =
-    chat.length === 0
-      ? "Напиши, что переделать. Например: «добавь модуль про композицию, сделай больше упор на масляную живопись»"
-      : "Сообщение агенту…";
+    chat.length === 0 ? t("refineInputPlaceholder") : t("refineInputPlaceholderShort");
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -599,16 +656,13 @@ function RefineChat({
   return (
     <section className="refine">
       <header className="refine-header">
-        <div className="refine-title">Доработать с агентом</div>
-        <div className="refine-sub">
-          Опиши, что переделать — агент предложит новую структуру с пояснением.
-          Принятые правки сохраняются в памяти курса и учитываются дальше.
-        </div>
+        <div className="refine-title">{t("refineTitle")}</div>
+        <div className="refine-sub">{t("refineSub")}</div>
       </header>
 
       <div className="refine-history">
         {chat.length === 0 && !thinking && (
-          <div className="chat-empty">Пока пусто. Начни обсуждение.</div>
+          <div className="chat-empty">{t("chatEmpty")}</div>
         )}
         {chat.map((msg, idx) => {
           const isLast = idx === lastIdx;
@@ -627,19 +681,17 @@ function RefineChat({
               <div className="bubble">{msg.text}</div>
               {hasProposal && (
                 <div className="proposal">
-                  <div className="proposal-header">Предложение</div>
+                  <div className="proposal-header">{t("proposal")}</div>
                   <StructureTree
                     tree={{ course_id: course.id, modules: msg.modules }}
                   />
                   {isPending && (
                     <div className="proposal-actions">
-                      <button onClick={() => onAccept(msg.id)}>Принять</button>
-                      <span className="proposal-hint">
-                        Не подходит? Опиши, что переделать, в поле ниже.
-                      </span>
+                      <button onClick={() => onAccept(msg.id)}>{t("accept")}</button>
+                      <span className="proposal-hint">{t("proposalHint")}</span>
                     </div>
                   )}
-                  {isAccepting && <span className="proposal-hint">Применяю…</span>}
+                  {isAccepting && <span className="proposal-hint">{t("applying")}</span>}
                 </div>
               )}
             </div>
@@ -648,7 +700,7 @@ function RefineChat({
         {thinking && (
           <div className="chat-msg msg-agent">
             <div className="bubble thinking">
-              <span className="spinner" /> Агент думает…
+              <span className="spinner" /> {t("agentThinking")}
             </div>
           </div>
         )}
@@ -664,9 +716,9 @@ function RefineChat({
           disabled={thinking}
         />
         <div className="refine-input-row">
-          <span className="kbd-hint">⌘/Ctrl + Enter — отправить</span>
+          <span className="kbd-hint">{t("kbdHint")}</span>
           <button onClick={onSend} disabled={!input.trim() || thinking}>
-            Отправить
+            {t("send")}
           </button>
         </div>
       </div>
