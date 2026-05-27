@@ -303,10 +303,20 @@ ${courseMd}
 </course-md>
 
 Design a curriculum: a list of top-level modules, each with a few submodules.
+
+Research first. Before sketching anything, web-search how this subject is
+taught in serious places: university programs (especially the best ones —
+top art academies, top engineering schools, etc. as relevant), well-regarded
+online courses, established certifications, and the canonical reading paths
+practitioners recommend. Use the convergence of those programs as your skeleton.
+If multiple traditions exist (e.g. русская академическая vs European atelier),
+acknowledge them and pick the one that best fits the learner's goals from the
+brief. Never improvise a structure from intuition when established programs
+exist.
+
 Constraints:
 - Reflect the learner's specific goals, prior knowledge, and constraints.
 - Skip modules irrelevant to those goals; do not produce a generic textbook.
-- Look up (web search) how this subject is typically taught and adapt.
 - 4-10 top-level modules; each with 2-6 submodules.
 - All titles and summaries in language "${lang}".
 
