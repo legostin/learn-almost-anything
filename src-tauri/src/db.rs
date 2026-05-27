@@ -188,6 +188,16 @@ pub fn set_module_generation_state(
     Ok(())
 }
 
+/// Reset any submodules left in 'generating' state from a previous app run.
+/// They couldn't possibly still be running — the worker threads died with
+/// the previous process. Mark them 'failed' so the user can retry.
+pub fn reset_stuck_generations(conn: &Connection) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET generation_state = 'failed' WHERE generation_state = 'generating'",
+        [],
+    )
+}
+
 pub fn get_module_generation_state(
     conn: &Connection,
     id: &str,

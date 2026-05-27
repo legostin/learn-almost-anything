@@ -669,6 +669,16 @@ pub fn run() {
             let db = db::open(&db_path).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("db init failed: {e}"))
             })?;
+            {
+                let conn = db.0.lock().expect("db lock");
+                match db::reset_stuck_generations(&conn) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[startup] reset {n} stuck 'generating' submodules → 'failed'");
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[startup] reset_stuck_generations: {e}"),
+                }
+            }
             app.manage(Arc::new(db));
 
             app.manage(Arc::new(AppPaths {

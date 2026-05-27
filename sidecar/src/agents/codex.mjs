@@ -283,25 +283,27 @@ Return the full revised article in "article" and a brief log of fixes in
 }
 
 // OpenAI strict structured output requires every property in `properties`
-// to also appear in `required` (no truly-optional fields). All four widget
-// fields are therefore listed.
+// to also appear in `required` and does NOT support objects with dynamic
+// keys (`additionalProperties: <schema>`). So widgets is a tagged array
+// instead of an object keyed by id — we re-key it in JS after parsing.
 const annotateSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
     article: { type: "string" },
     widgets: {
-      type: "object",
-      additionalProperties: {
+      type: "array",
+      items: {
         type: "object",
         additionalProperties: false,
         properties: {
+          id: { type: "string" },
           type: { type: "string" },
           placeholder: { type: "boolean" },
           description: { type: "string" },
           alt: { type: "string" },
         },
-        required: ["type", "placeholder", "description", "alt"],
+        required: ["id", "type", "placeholder", "description", "alt"],
       },
     },
   },
@@ -342,19 +344,28 @@ ${article}
 ${terminologyGuide(lang)}
 
 If no images would help, return article unchanged and widgets as an empty
-object {}.`;
+array [].
+
+The "widgets" field is an ARRAY for schema compatibility. Each entry must
+include its own "id" (e.g. "img-1") that matches the marker in the article.`;
   onProgress?.({ label: "marking" });
   const text = await runStreamed(prompt, annotateSchema, onProgress);
   const parsed = JSON.parse(text);
+  const widgetsMap = {};
+  if (Array.isArray(parsed?.widgets)) {
+    for (const w of parsed.widgets) {
+      if (w && typeof w.id === "string" && w.id.trim()) {
+        const { id, ...rest } = w;
+        widgetsMap[id.trim()] = rest;
+      }
+    }
+  }
   return {
     article:
       typeof parsed?.article === "string" && parsed.article.trim()
         ? parsed.article.trim()
         : article,
-    widgets:
-      parsed && typeof parsed.widgets === "object" && parsed.widgets !== null
-        ? parsed.widgets
-        : {},
+    widgets: widgetsMap,
   };
 }
 
