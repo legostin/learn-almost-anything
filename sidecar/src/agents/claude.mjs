@@ -6,6 +6,10 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+function terminologyGuide(lang) {
+  return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
+}
+
 async function runOnce(prompt) {
   let text = "";
   for await (const message of query({ prompt, options: { maxTurns: 1 } })) {
@@ -93,7 +97,9 @@ Output ONLY JSON on a single line, no prose, no markdown fence:
 {"reply":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}
 
 All titles and summaries in language "${lang}". When proposing, return the
-FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.`;
+FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.
+
+${terminologyGuide(lang)}`;
 }
 
 function normalizeRefineResponse(parsed) {
@@ -165,6 +171,8 @@ Constraints:
 - Use 4-10 top-level modules; each with 2-6 submodules.
 - All titles and summaries in language "${lang}".
 
+${terminologyGuide(lang)}
+
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
 {"modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
@@ -223,6 +231,8 @@ options the learner can pick from. The options should:
 The user will also have a free-text fallback, so do NOT add an "other" option.
 
 Write everything in language "${lang}".
+
+${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape: {"questions":[{"text":"...","options":["...","..."]}]}`;

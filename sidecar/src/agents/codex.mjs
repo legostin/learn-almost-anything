@@ -7,6 +7,10 @@
 
 import { Codex } from "@openai/codex-sdk";
 
+function terminologyGuide(lang) {
+  return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
+}
+
 const codex = new Codex();
 
 const baseThreadOptions = {
@@ -52,7 +56,9 @@ curriculum. Each question must have 3-5 short, mutually-distinct, concrete,
 topic-specific answer options the learner can pick from. The user will also
 have a free-text fallback so do NOT add an "other" option.
 
-Write everything in language "${lang}".`;
+Write everything in language "${lang}".
+
+${terminologyGuide(lang)}`;
 
   const schema = {
     type: "object",
@@ -147,7 +153,9 @@ B) If unclear or you'd like to negotiate — ask one specific clarifying questio
    in "reply". Set "modules" to []. Do NOT propose half a tree.
 
 All titles and summaries in language "${lang}". When proposing, return the
-FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.`;
+FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.
+
+${terminologyGuide(lang)}`;
 }
 
 function normalizeRefineResponse(parsed) {
@@ -245,7 +253,9 @@ Constraints:
 - Skip modules irrelevant to those goals; do not produce a generic textbook.
 - Look up (web search) how this subject is typically taught and adapt.
 - 4-10 top-level modules; each with 2-6 submodules.
-- All titles and summaries in language "${lang}".`;
+- All titles and summaries in language "${lang}".
+
+${terminologyGuide(lang)}`;
 
   const submoduleSchema = {
     type: "object",
