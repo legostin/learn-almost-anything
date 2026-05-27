@@ -11,6 +11,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0
         version: 0.3.150(@anthropic-ai/sdk@0.98.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@openai/codex-sdk':
+        specifier: ^0.134.0
+        version: 0.134.0
 
 packages:
 
@@ -94,6 +97,51 @@ packages:
     peerDependenciesMeta:
       '@cfworker/json-schema':
         optional: true
+
+  '@openai/codex-sdk@0.134.0':
+    resolution: {integrity: sha512-fQIIj6RYiVZ7sr8XyEsc2t0zsLvRd+gCx9qUksCDgwc8MzVHhLN7eUjAM5l3tro6PcikBha1+40Tu5OVrF32lg==}
+    engines: {node: '>=18'}
+
+  '@openai/codex@0.134.0':
+    resolution: {integrity: sha512-N0vmdTXl/rglZjgd3PaMe9oRrqjO6zZ//uAvUhCDRnJNAUT3LrpYvCK3y9B/ev7QcChfXR43IGUh3ssqWRvMmA==}
+    engines: {node: '>=16'}
+    hasBin: true
+
+  '@openai/codex@0.134.0-darwin-arm64':
+    resolution: {integrity: sha512-pOxwQjb1HHtY6KG66+g/rX7uP4yBvchfCrQw22ddYy64s7fJqnD6UV/Ur60j6MWXt71jcaWLEkV1pJthQy9CFQ==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@openai/codex@0.134.0-darwin-x64':
+    resolution: {integrity: sha512-XjRtq8PB9dtpxQ5QU6TrzR/z8EVlLLk55oonsyRp3VkMOsKjJWXvLxAnmzUm1MuVZqz90Ua7CJbr+8BG+ZUWpA==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@openai/codex@0.134.0-linux-arm64':
+    resolution: {integrity: sha512-fqI8iClQGvrANFx/dJwZK8KNQlqlQKo7A/UB5G7IaeTAAJ+y/CG2R33Bbd9GboH/8ormY39ureNk27eqt++51g==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@openai/codex@0.134.0-linux-x64':
+    resolution: {integrity: sha512-d/o1AVAniQU2oSEq7ZV0hVwzmk6Dj2IWeNPLnX/KXyv1DfIMJbY+qEg/xhfRmuVW4VPhrhQLBITwrkAYviy1MA==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [linux]
+
+  '@openai/codex@0.134.0-win32-arm64':
+    resolution: {integrity: sha512-8OdRmbCcyLLMF3Bg6945PW6INZ7bZVygYo2lusnC0Q2KZ3MRYrMnXRJ6mfvkDc8kPpFE+djMFnQ70gt/jBLVCA==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@openai/codex@0.134.0-win32-x64':
+    resolution: {integrity: sha512-hW1omBcN1jKeVUVnTqWlpc42nF2qAwCEN6l1IFeKFJegYoZ39YrE7pdh56gAmaZTyT5Eexx7cgNpaEK3JElxvA==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [win32]
 
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
@@ -540,6 +588,37 @@ snapshots:
       zod-to-json-schema: 3.25.2(zod@4.4.3)
     transitivePeerDependencies:
       - supports-color
+
+  '@openai/codex-sdk@0.134.0':
+    dependencies:
+      '@openai/codex': 0.134.0
+
+  '@openai/codex@0.134.0':
+    optionalDependencies:
+      '@openai/codex-darwin-arm64': '@openai/codex@0.134.0-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.134.0-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.134.0-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.134.0-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.134.0-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.134.0-win32-x64'
+
+  '@openai/codex@0.134.0-darwin-arm64':
+    optional: true
+
+  '@openai/codex@0.134.0-darwin-x64':
+    optional: true
+
+  '@openai/codex@0.134.0-linux-arm64':
+    optional: true
+
+  '@openai/codex@0.134.0-linux-x64':
+    optional: true
+
+  '@openai/codex@0.134.0-win32-arm64':
+    optional: true
+
+  '@openai/codex@0.134.0-win32-x64':
+    optional: true
 
   '@stablelib/base64@1.0.1': {}
 

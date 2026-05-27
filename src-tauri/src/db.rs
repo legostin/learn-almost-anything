@@ -34,25 +34,29 @@ pub struct Course {
     pub topic: String,
     pub language: String,
     pub status: String,
+    pub agent: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
+const COURSE_COLS: &str = "id, topic, language, status, agent, created_at, updated_at";
+
+fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
+    Ok(Course {
+        id: r.get(0)?,
+        topic: r.get(1)?,
+        language: r.get(2)?,
+        status: r.get(3)?,
+        agent: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
+}
+
 pub fn list_courses(conn: &Connection) -> Result<Vec<Course>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, topic, language, status, created_at, updated_at \
-         FROM courses ORDER BY updated_at DESC",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(Course {
-            id: r.get(0)?,
-            topic: r.get(1)?,
-            language: r.get(2)?,
-            status: r.get(3)?,
-            created_at: r.get(4)?,
-            updated_at: r.get(5)?,
-        })
-    })?;
+    let sql = format!("SELECT {COURSE_COLS} FROM courses ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_course)?;
     rows.collect()
 }
 
@@ -61,36 +65,25 @@ pub fn insert_course(
     id: &str,
     topic: &str,
     language: &str,
+    agent: &str,
     now: i64,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO courses (id, topic, language, status, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, 'wizard', ?4, ?4)",
-        rusqlite::params![id, topic, language, now],
+        "INSERT INTO courses (id, topic, language, status, agent, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 'wizard', ?4, ?5, ?5)",
+        rusqlite::params![id, topic, language, agent, now],
     )?;
     Ok(())
 }
 
 pub fn get_course(conn: &Connection, id: &str) -> Result<Option<Course>, rusqlite::Error> {
-    conn.query_row(
-        "SELECT id, topic, language, status, created_at, updated_at FROM courses WHERE id = ?1",
-        [id],
-        |r| {
-            Ok(Course {
-                id: r.get(0)?,
-                topic: r.get(1)?,
-                language: r.get(2)?,
-                status: r.get(3)?,
-                created_at: r.get(4)?,
-                updated_at: r.get(5)?,
-            })
-        },
-    )
-    .map(Some)
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    })
+    let sql = format!("SELECT {COURSE_COLS} FROM courses WHERE id = ?1");
+    conn.query_row(&sql, [id], row_to_course)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
 }
 
 pub fn set_course_status(

@@ -4,23 +4,36 @@
 //   Request:   { "id": <string>, "method": <string>, "params": <object> }
 //   Response:  { "id": <string>, "result": <any> }
 //   Error:     { "id": <string>, "error": <string> }
-//   Event:     { "event": <string>, "id"?: <string>, "data": <any> }
 //
 // Stdout = protocol channel only. All diagnostics go to stderr.
+//
+// Backend selection: methods that hit an LLM accept `backend: "claude" | "codex"`
+// in params. Defaults to "claude". The dispatcher routes to the right module.
 
 import { createInterface } from "node:readline";
 import process from "node:process";
 
 import * as claude from "./agents/claude.mjs";
+import * as codex from "./agents/codex.mjs";
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 const log = (...args) => process.stderr.write("[sidecar] " + args.join(" ") + "\n");
 
+const agents = { claude, codex };
+
+function pickAgent(params) {
+  const name = params?.backend ?? "claude";
+  if (!agents[name]) throw new Error(`unknown backend: ${name}`);
+  return agents[name];
+}
+
 const methods = {
   ping: async () => ({ pong: true, time: Date.now() }),
+  chat: async (params) => pickAgent(params).chat(params),
+  wizard_questions: async (params) => pickAgent(params).wizardQuestions(params),
+  build_structure: async (params) => pickAgent(params).buildStructure(params),
+  // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
-  wizard_questions: async (params) => claude.wizardQuestions(params),
-  build_structure: async (params) => claude.buildStructure(params),
 };
 
 const rl = createInterface({ input: process.stdin });

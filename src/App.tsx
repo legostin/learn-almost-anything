@@ -3,11 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
+type Agent = "claude" | "codex";
+
 type Course = {
   id: string;
   topic: string;
   language: string;
   status: string;
+  agent: Agent;
   created_at: number;
   updated_at: number;
 };
@@ -167,6 +170,7 @@ function CreateCourse({
   onCancel: () => void;
 }) {
   const [topic, setTopic] = useState("");
+  const [agent, setAgent] = useState<Agent>("claude");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
@@ -174,7 +178,11 @@ function CreateCourse({
     if (!topic.trim() || busy) return;
     setBusy(true);
     const language = navigator.language.slice(0, 2) || "en";
-    const id = await invoke<string>("create_course", { topic: topic.trim(), language });
+    const id = await invoke<string>("create_course", {
+      topic: topic.trim(),
+      language,
+      agent,
+    });
     onCreated(id);
   }
 
@@ -189,6 +197,37 @@ function CreateCourse({
           onChange={(e) => setTopic(e.target.value)}
           placeholder="например: академическая живопись"
         />
+      </label>
+      <label>
+        Агент
+        <div className="agent-picker">
+          <label className={`agent-option ${agent === "claude" ? "selected" : ""}`}>
+            <input
+              type="radio"
+              name="agent"
+              value="claude"
+              checked={agent === "claude"}
+              onChange={() => setAgent("claude")}
+            />
+            <div className="agent-meta">
+              <div className="agent-name">Claude</div>
+              <div className="agent-desc">Anthropic, подписка Pro/Max</div>
+            </div>
+          </label>
+          <label className={`agent-option ${agent === "codex" ? "selected" : ""}`}>
+            <input
+              type="radio"
+              name="agent"
+              value="codex"
+              checked={agent === "codex"}
+              onChange={() => setAgent("codex")}
+            />
+            <div className="agent-meta">
+              <div className="agent-name">Codex</div>
+              <div className="agent-desc">OpenAI, ChatGPT-подписка, веб-поиск</div>
+            </div>
+          </label>
+        </div>
       </label>
       <div className="actions">
         <button type="submit" disabled={!topic.trim() || busy}>
@@ -224,6 +263,7 @@ function CourseView({
       <h2>{course.topic}</h2>
       <div className="course-meta-full">
         <span className="lang-pill">{course.language}</span>
+        <span className={`agent-pill agent-${course.agent}`}>{course.agent}</span>
         <span className={`status-pill status-${course.status}`}>
           {statusLabel[course.status] ?? course.status}
         </span>

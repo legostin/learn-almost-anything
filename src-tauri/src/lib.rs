@@ -28,14 +28,19 @@ fn create_course(
     state: tauri::State<'_, Arc<Db>>,
     topic: String,
     language: String,
+    agent: Option<String>,
 ) -> Result<String, String> {
+    let agent = agent.unwrap_or_else(|| "claude".to_string());
+    if agent != "claude" && agent != "codex" {
+        return Err(format!("unknown agent: {agent}"));
+    }
     let id = Uuid::new_v4().to_string();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs() as i64;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    db::insert_course(&conn, &id, &topic, &language, now).map_err(|e| e.to_string())?;
+    db::insert_course(&conn, &id, &topic, &language, &agent, now).map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -93,10 +98,11 @@ fn start_wizard_questions(
 
     thread::spawn(move || {
         let params = json!({
+            "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
         });
-        let payload = match sidecar.call("wizard_questions", params, Duration::from_secs(180)) {
+        let payload = match sidecar.call("wizard_questions", params, Duration::from_secs(300)) {
             Ok(v) => json!({ "ok": true, "result": v }),
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         };
@@ -129,11 +135,12 @@ fn start_build_structure(
 
     thread::spawn(move || {
         let params = json!({
+            "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
             "courseMd": course_md,
         });
-        let payload = match sidecar.call("build_structure", params, Duration::from_secs(300)) {
+        let payload = match sidecar.call("build_structure", params, Duration::from_secs(420)) {
             Ok(v) => match serde_json::from_value::<courses::SidecarTree>(v) {
                 Ok(raw) => {
                     let conn = match db.0.lock() {

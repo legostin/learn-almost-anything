@@ -359,6 +359,76 @@ button {
   color: var(--status-ready-fg);
 }
 
+.agent-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-feature-settings: "cv11";
+}
+.agent-pill.agent-claude {
+  background: rgba(217, 119, 87, 0.14);
+  color: #b15835;
+}
+.agent-pill.agent-codex {
+  background: rgba(16, 163, 127, 0.14);
+  color: #0d8868;
+}
+
+.agent-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.agent-option {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 120ms ease;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  color: var(--text) !important;
+  font-weight: 400 !important;
+}
+.agent-option:hover {
+  border-color: var(--border-strong);
+}
+.agent-option.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.agent-option input[type="radio"] {
+  accent-color: var(--primary);
+  margin: 4px 0 0;
+  cursor: pointer;
+}
+.agent-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.agent-name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.agent-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
 /* ============================================================
  * Wizard / questions
  * ============================================================ */
