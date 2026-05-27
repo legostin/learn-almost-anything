@@ -9,10 +9,12 @@ use uuid::Uuid;
 
 mod courses;
 mod db;
+mod settings;
 mod sidecar;
 
 use courses::{AppPaths, QnA};
 use db::{Course, Db};
+use settings::SettingsState;
 use sidecar::Sidecar;
 
 const JOB_EVENT: &str = "agent_job";
@@ -364,6 +366,7 @@ fn spawn_generate_submodule(
     sidecar: Arc<Sidecar>,
     course: db::Course,
     submodule_id: String,
+    brave_api_key: Option<String>,
 ) -> Result<(), String> {
     // Set state to 'generating' before spawning so UI can reflect it on the
     // very next refresh.
@@ -407,7 +410,7 @@ fn spawn_generate_submodule(
     };
 
     thread::spawn(move || {
-        let common = json!({
+        let mut common = json!({
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
@@ -418,6 +421,9 @@ fn spawn_generate_submodule(
             "modulePath": { "title": module_title, "summary": module_summary },
             "submodulePath": { "title": sub_title, "summary": sub_summary },
         });
+        if let Some(ref key) = brave_api_key {
+            common["braveApiKey"] = json!(key);
+        }
 
         let make_progress_cb = |stage: &'static str| {
             let app3 = app2.clone();
@@ -546,6 +552,29 @@ fn spawn_generate_submodule(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct SettingsStatus {
+    brave_configured: bool,
+}
+
+#[tauri::command]
+fn get_settings_status(state: tauri::State<'_, Arc<SettingsState>>) -> SettingsStatus {
+    SettingsStatus {
+        brave_configured: state.brave_api_key().is_some(),
+    }
+}
+
+#[tauri::command]
+fn set_brave_key(
+    state: tauri::State<'_, Arc<SettingsState>>,
+    key: Option<String>,
+) -> Result<SettingsStatus, String> {
+    state.set_brave_api_key(key).map_err(|e| e.to_string())?;
+    Ok(SettingsStatus {
+        brave_configured: state.brave_api_key().is_some(),
+    })
+}
+
 #[tauri::command]
 fn delete_course(
     db_state: tauri::State<'_, Arc<Db>>,
@@ -577,6 +606,7 @@ fn start_generate_submodule(
     db_state: tauri::State<'_, Arc<Db>>,
     paths_state: tauri::State<'_, Arc<AppPaths>>,
     sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
     course_id: String,
     submodule_id: String,
 ) -> Result<(), String> {
@@ -602,6 +632,7 @@ fn start_generate_submodule(
         sidecar_state.inner().clone(),
         course,
         submodule_id,
+        settings_state.brave_api_key(),
     )
 }
 
@@ -611,6 +642,7 @@ fn start_first_pending_submodule(
     db_state: tauri::State<'_, Arc<Db>>,
     paths_state: tauri::State<'_, Arc<AppPaths>>,
     sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
     course_id: String,
 ) -> Result<Option<String>, String> {
     let (course, first) = {
@@ -631,6 +663,7 @@ fn start_first_pending_submodule(
         sidecar_state.inner().clone(),
         course,
         sub_id.clone(),
+        settings_state.brave_api_key(),
     )?;
     Ok(Some(sub_id))
 }
@@ -720,6 +753,8 @@ pub fn run() {
                 courses_root: dir.join("courses"),
             }));
 
+            app.manage(Arc::new(SettingsState::load(dir.clone())));
+
             let sidecar = Sidecar::spawn(&sidecar_script_path()).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
             })?;
@@ -741,7 +776,9 @@ pub fn run() {
             start_generate_submodule,
             start_first_pending_submodule,
             read_submodule_article,
-            delete_course
+            delete_course,
+            get_settings_status,
+            set_brave_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

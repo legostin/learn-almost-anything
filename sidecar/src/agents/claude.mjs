@@ -14,20 +14,54 @@ async function runOnce(prompt) {
   return await runStreamed(prompt);
 }
 
-async function runStreamed(prompt, onProgress) {
+// Builds Claude Agent SDK options. When braveApiKey is provided, spawns the
+// official Brave Search MCP server as a stdio subprocess and whitelists its
+// tools. Without a key the agent runs without Brave (no web search).
+function buildClaudeOptions({ maxTurns, braveApiKey } = {}) {
+  const options = { maxTurns: maxTurns ?? 1 };
+  if (braveApiKey) {
+    options.mcpServers = {
+      brave: {
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-brave-search"],
+        env: { BRAVE_API_KEY: braveApiKey },
+      },
+    };
+    options.allowedTools = [
+      "mcp__brave__brave_web_search",
+      "mcp__brave__brave_image_search",
+    ];
+  }
+  return options;
+}
+
+async function runStreamed(prompt, onProgress, opts) {
   let text = "";
-  for await (const message of query({ prompt, options: { maxTurns: 1 } })) {
+  // When Brave MCP is available, the agent may take several turns (search,
+  // read, write). Without tools, one turn is enough.
+  const options = buildClaudeOptions({
+    maxTurns: opts?.braveApiKey ? 8 : 1,
+    braveApiKey: opts?.braveApiKey,
+  });
+  for await (const message of query({ prompt, options })) {
     if (message.type === "assistant") {
       const content = message.message?.content;
-      const chunk = Array.isArray(content)
-        ? content
-            .filter((b) => b?.type === "text")
-            .map((b) => b.text || "")
-            .join(" ")
-        : "";
-      if (chunk && onProgress) {
-        const tail = chunk.replace(/\s+/g, " ").trim().slice(-100);
-        if (tail) onProgress({ label: "writing", detail: tail });
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block?.type === "text" && block.text) {
+            const tail = block.text.replace(/\s+/g, " ").trim().slice(-100);
+            if (tail && onProgress) onProgress({ label: "writing", detail: tail });
+          } else if (block?.type === "tool_use" && block.name && onProgress) {
+            // Surface tool calls in progress (e.g. brave_web_search query).
+            const q =
+              block.input && typeof block.input.query === "string"
+                ? block.input.query
+                : "";
+            const label = block.name.includes("image") ? "searching images" : "searching";
+            onProgress({ label, detail: q || block.name });
+          }
+        }
       }
     } else if (message.type === "result" && message.subtype === "success") {
       text = message.result;
@@ -101,6 +135,7 @@ async function draftArticleInternal(
     modulePath,
     submodulePath,
     previousArticles,
+    braveApiKey,
   },
   onProgress
 ) {
@@ -145,18 +180,35 @@ Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
+${
+  braveApiKey
+    ? `You have web access through the Brave Search MCP tools:
+- mcp__brave__brave_web_search — use it to verify facts, find concrete
+  examples, current best practices, and citations relevant to this
+  submodule. Cite urls inline where helpful.
+- mcp__brave__brave_image_search — use it to find REAL image URLs for
+  image widgets. When you find a good image, set its "url" field to the
+  direct image URL and "source" to the source page url; the UI will
+  display it. If you can't find a suitable image, leave url empty and the
+  UI will show a placeholder with your description.
+
+Use search tools liberally during research, but write the article in your
+own voice. Don't quote large blocks; weave findings in naturally.
+`
+    : ""
+}
 ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
 {"article":"<markdown with widget markers>","widgets":[<widget objects>]}
 
 Each widget object:
-- image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>"}
+- image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 
 If no widgets, use [].`;
   onProgress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, onProgress);
+  const text = await runStreamed(prompt, onProgress, { braveApiKey });
   const parsed = extractJson(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
     throw new Error("LLM returned no article");
@@ -174,11 +226,16 @@ function normalizeWidgets(raw) {
     if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
     const id = w.id.trim();
     if (w.type === "image") {
+      const url = typeof w.url === "string" ? w.url.trim() : "";
       out[id] = {
         type: "image",
-        placeholder: true,
+        placeholder: !url,
         description: typeof w.description === "string" ? w.description.trim() : "",
         alt: typeof w.alt === "string" ? w.alt.trim() : "",
+        ...(url ? { url } : {}),
+        ...(typeof w.source === "string" && w.source.trim()
+          ? { source: w.source.trim() }
+          : {}),
       };
     } else if (w.type === "diagram") {
       out[id] = {

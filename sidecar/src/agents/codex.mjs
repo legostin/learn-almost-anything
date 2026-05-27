@@ -7,11 +7,29 @@
 
 import { Codex } from "@openai/codex-sdk";
 
+// Codex SDK takes config overrides via constructor; we make a fresh
+// instance per call when Brave MCP is needed so the key isn't held in
+// long-lived state. Without a key, falls back to a shared instance.
+function makeCodex(braveApiKey) {
+  if (!braveApiKey) return defaultCodex;
+  return new Codex({
+    config: {
+      mcp_servers: {
+        brave: {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-brave-search"],
+          env: { BRAVE_API_KEY: braveApiKey },
+        },
+      },
+    },
+  });
+}
+
+const defaultCodex = new Codex();
+
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
-
-const codex = new Codex();
 
 const baseThreadOptions = {
   // We're not in a git repo at the user's course-data dir, and we don't want
@@ -23,15 +41,15 @@ const baseThreadOptions = {
   webSearchEnabled: true,
 };
 
-async function runOnce(prompt, outputSchema) {
-  const thread = codex.startThread(baseThreadOptions);
+async function runOnce(prompt, outputSchema, opts) {
+  const thread = makeCodex(opts?.braveApiKey).startThread(baseThreadOptions);
   const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
   return turn.finalResponse;
 }
 
-async function runStreamed(prompt, outputSchema, onProgress) {
-  if (!onProgress) return await runOnce(prompt, outputSchema);
-  const thread = codex.startThread(baseThreadOptions);
+async function runStreamed(prompt, outputSchema, onProgress, opts) {
+  if (!onProgress) return await runOnce(prompt, outputSchema, opts);
+  const thread = makeCodex(opts?.braveApiKey).startThread(baseThreadOptions);
   const stream = await thread.runStreamed(
     prompt,
     outputSchema ? { outputSchema } : undefined
@@ -195,8 +213,10 @@ const draftSchema = {
           id: { type: "string" },
           description: { type: "string" },
           alt: { type: "string" },
+          url: { type: "string" },
+          source: { type: "string" },
         },
-        required: ["id", "description", "alt"],
+        required: ["id", "description", "alt", "url", "source"],
       },
     },
     diagramWidgets: {
@@ -226,6 +246,7 @@ async function draftArticleInternal(
     modulePath,
     submodulePath,
     previousArticles,
+    braveApiKey,
   },
   onProgress
 ) {
@@ -271,14 +292,32 @@ Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
 Return widgets in two separate arrays:
-- imageWidgets: [{id, description (what to depict in ${lang}), alt (short alt in ${lang})}]
-- diagramWidgets: [{id, source (Mermaid source), caption (short caption in ${lang})}]
+- imageWidgets: [{id, description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
+- diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 
 If a category is unused, return an empty array [].
 
+${
+  braveApiKey
+    ? `You have web access through the Brave Search MCP tools:
+- mcp__brave__brave_web_search — for verifying facts, finding concrete
+  examples, current best practices, and citations.
+- mcp__brave__brave_image_search — for finding REAL image URLs for image
+  widgets. When you find a good one, set the image widget's "url" field
+  to the direct image URL and "source" to the page url. If you can't
+  find a suitable image, leave both as "" and the UI will show a
+  placeholder with the description.
+
+Codex's built-in web search is also available — use whichever fits.
+`
+    : `Use Codex's built-in web search where useful to verify facts and
+find concrete examples. For image widgets, leave url and source as ""
+unless you have a confidently-correct direct image URL.
+`
+}
 ${terminologyGuide(lang)}`;
   onProgress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, draftSchema, onProgress);
+  const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey });
   const parsed = JSON.parse(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
     throw new Error("Codex returned no article");
@@ -294,11 +333,16 @@ function mergeWidgets(imageWidgets, diagramWidgets) {
   if (Array.isArray(imageWidgets)) {
     for (const w of imageWidgets) {
       if (w && typeof w.id === "string" && w.id.trim()) {
+        const url = typeof w.url === "string" ? w.url.trim() : "";
         out[w.id.trim()] = {
           type: "image",
-          placeholder: true,
+          placeholder: !url,
           description: typeof w.description === "string" ? w.description.trim() : "",
           alt: typeof w.alt === "string" ? w.alt.trim() : "",
+          ...(url ? { url } : {}),
+          ...(typeof w.source === "string" && w.source.trim()
+            ? { source: w.source.trim() }
+            : {}),
         };
       }
     }

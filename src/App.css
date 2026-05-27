@@ -1019,6 +1019,19 @@ button {
 .widget {
   margin: 24px 0;
 }
+.widget-image-link {
+  display: block;
+  width: 100%;
+  text-decoration: none;
+}
+.widget-image-real {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
 .widget-image-box {
   background: var(--surface-2);
   border: 1.5px dashed var(--border-strong);
@@ -1432,6 +1445,52 @@ button {
   background: var(--primary-soft);
   color: var(--primary);
   font-weight: 600;
+}
+
+.brave-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.brave-row .custom-answer {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.brave-row button {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.brave-row button:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.brave-row button:disabled {
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.brave-row button.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.brave-row button.ghost:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: transparent;
+}
+.success-note {
+  color: var(--status-ready-fg);
+  font-weight: 500;
 }
 .modal-actions {
   display: flex;

@@ -110,6 +110,13 @@ const STRINGS = {
     langRu: "Русский",
     langEn: "English",
     close: "Закрыть",
+    braveTitle: "Brave Search",
+    braveNote:
+      "Подписочный ключ Brave Search API. Подключает MCP-сервер к агенту — он сможет искать информацию и картинки во время генерации сабмодуля. Ключ хранится локально в settings.json и не уходит в sidecar напрямую.",
+    bravePlaceholder: "BSA…",
+    braveConfigured: "Ключ сохранён",
+    braveSave: "Сохранить",
+    braveClear: "Очистить",
   },
   en: {
     brand: "Learn Anything",
@@ -211,6 +218,13 @@ const STRINGS = {
     langRu: "Русский",
     langEn: "English",
     close: "Close",
+    braveTitle: "Brave Search",
+    braveNote:
+      "Brave Search API subscription key. Connects the MCP server to the agent so it can search the web and images while generating a submodule. Stored locally in settings.json; never passed to the sidecar directly.",
+    bravePlaceholder: "BSA…",
+    braveConfigured: "Key saved",
+    braveSave: "Save",
+    braveClear: "Clear",
   },
 } as const;
 

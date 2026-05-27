@@ -301,10 +301,32 @@ function SettingsIcon() {
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const [lang, setLang] = useLang();
+  const [braveKey, setBraveKey] = useState("");
+  const [braveConfigured, setBraveConfigured] = useState(false);
+  const [savingBrave, setSavingBrave] = useState(false);
+
+  useEffect(() => {
+    invoke<{ brave_configured: boolean }>("get_settings_status")
+      .then((s) => setBraveConfigured(s.brave_configured))
+      .catch(() => {});
+  }, []);
+
+  async function saveBrave(key: string | null) {
+    setSavingBrave(true);
+    try {
+      const s = await invoke<{ brave_configured: boolean }>("set_brave_key", { key });
+      setBraveConfigured(s.brave_configured);
+      setBraveKey("");
+    } finally {
+      setSavingBrave(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         <h2>{t("settingsTitle")}</h2>
+
         <div className="setting-group">
           <div className="setting-label">{t("uiLanguage")}</div>
           <div className="lang-picker">
@@ -323,6 +345,40 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
           <div className="setting-note">{t("uiLanguageNote")}</div>
         </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("braveTitle")}</div>
+          <div className="brave-row">
+            <input
+              type="password"
+              className="custom-answer"
+              value={braveKey}
+              placeholder={braveConfigured ? "•••••••••" : t("bravePlaceholder")}
+              onChange={(e) => setBraveKey(e.target.value)}
+              disabled={savingBrave}
+            />
+            <button
+              onClick={() => saveBrave(braveKey)}
+              disabled={!braveKey.trim() || savingBrave}
+            >
+              {t("braveSave")}
+            </button>
+            {braveConfigured && (
+              <button
+                className="ghost"
+                onClick={() => saveBrave(null)}
+                disabled={savingBrave}
+              >
+                {t("braveClear")}
+              </button>
+            )}
+          </div>
+          {braveConfigured && !braveKey && (
+            <div className="setting-note success-note">✓ {t("braveConfigured")}</div>
+          )}
+          <div className="setting-note">{t("braveNote")}</div>
+        </div>
+
         <div className="modal-actions">
           <button onClick={onClose}>{t("close")}</button>
         </div>
@@ -1378,16 +1434,28 @@ function ImagePlaceholder({
   widget,
 }: {
   id: string;
-  widget: { description?: string; alt?: string };
+  widget: { description?: string; alt?: string; url?: string; source?: string };
 }) {
   const t = useT();
+  const hasUrl = typeof widget.url === "string" && widget.url.length > 0;
   return (
     <figure className="widget widget-image">
-      <div className="widget-image-box">
-        <span className="widget-label">{t("widgetImage")}</span>
-        <span className="widget-id">#{id}</span>
-      </div>
-      {widget?.description && (
+      {hasUrl ? (
+        <a
+          href={widget.source || widget.url}
+          target="_blank"
+          rel="noreferrer"
+          className="widget-image-link"
+        >
+          <img src={widget.url} alt={widget.alt || ""} className="widget-image-real" />
+        </a>
+      ) : (
+        <div className="widget-image-box">
+          <span className="widget-label">{t("widgetImage")}</span>
+          <span className="widget-id">#{id}</span>
+        </div>
+      )}
+      {(widget?.description || widget?.alt) && (
         <figcaption>
           {widget.description}
           {widget.alt && (
