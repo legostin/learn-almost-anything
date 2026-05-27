@@ -790,6 +790,21 @@ button {
   margin: 0;
   color: var(--text-muted);
 }
+.sub-error {
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+}
 .sub-empty button {
   padding: 9px 18px;
   background: var(--primary);

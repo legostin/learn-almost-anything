@@ -81,6 +81,7 @@ function App() {
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
   const [stages, setStages] = useState<Map<string, StageName>>(new Map());
+  const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -118,7 +119,8 @@ function App() {
       }
       // course.status may have flipped (e.g. build_structure → 'ready')
       await refresh();
-      // Terminal event for submodule generation — clear stage tracking.
+      // Terminal event for submodule generation — clear stage tracking
+      // and record (or clear) the error for that sub.
       if (kind === "generate_submodule") {
         const subId = (e.payload as any).submoduleId as string | undefined;
         if (subId) {
@@ -126,6 +128,12 @@ function App() {
             if (!prev.has(subId)) return prev;
             const next = new Map(prev);
             next.delete(subId);
+            return next;
+          });
+          setSubErrors((prev) => {
+            const next = new Map(prev);
+            if (ok) next.delete(subId);
+            else next.set(subId, error ?? "unknown");
             return next;
           });
         }
@@ -250,6 +258,7 @@ function App() {
             moduleId={view.moduleId}
             submoduleId={view.submoduleId}
             stage={stages.get(view.submoduleId) ?? null}
+            lastError={subErrors.get(view.submoduleId) ?? null}
             onBack={() => setView({ kind: "course", id: view.courseId })}
             onStartGen={(subId) => startSubmoduleGen(view.courseId, subId)}
           />
@@ -1039,6 +1048,7 @@ function SubmoduleView({
   moduleId,
   submoduleId,
   stage,
+  lastError,
   onBack,
   onStartGen,
 }: {
@@ -1046,6 +1056,7 @@ function SubmoduleView({
   moduleId: string;
   submoduleId: string;
   stage: StageName | null;
+  lastError: string | null;
   onBack: () => void;
   onStartGen: (submoduleId: string) => void | Promise<void>;
 }) {
@@ -1132,6 +1143,9 @@ function SubmoduleView({
           <p>
             {state === "failed" ? t("stageFailedHint") : t("stagePendingHint")}
           </p>
+          {state === "failed" && lastError && (
+            <pre className="sub-error">{lastError}</pre>
+          )}
           <button onClick={() => onStartGen(submoduleId)}>
             {state === "failed" ? t("subRetry") : t("subGenerate")}
           </button>

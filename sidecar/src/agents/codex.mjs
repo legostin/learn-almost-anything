@@ -235,6 +235,9 @@ Return the full revised article in "article" and a brief log of fixes in
   };
 }
 
+// OpenAI strict structured output requires every property in `properties`
+// to also appear in `required` (no truly-optional fields). All four widget
+// fields are therefore listed.
 const annotateSchema = {
   type: "object",
   additionalProperties: false,
@@ -251,7 +254,7 @@ const annotateSchema = {
           description: { type: "string" },
           alt: { type: "string" },
         },
-        required: ["type", "description", "alt"],
+        required: ["type", "placeholder", "description", "alt"],
       },
     },
   },

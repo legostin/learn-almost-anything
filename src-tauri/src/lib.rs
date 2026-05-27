@@ -429,27 +429,38 @@ fn spawn_generate_submodule(
             .unwrap_or("")
             .to_string();
 
-        // Stage 3 — annotate images
+        // Stage 3 — annotate images. Soft-fail: if this stage errors, we
+        // still ship the reviewed article without widget markers. Image
+        // placeholders are nice-to-have, not blocking.
         emit_stage_event(&app2, &cid, &sid, "annotate");
         let mut annotate_params = common.clone();
         annotate_params["article"] = json!(reviewed_article);
-        let annotated = match sidecar.call(
+        let (final_article, widgets, mut combined_notes) = match sidecar.call(
             "submodule_annotate",
             annotate_params,
             Duration::from_secs(180),
         ) {
-            Ok(v) => v,
-            Err(e) => return fail(&db, &app2, &cid, &sid, format!("annotate: {e}")),
+            Ok(v) => (
+                v.get("article")
+                    .and_then(|a| a.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| reviewed_article.clone()),
+                v.get("widgets").cloned().unwrap_or_else(|| json!({})),
+                notes.clone(),
+            ),
+            Err(e) => {
+                eprintln!("[generate_submodule] annotate stage failed (soft): {e}");
+                let mut n = notes.clone();
+                if !n.is_empty() {
+                    n.push_str("\n\n");
+                }
+                n.push_str(&format!(
+                    "_Стадия разметки иллюстраций не выполнена: {e}. Статья сохранена без виджетов._"
+                ));
+                (reviewed_article.clone(), json!({}), n)
+            }
         };
-        let final_article = annotated
-            .get("article")
-            .and_then(|a| a.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or(reviewed_article);
-        let widgets = annotated
-            .get("widgets")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let notes = std::mem::take(&mut combined_notes);
 
         // Persist
         if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &final_article) {
