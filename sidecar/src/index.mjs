@@ -39,6 +39,7 @@ const methods = {
   submodule_draft: async (params, ctx) => pickAgent(params).submoduleDraft(params, ctx),
   submodule_review: async (params, ctx) => pickAgent(params).submoduleReview(params, ctx),
   submodule_annotate: async (params, ctx) => pickAgent(params).submoduleAnnotate(params, ctx),
+  submodule_review_images: async (params, ctx) => pickAgent(params).reviewImages(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };

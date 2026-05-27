@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLang, useT } from "./i18n";
 import "./App.css";
@@ -65,7 +65,7 @@ type View =
   | { kind: "course"; id: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
 
-type StageName = "draft" | "review" | "annotate";
+type StageName = "draft" | "review" | "annotate" | "illustrate";
 
 type StageEvent = {
   courseId: string;
@@ -1304,7 +1304,7 @@ function SubmoduleView({
   );
 }
 
-const STAGE_ORDER: StageName[] = ["draft", "review", "annotate"];
+const STAGE_ORDER: StageName[] = ["draft", "review", "annotate", "illustrate"];
 
 const ACT_KEYS: Record<string, string> = {
   thinking: "actThinking",
@@ -1313,6 +1313,7 @@ const ACT_KEYS: Record<string, string> = {
   reviewing: "actReviewing",
   marking: "actMarking",
   validating: "actValidating",
+  downloading: "actDownloading",
   running: "actRunning",
 };
 
@@ -1355,6 +1356,7 @@ function StageStrip({ current }: { current: StageName }) {
     draft: t("stageDraft"),
     review: t("stageReview"),
     annotate: t("stageAnnotate"),
+    illustrate: t("stageIllustrate"),
   };
   return (
     <ol className="stage-strip">
@@ -1438,16 +1440,26 @@ function ImagePlaceholder({
 }) {
   const t = useT();
   const hasUrl = typeof widget.url === "string" && widget.url.length > 0;
+  // Local files (absolute paths or file://) need the tauri asset protocol.
+  // Anything else (https://...) is rendered as-is.
+  const isLocal =
+    hasUrl && (widget.url!.startsWith("/") || widget.url!.startsWith("file://"));
+  const imgSrc = !hasUrl
+    ? ""
+    : isLocal
+      ? convertFileSrc(widget.url!.replace(/^file:\/\//, ""))
+      : widget.url!;
+  const linkHref = widget.source || (isLocal ? imgSrc : widget.url);
   return (
     <figure className="widget widget-image">
       {hasUrl ? (
         <a
-          href={widget.source || widget.url}
+          href={linkHref}
           target="_blank"
           rel="noreferrer"
           className="widget-image-link"
         >
-          <img src={widget.url} alt={widget.alt || ""} className="widget-image-real" />
+          <img src={imgSrc} alt={widget.alt || ""} className="widget-image-real" />
         </a>
       ) : (
         <div className="widget-image-box">

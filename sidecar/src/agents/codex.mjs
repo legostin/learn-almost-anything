@@ -194,6 +194,62 @@ ${formatted}
 `;
 }
 
+// Minimal JSON extractor for Codex review (no schema — needs LLM image input
+// which can't co-exist easily with strict outputSchema).
+function extractJsonLoose(text) {
+  const trimmed = (text || "").trim();
+  try { return JSON.parse(trimmed); } catch {}
+  const brace = trimmed.match(/\{[\s\S]*\}/);
+  if (brace) {
+    try { return JSON.parse(brace[0]); } catch {}
+  }
+  throw new Error("no JSON in response: " + trimmed.slice(0, 200));
+}
+
+/**
+ * Vision review of candidate images for one image-widget slot.
+ * @param {{language:string, description:string, alt:string, topic:string, candidates:{path:string}[], braveApiKey?:string}} params
+ * @returns {Promise<{pick: number|null, reason: string, refinedQuery: string}>}
+ */
+export async function reviewImages(params, ctx) {
+  const { language, description, alt, topic, candidates, braveApiKey } = params;
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return { pick: null, reason: "no candidates", refinedQuery: "" };
+  }
+  const lang = (language || "en").trim();
+  const promptText = `You are reviewing candidate images for a course article
+on "${topic}". The slot needs an image matching this description (in ${lang}):
+
+  "${description}"
+${alt ? `  alt text: "${alt}"\n` : ""}
+Look at the ${candidates.length} numbered candidate image(s) below. Decide:
+- If ONE of them clearly fits the slot, set "pick" to its index (0-based)
+  and explain briefly why.
+- If NONE fit well, set "pick" to null, explain in "reason" what's wrong
+  (off-topic, low quality, watermarked, wrong style, etc.) and provide a
+  refined search query in "refinedQuery" — English, more specific than
+  the original description, suitable for an image search engine.
+
+Output ONLY a single-line JSON object:
+{"pick":<integer|null>,"reason":"<one or two sentences in ${lang}>","refinedQuery":"<english query or empty>"}`;
+
+  const input = [{ type: "text", text: promptText }];
+  for (let i = 0; i < candidates.length; i++) {
+    input.push({ type: "text", text: `Candidate ${i}:` });
+    input.push({ type: "local_image", path: candidates[i].path });
+  }
+
+  ctx?.progress?.({ label: "reviewing" });
+  const thread = makeCodex(braveApiKey).startThread(baseThreadOptions);
+  const turn = await thread.run(input);
+  const parsed = extractJsonLoose(turn.finalResponse);
+  return {
+    pick: typeof parsed.pick === "number" ? parsed.pick : null,
+    reason: typeof parsed.reason === "string" ? parsed.reason : "",
+    refinedQuery: typeof parsed.refinedQuery === "string" ? parsed.refinedQuery : "",
+  };
+}
+
 /** Stage 1 — draft a fresh article + initial widgets (images + diagrams). */
 export async function submoduleDraft(params, ctx) {
   return await draftArticleInternal(params, ctx?.progress);

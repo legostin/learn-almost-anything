@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 mod courses;
 mod db;
+mod media;
 mod settings;
 mod sidecar;
 
@@ -529,6 +530,26 @@ fn spawn_generate_submodule(
         };
         let notes = std::mem::take(&mut combined_notes);
 
+        // Stage 4 — illustrate. For each image widget, search Brave for
+        // candidates (up to 3), download + resize to ≤2000px, hand to the
+        // reviewer agent. If rejected, refine and retry up to 3 rounds.
+        // Soft on every error: image widgets stay placeholders.
+        let widgets = if brave_api_key.is_some() {
+            emit_stage_event(&app2, &cid, &sid, "illustrate");
+            illustrate_widgets(
+                &app2,
+                &course,
+                &mid,
+                &sid,
+                &paths,
+                &sidecar,
+                widgets,
+                &brave_api_key,
+            )
+        } else {
+            widgets
+        };
+
         // Persist
         if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &final_article) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
@@ -550,6 +571,192 @@ fn spawn_generate_submodule(
         );
     });
     Ok(())
+}
+
+fn illustrate_widgets(
+    app: &AppHandle,
+    course: &db::Course,
+    mod_id: &str,
+    sub_id: &str,
+    paths: &Arc<AppPaths>,
+    sidecar: &Arc<Sidecar>,
+    widgets: serde_json::Value,
+    brave_key: &Option<String>,
+) -> serde_json::Value {
+    let key = match brave_key {
+        Some(k) => k.clone(),
+        None => return widgets,
+    };
+    let mut widgets_map = match widgets.as_object() {
+        Some(m) => m.clone(),
+        None => return widgets,
+    };
+
+    let images_dir =
+        media::submodule_images_dir(&paths.course_dir(&course.id), mod_id, sub_id);
+
+    for (wid, w) in widgets_map.iter_mut() {
+        if w.get("type").and_then(|v| v.as_str()) != Some("image") {
+            continue;
+        }
+        // Skip if agent already supplied a real URL.
+        if w.get("url").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+            continue;
+        }
+        let description = w
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if description.trim().is_empty() {
+            continue;
+        }
+        let alt = w
+            .get("alt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let mut query = format!("{} {}", description, course.topic);
+        let mut tried_urls = std::collections::HashSet::<String>::new();
+        let mut picked: Option<(std::path::PathBuf, String, String)> = None;
+
+        for round in 0..3 {
+            emit_progress_event(
+                app,
+                &course.id,
+                sub_id,
+                "illustrate",
+                "searching",
+                Some(&format!("{} (round {}/3)", query, round + 1)),
+            );
+            let hits = match media::brave_image_search(&key, &query, 8) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
+                    break;
+                }
+            };
+            let candidates: Vec<_> = hits
+                .into_iter()
+                .filter(|h| !tried_urls.contains(&h.url))
+                .take(3)
+                .collect();
+            if candidates.is_empty() {
+                break;
+            }
+
+            let round_dir = images_dir
+                .join("_candidates")
+                .join(wid)
+                .join(format!("r{round}"));
+            let mut saved: Vec<(std::path::PathBuf, media::BraveImageHit)> = Vec::new();
+            for (i, c) in candidates.iter().enumerate() {
+                tried_urls.insert(c.url.clone());
+                emit_progress_event(
+                    app,
+                    &course.id,
+                    sub_id,
+                    "illustrate",
+                    "downloading",
+                    Some(&format!("{}/{} · {}", i + 1, candidates.len(), c.url)),
+                );
+                let bytes = match media::download_resize_jpeg(&c.url, 2000) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!(
+                            "[illustrate] download/resize '{wid}' r{round} #{i}: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let p = round_dir.join(format!("{i}.jpg"));
+                if let Err(e) = media::save_bytes(&bytes, &p) {
+                    eprintln!("[illustrate] save '{wid}' r{round} #{i}: {e}");
+                    continue;
+                }
+                saved.push((p, c.clone()));
+            }
+            if saved.is_empty() {
+                continue;
+            }
+
+            emit_progress_event(
+                app,
+                &course.id,
+                sub_id,
+                "illustrate",
+                "reviewing",
+                Some(&format!("{wid}: {} candidate(s)", saved.len())),
+            );
+            let candidates_json: Vec<serde_json::Value> = saved
+                .iter()
+                .map(|(p, _)| json!({ "path": p.to_string_lossy() }))
+                .collect();
+            let review_params = json!({
+                "backend": course.agent,
+                "language": course.language,
+                "description": description,
+                "alt": alt,
+                "topic": course.topic,
+                "candidates": candidates_json,
+            });
+            let result = sidecar.call(
+                "submodule_review_images",
+                review_params,
+                Duration::from_secs(180),
+            );
+            match result {
+                Ok(v) => {
+                    let pick = v.get("pick").and_then(|p| p.as_u64()).map(|n| n as usize);
+                    let refined = v
+                        .get("refinedQuery")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(idx) = pick.filter(|i| *i < saved.len()) {
+                        let (src_path, hit) = &saved[idx];
+                        let final_path = images_dir.join(format!("{wid}.jpg"));
+                        if let Err(e) = std::fs::create_dir_all(&images_dir) {
+                            eprintln!("[illustrate] mkdir final '{wid}': {e}");
+                            break;
+                        }
+                        if let Err(e) = std::fs::copy(src_path, &final_path) {
+                            eprintln!("[illustrate] copy final '{wid}': {e}");
+                            break;
+                        }
+                        picked = Some((final_path, hit.source.clone(), hit.url.clone()));
+                        break;
+                    }
+                    if !refined.is_empty() {
+                        query = refined;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[illustrate] review '{wid}' r{round}: {e}");
+                    break;
+                }
+            }
+        }
+
+        // Clean up the round candidates directory.
+        let cand_dir = images_dir.join("_candidates").join(wid);
+        let _ = std::fs::remove_dir_all(&cand_dir);
+
+        if let Some((path, source, original_url)) = picked {
+            w["url"] = json!(path.to_string_lossy().to_string());
+            if !source.is_empty() {
+                w["source"] = json!(source);
+            }
+            w["original_url"] = json!(original_url);
+            w["placeholder"] = json!(false);
+        }
+    }
+
+    // Clean up the umbrella candidates dir if empty.
+    let _ = std::fs::remove_dir(images_dir.join("_candidates"));
+
+    serde_json::Value::Object(widgets_map)
 }
 
 #[derive(serde::Serialize)]

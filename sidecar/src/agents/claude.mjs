@@ -4,6 +4,8 @@
 // `claude` CLI auth (Claude Pro/Max subscription). The Rust side strips
 // ANTHROPIC_API_KEY from the spawned env to guarantee subscription billing.
 
+import { readFileSync } from "node:fs";
+
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 function terminologyGuide(lang) {
@@ -544,6 +546,80 @@ Shape:
  * @param {{ topic: string, language: string }} params
  * @returns {Promise<{ questions: Array<{ text: string, options: string[] }> }>}
  */
+/**
+ * Vision review of candidate images for one image-widget slot.
+ * @param {{language:string, description:string, alt:string, topic:string, candidates:{path:string}[]}} params
+ * @returns {Promise<{pick: number|null, reason: string, refinedQuery: string}>}
+ */
+export async function reviewImages(params, ctx) {
+  const { language, description, alt, topic, candidates } = params;
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return { pick: null, reason: "no candidates", refinedQuery: "" };
+  }
+  const lang = (language || "en").trim();
+  const promptText = `You are reviewing candidate images for a course article
+on "${topic}". The slot needs an image matching this description (in ${lang}):
+
+  "${description}"
+${alt ? `  alt text: "${alt}"\n` : ""}
+Look at the ${candidates.length} numbered candidate image(s) below. Decide:
+- If ONE of them clearly fits the slot, set "pick" to its index (0-based)
+  and explain briefly why.
+- If NONE fit well, set "pick" to null, explain in "reason" what's wrong
+  (off-topic, low quality, watermarked, wrong style, etc.) and provide a
+  refined search query in "refinedQuery" — English, more specific than
+  the original description, suitable for an image search engine.
+
+Output ONLY a single-line JSON object:
+{"pick":<integer|null>,"reason":"<one or two sentences in ${lang}>","refinedQuery":"<english query or empty>"}`;
+
+  const content = [{ type: "text", text: promptText }];
+  for (let i = 0; i < candidates.length; i++) {
+    const p = candidates[i].path;
+    let bytes;
+    try {
+      bytes = readFileSync(p);
+    } catch (e) {
+      content.push({ type: "text", text: `Candidate ${i}: failed to read file (${e.message})` });
+      continue;
+    }
+    content.push({ type: "text", text: `Candidate ${i}:` });
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/jpeg",
+        data: bytes.toString("base64"),
+      },
+    });
+  }
+
+  async function* userPrompt() {
+    yield {
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+    };
+  }
+
+  ctx?.progress?.({ label: "reviewing" });
+  let text = "";
+  for await (const m of query({
+    prompt: userPrompt(),
+    options: { maxTurns: 1 },
+  })) {
+    if (m.type === "result" && m.subtype === "success") {
+      text = m.result;
+    }
+  }
+  const parsed = extractJson(text);
+  return {
+    pick: typeof parsed.pick === "number" ? parsed.pick : null,
+    reason: typeof parsed.reason === "string" ? parsed.reason : "",
+    refinedQuery: typeof parsed.refinedQuery === "string" ? parsed.refinedQuery : "",
+  };
+}
+
 export async function wizardQuestions({ topic, language }) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
