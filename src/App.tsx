@@ -641,8 +641,6 @@ function Structure({
   const [input, setInput] = useState("");
   const [accepting, setAccepting] = useState<string | null>(null);
   const [showRefine, setShowRefine] = useState(false);
-  // Avoid re-triggering on every tree update when nothing has been generated.
-  const autoTriggeredFor = useRef<string | null>(null);
 
   async function reloadChat() {
     try {
@@ -715,35 +713,6 @@ function Structure({
     }
   }
 
-  async function kickFirstPending() {
-    try {
-      const sid = await invoke<string | null>("start_first_pending_submodule", {
-        courseId: course.id,
-      });
-      if (sid) await reloadTree();
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  // Auto-kick on first entry to a 'ready' course where nothing has been
-  // generated yet — covers the case where the build_structure → first-sub
-  // auto-trigger missed (initial wizard happened on an older build).
-  useEffect(() => {
-    if (!tree) return;
-    if (autoTriggeredFor.current === course.id) return;
-    const allSubs = tree.modules.flatMap((m) => m.submodules);
-    if (allSubs.length === 0) return;
-    const hasActivity = allSubs.some(
-      (s) => s.generation_state === "generating" || s.generation_state === "ready"
-    );
-    const hasPending = allSubs.some((s) => s.generation_state === "pending");
-    if (hasActivity || !hasPending) return;
-    autoTriggeredFor.current = course.id;
-    kickFirstPending();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tree, course.id]);
-
   async function accept(messageId: string) {
     setAccepting(messageId);
     try {
@@ -756,9 +725,9 @@ function Structure({
       // Collapse the refine dialog — user wanted a clean view of the
       // accepted plan, not the history of how we got here.
       setShowRefine(false);
-      autoTriggeredFor.current = null; // allow auto-kick for the new tree
       // Goal hook: after the user accepts a refined plan, kick off the
-      // first submodule generation automatically.
+      // first submodule generation automatically. (Initial build also
+      // triggers the same in App.tsx.)
       invoke("start_first_pending_submodule", { courseId: course.id })
         .then(() => reloadTree())
         .catch(() => {});
