@@ -547,6 +547,20 @@ fn spawn_generate_submodule(
 }
 
 #[tauri::command]
+fn delete_course(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+) -> Result<(), String> {
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::delete_course(&conn, &course_id).map_err(|e| e.to_string())?;
+    }
+    courses::delete_course_dir(&paths, &course_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn read_submodule_article(
     paths: tauri::State<'_, Arc<AppPaths>>,
     course_id: String,
@@ -726,7 +740,8 @@ pub fn run() {
             accept_structure_refinement,
             start_generate_submodule,
             start_first_pending_submodule,
-            read_submodule_article
+            read_submodule_article,
+            delete_course
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

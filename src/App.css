@@ -1450,8 +1450,44 @@ button {
   font-family: inherit;
   transition: all 120ms ease;
 }
-.modal-actions button:hover {
+.modal-actions button:hover:not(:disabled) {
   border-color: var(--text);
+}
+.modal-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.modal-actions button.danger {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+.modal-actions button.danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+  border-color: var(--danger);
+}
+
+.course-danger-zone {
+  margin-top: 64px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+.danger-link {
+  background: transparent;
+  border: none;
+  color: var(--text-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  transition: color 120ms ease, background 120ms ease;
+}
+.danger-link:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 /* ============================================================

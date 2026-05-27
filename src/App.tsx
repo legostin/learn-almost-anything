@@ -265,6 +265,10 @@ function App() {
               setView({ kind: "submodule", courseId: view.id, moduleId, submoduleId })
             }
             onStartSubGen={(submoduleId) => startSubmoduleGen(view.id, submoduleId)}
+            onDeleted={async () => {
+              setView({ kind: "empty" });
+              await refresh();
+            }}
           />
         )}
         {view.kind === "submodule" && (
@@ -414,6 +418,7 @@ function CourseView({
   onChanged,
   onOpenSub,
   onStartSubGen,
+  onDeleted,
 }: {
   course?: Course;
   jobs: Map<string, JobState>;
@@ -421,8 +426,10 @@ function CourseView({
   onChanged: () => void | Promise<void>;
   onOpenSub: (moduleId: string, submoduleId: string) => void;
   onStartSubGen: (submoduleId: string) => void | Promise<void>;
+  onDeleted: () => void | Promise<void>;
 }) {
   const t = useT();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
   const statusLabel: Record<string, string> = {
     wizard: t("statusWizard"),
@@ -460,6 +467,67 @@ function CourseView({
           onStartSubGen={onStartSubGen}
         />
       )}
+
+      <div className="course-danger-zone">
+        <button className="danger-link" onClick={() => setConfirmDelete(true)}>
+          {t("deleteCourse")}
+        </button>
+      </div>
+
+      {confirmDelete && (
+        <DeleteCourseModal
+          course={course}
+          onCancel={() => setConfirmDelete(false)}
+          onDeleted={async () => {
+            setConfirmDelete(false);
+            await onDeleted();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteCourseModal({
+  course,
+  onCancel,
+  onDeleted,
+}: {
+  course: Course;
+  onCancel: () => void;
+  onDeleted: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("delete_course", { courseId: course.id });
+      await onDeleted();
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="alertdialog" aria-modal="true">
+        <h2>{t("deleteCourseTitle", { topic: course.topic })}</h2>
+        <p className="setting-note">{t("deleteCourseWarning")}</p>
+        {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+        <div className="modal-actions">
+          <button onClick={onCancel} disabled={busy}>
+            {t("cancel")}
+          </button>
+          <button className="danger" onClick={confirm} disabled={busy}>
+            {busy ? t("deleting") : t("deleteConfirm")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

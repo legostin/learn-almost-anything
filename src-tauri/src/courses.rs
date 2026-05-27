@@ -447,6 +447,14 @@ pub fn write_refinement_memory(
     Ok(())
 }
 
+pub fn delete_course_dir(paths: &AppPaths, course_id: &str) -> Result<(), CourseError> {
+    let dir = paths.course_dir(course_id);
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
 pub fn submodule_dir(paths: &AppPaths, course_id: &str, mod_id: &str, sub_id: &str) -> PathBuf {
     paths
         .course_dir(course_id)

@@ -198,6 +198,15 @@ pub fn reset_stuck_generations(conn: &Connection) -> Result<usize, rusqlite::Err
     )
 }
 
+pub fn delete_course(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    // modules + progress cascade via foreign keys; jobs are course-scoped
+    // but not foreign-keyed (course_id stored as plain TEXT) so we sweep
+    // them explicitly.
+    conn.execute("DELETE FROM jobs WHERE course_id = ?1", [id])?;
+    conn.execute("DELETE FROM courses WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 pub fn get_module_generation_state(
     conn: &Connection,
     id: &str,
