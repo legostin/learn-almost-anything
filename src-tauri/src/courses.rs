@@ -110,7 +110,7 @@ pub struct SidecarTree {
     pub modules: Vec<SidecarModule>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModuleNode {
     pub id: String,
     pub title: String,
@@ -323,6 +323,140 @@ pub fn save_structure(
 
     db::set_course_status(conn, course_id, "ready", now_secs()?)?;
     Ok(file)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatMessage {
+    pub id: String,
+    pub ts: i64,
+    pub role: String, // "user" | "agent" | "system"
+    pub text: String,
+    #[serde(default)]
+    pub modules: Vec<ModuleNode>,
+}
+
+fn chat_path(paths: &AppPaths, course_id: &str) -> PathBuf {
+    paths.course_dir(course_id).join("structure_chat.jsonl")
+}
+
+pub fn read_chat(paths: &AppPaths, course_id: &str) -> Result<Vec<ChatMessage>, CourseError> {
+    let path = chat_path(paths, course_id);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: ChatMessage = serde_json::from_str(line)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        out.push(msg);
+    }
+    Ok(out)
+}
+
+pub fn append_chat(
+    paths: &AppPaths,
+    course_id: &str,
+    msg: &ChatMessage,
+) -> Result<(), CourseError> {
+    use std::io::Write;
+    let dir = paths.course_dir(course_id);
+    fs::create_dir_all(&dir)?;
+    let path = chat_path(paths, course_id);
+    let line = serde_json::to_string(msg).expect("serialize chat message");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+pub fn read_memory_files(
+    paths: &AppPaths,
+    course_id: &str,
+) -> Result<Vec<(String, String)>, CourseError> {
+    let dir = paths.course_dir(course_id).join("memory");
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut entries: Vec<_> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    for e in entries {
+        let content = fs::read_to_string(e.path())?;
+        out.push((e.file_name().to_string_lossy().to_string(), content));
+    }
+    Ok(out)
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in s.chars() {
+        let lower = ch.to_lowercase().next().unwrap_or(ch);
+        if lower.is_alphanumeric() {
+            out.push(lower);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.chars().count() >= 40 {
+            break;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+pub fn write_refinement_memory(
+    paths: &AppPaths,
+    course_id: &str,
+    user_msg: &str,
+    rationale: &str,
+) -> Result<(), CourseError> {
+    let dir = paths.course_dir(course_id).join("memory");
+    fs::create_dir_all(&dir)?;
+    let ts = now_secs()?;
+    let slug = slugify(user_msg);
+    let filename = if slug.is_empty() {
+        format!("{ts}-refine.md")
+    } else {
+        format!("{ts}-refine-{slug}.md")
+    };
+    let content = format!(
+        "---\nscope: course\ncreated_at: {ts}\ntrigger: \"Structure refinement\"\n---\n\n## Запрос пользователя\n{user_msg}\n\n## Принятые изменения\n{rationale}\n"
+    );
+    fs::write(dir.join(filename), content)?;
+    Ok(())
+}
+
+/// Convert ModuleNode tree → ModuleUpdate list (fresh, no ids preserved).
+pub fn tree_to_updates(modules: &[ModuleNode]) -> Vec<ModuleUpdate> {
+    modules
+        .iter()
+        .map(|m| ModuleUpdate {
+            id: String::new(),
+            title: m.title.clone(),
+            summary: m.summary.clone(),
+            submodules: m
+                .submodules
+                .iter()
+                .map(|s| ModuleUpdate {
+                    id: String::new(),
+                    title: s.title.clone(),
+                    summary: s.summary.clone(),
+                    submodules: vec![],
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 pub fn load_structure(

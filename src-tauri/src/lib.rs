@@ -189,6 +189,188 @@ fn save_structure(
     courses::save_structure(&mut conn, &paths, &course_id, modules).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn list_chat(
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+) -> Result<Vec<courses::ChatMessage>, String> {
+    courses::read_chat(&paths, &course_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn start_structure_refine(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    course_id: String,
+    user_message: String,
+) -> Result<(), String> {
+    let text = user_message.trim().to_string();
+    if text.is_empty() {
+        return Err("message must be non-empty".to_string());
+    }
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let course_md = courses::read_course_md(&paths_state, &course_id).map_err(|e| e.to_string())?;
+    let current_structure = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?
+    };
+    let memory_files = courses::read_memory_files(&paths_state, &course_id)
+        .map_err(|e| e.to_string())?;
+    let prior_chat = courses::read_chat(&paths_state, &course_id).map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs() as i64;
+    let user_msg = courses::ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        ts: now,
+        role: "user".to_string(),
+        text: text.clone(),
+        modules: vec![],
+    };
+    courses::append_chat(&paths_state, &course_id, &user_msg).map_err(|e| e.to_string())?;
+
+    let chat_for_prompt: Vec<serde_json::Value> = prior_chat
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "agent")
+        .map(|m| json!({ "role": m.role, "text": m.text }))
+        .collect();
+    let memory_for_prompt: Vec<serde_json::Value> = memory_files
+        .iter()
+        .map(|(name, content)| json!({ "filename": name, "content": content }))
+        .collect();
+
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let app2 = app.clone();
+    let cid = course_id.clone();
+
+    thread::spawn(move || {
+        let params = json!({
+            "backend": course.agent,
+            "topic": course.topic,
+            "language": course.language,
+            "courseMd": course_md,
+            "currentStructure": current_structure,
+            "memoryFiles": memory_for_prompt,
+            "chatHistory": chat_for_prompt,
+            "userMessage": text,
+        });
+        let payload = match sidecar.call("refine_structure", params, Duration::from_secs(300)) {
+            Ok(v) => match parse_refine(v) {
+                Ok((reply, modules)) => {
+                    let agent_msg = courses::ChatMessage {
+                        id: Uuid::new_v4().to_string(),
+                        ts: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                        role: "agent".to_string(),
+                        text: reply,
+                        modules,
+                    };
+                    let append_res = courses::append_chat(&paths, &cid, &agent_msg);
+                    match append_res {
+                        Ok(_) => json!({ "ok": true, "messageId": agent_msg.id }),
+                        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+                    }
+                }
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+        emit_job_event(&app2, &cid, "refine_structure", payload);
+    });
+    Ok(())
+}
+
+fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode>), String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        reply: String,
+        #[serde(default)]
+        modules: Vec<courses::SidecarModule>,
+    }
+    let raw: Raw = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    // Assign UUIDs to raw modules so the in-chat tree carries stable ids.
+    let modules = raw
+        .modules
+        .into_iter()
+        .map(|m| courses::ModuleNode {
+            id: Uuid::new_v4().to_string(),
+            title: m.title,
+            summary: m.summary.unwrap_or_default(),
+            submodules: m
+                .submodules
+                .into_iter()
+                .map(|s| courses::ModuleNode {
+                    id: Uuid::new_v4().to_string(),
+                    title: s.title,
+                    summary: s.summary.unwrap_or_default(),
+                    submodules: vec![],
+                })
+                .collect(),
+        })
+        .collect();
+    Ok((raw.reply, modules))
+}
+
+#[tauri::command]
+fn accept_structure_refinement(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    message_id: String,
+) -> Result<courses::StructureFile, String> {
+    let chat = courses::read_chat(&paths, &course_id).map_err(|e| e.to_string())?;
+    let agent_idx = chat
+        .iter()
+        .position(|m| m.id == message_id && m.role == "agent")
+        .ok_or_else(|| format!("agent message not found: {message_id}"))?;
+    let agent_msg = &chat[agent_idx];
+    if agent_msg.modules.is_empty() {
+        return Err("message has no proposed structure".to_string());
+    }
+    let preceding_user = chat[..agent_idx]
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.text.clone())
+        .unwrap_or_default();
+
+    let updates = courses::tree_to_updates(&agent_msg.modules);
+    let mut conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let saved = courses::save_structure(&mut conn, &paths, &course_id, updates)
+        .map_err(|e| e.to_string())?;
+    drop(conn);
+
+    courses::write_refinement_memory(&paths, &course_id, &preceding_user, &agent_msg.text)
+        .map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs() as i64;
+    let ack = courses::ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        ts: now,
+        role: "system".to_string(),
+        text: format!("✓ Принято (ref:{})", message_id),
+        modules: vec![],
+    };
+    courses::append_chat(&paths, &course_id, &ack).map_err(|e| e.to_string())?;
+
+    Ok(saved)
+}
+
 fn sidecar_script_path() -> PathBuf {
     // In dev: src-tauri/ is CARGO_MANIFEST_DIR; sidecar/ is its sibling.
     // TODO(prod): switch to app.path().resource_dir() once we bundle the sidecar.
@@ -230,7 +412,10 @@ pub fn run() {
             start_wizard_questions,
             start_build_structure,
             get_structure,
-            save_structure
+            save_structure,
+            list_chat,
+            start_structure_refine,
+            accept_structure_refinement
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

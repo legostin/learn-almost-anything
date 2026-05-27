@@ -29,6 +29,16 @@ type StructureFile = {
   modules: ModuleNode[];
 };
 
+type ChatRole = "user" | "agent" | "system";
+
+type ChatMessage = {
+  id: string;
+  ts: number;
+  role: ChatRole;
+  text: string;
+  modules: ModuleNode[];
+};
+
 type JobKind = "wizard_questions" | "build_structure";
 
 type JobState =
@@ -450,29 +460,217 @@ function StructureBuilder({
 
 function Structure({ course }: { course: Course }) {
   const [tree, setTree] = useState<StructureFile | null>(null);
+  const [chat, setChat] = useState<ChatMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [input, setInput] = useState("");
+  const [accepting, setAccepting] = useState<string | null>(null);
+
+  async function reloadChat() {
+    try {
+      const msgs = await invoke<ChatMessage[]>("list_chat", { courseId: course.id });
+      setChat(msgs);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
     setTree(null);
+    setChat([]);
     setError(null);
-    invoke<StructureFile>("get_structure", { courseId: course.id })
-      .then((s) => !cancelled && setTree(s))
+    setInput("");
+    Promise.all([
+      invoke<StructureFile>("get_structure", { courseId: course.id }),
+      invoke<ChatMessage[]>("list_chat", { courseId: course.id }),
+    ])
+      .then(([t, c]) => {
+        if (cancelled) return;
+        setTree(t);
+        setChat(c);
+      })
       .catch((e) => !cancelled && setError(String(e)));
     return () => {
       cancelled = true;
     };
   }, [course.id]);
 
-  if (error) return <div className="placeholder">Ошибка загрузки: {error}</div>;
+  useEffect(() => {
+    const unl = listen<JobEvent>("agent_job", async (e) => {
+      const p = e.payload as any;
+      if (p.courseId !== course.id) return;
+      if (p.kind !== "refine_structure") return;
+      await reloadChat();
+    });
+    return () => {
+      unl.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [course.id]);
+
+  const isAgentThinking = chat.length > 0 && chat[chat.length - 1].role === "user";
+
+  async function send() {
+    const text = input.trim();
+    if (!text || isAgentThinking) return;
+    setInput("");
+    try {
+      await invoke("start_structure_refine", { courseId: course.id, userMessage: text });
+      await reloadChat();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function accept(messageId: string) {
+    setAccepting(messageId);
+    try {
+      const fresh = await invoke<StructureFile>("accept_structure_refinement", {
+        courseId: course.id,
+        messageId,
+      });
+      setTree(fresh);
+      await reloadChat();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAccepting(null);
+    }
+  }
+
+  if (error && !tree) return <div className="placeholder">Ошибка загрузки: {error}</div>;
   if (!tree) return <div className="placeholder">Загружаю структуру…</div>;
-  if (tree.modules.length === 0)
-    return <div className="placeholder">Структура пустая.</div>;
 
   return (
     <div className="structure">
-      <StructureTree tree={tree} />
+      {tree.modules.length === 0 ? (
+        <div className="placeholder">Структура пустая.</div>
+      ) : (
+        <StructureTree tree={tree} />
+      )}
+
+      <RefineChat
+        course={course}
+        chat={chat}
+        input={input}
+        onInputChange={setInput}
+        onSend={send}
+        onAccept={accept}
+        thinking={isAgentThinking}
+        accepting={accepting}
+      />
+      {error && tree && <p className="error-banner">Ошибка: {error}</p>}
     </div>
+  );
+}
+
+function RefineChat({
+  course,
+  chat,
+  input,
+  onInputChange,
+  onSend,
+  onAccept,
+  thinking,
+  accepting,
+}: {
+  course: Course;
+  chat: ChatMessage[];
+  input: string;
+  onInputChange: (s: string) => void;
+  onSend: () => void;
+  onAccept: (id: string) => void;
+  thinking: boolean;
+  accepting: string | null;
+}) {
+  const lastIdx = chat.length - 1;
+  const placeholder =
+    chat.length === 0
+      ? "Напиши, что переделать. Например: «добавь модуль про композицию, сделай больше упор на масляную живопись»"
+      : "Сообщение агенту…";
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      onSend();
+    }
+  }
+
+  return (
+    <section className="refine">
+      <header className="refine-header">
+        <div className="refine-title">Доработать с агентом</div>
+        <div className="refine-sub">
+          Опиши, что переделать — агент предложит новую структуру с пояснением.
+          Принятые правки сохраняются в памяти курса и учитываются дальше.
+        </div>
+      </header>
+
+      <div className="refine-history">
+        {chat.length === 0 && !thinking && (
+          <div className="chat-empty">Пока пусто. Начни обсуждение.</div>
+        )}
+        {chat.map((msg, idx) => {
+          const isLast = idx === lastIdx;
+          const hasProposal = msg.role === "agent" && msg.modules.length > 0;
+          const isPending = hasProposal && isLast && accepting !== msg.id;
+          const isAccepting = accepting === msg.id;
+          if (msg.role === "system") {
+            return (
+              <div key={msg.id} className="chat-system">
+                {msg.text}
+              </div>
+            );
+          }
+          return (
+            <div key={msg.id} className={`chat-msg msg-${msg.role}`}>
+              <div className="bubble">{msg.text}</div>
+              {hasProposal && (
+                <div className="proposal">
+                  <div className="proposal-header">Предложение</div>
+                  <StructureTree
+                    tree={{ course_id: course.id, modules: msg.modules }}
+                  />
+                  {isPending && (
+                    <div className="proposal-actions">
+                      <button onClick={() => onAccept(msg.id)}>Принять</button>
+                      <span className="proposal-hint">
+                        Не подходит? Опиши, что переделать, в поле ниже.
+                      </span>
+                    </div>
+                  )}
+                  {isAccepting && <span className="proposal-hint">Применяю…</span>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {thinking && (
+          <div className="chat-msg msg-agent">
+            <div className="bubble thinking">
+              <span className="spinner" /> Агент думает…
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="refine-input">
+        <textarea
+          value={input}
+          onChange={(e) => onInputChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          rows={3}
+          placeholder={placeholder}
+          disabled={thinking}
+        />
+        <div className="refine-input-row">
+          <span className="kbd-hint">⌘/Ctrl + Enter — отправить</span>
+          <button onClick={onSend} disabled={!input.trim() || thinking}>
+            Отправить
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
