@@ -100,6 +100,10 @@ function App() {
   return (
     <div className="app">
       <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-dot" />
+          Learn Anything
+        </div>
         <button className="new-course" onClick={() => setView({ kind: "creating" })}>
           + Новый курс
         </button>
@@ -115,7 +119,8 @@ function App() {
                 onClick={() => setView({ kind: "course", id: c.id })}
               >
                 <div className="course-topic">
-                  {c.topic} {hasRunning && <span className="spinner" title="Идёт генерация…">⏳</span>}
+                  {c.topic}
+                  {hasRunning && <span className="spinner" title="Идёт генерация…" />}
                 </div>
                 <div className="course-meta">
                   {c.language} · {c.status}
@@ -209,11 +214,19 @@ function CourseView({
   onChanged: () => void | Promise<void>;
 }) {
   if (!course) return <div className="placeholder">Курс не найден</div>;
+  const statusLabel: Record<string, string> = {
+    wizard: "визард",
+    structuring: "ждёт структуру",
+    ready: "готов",
+  };
   return (
     <div className="course-view">
       <h2>{course.topic}</h2>
       <div className="course-meta-full">
-        Язык: {course.language} · Статус: {course.status}
+        <span className="lang-pill">{course.language}</span>
+        <span className={`status-pill status-${course.status}`}>
+          {statusLabel[course.status] ?? course.status}
+        </span>
       </div>
       {course.status === "wizard" && (
         <Wizard
@@ -429,7 +442,8 @@ function Structure({ course }: { course: Course }) {
                 {m.submodules.map((s, j) => (
                   <li key={s.id} className="submodule">
                     <div className="submodule-title">
-                      {i + 1}.{j + 1} {s.title}
+                      <span className="num">{i + 1}.{j + 1}</span>
+                      {s.title}
                     </div>
                     {s.summary && <div className="submodule-summary">{s.summary}</div>}
                   </li>
