@@ -177,38 +177,57 @@ points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}      (real-world photo or illustration)
   ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
+  ::widget{type="video" id="vid-1"}      (an embedded video — see below)
 
 Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
+VIDEO WIDGETS: only include a video if you find one that is RECOMMENDED by
+real people elsewhere — a Reddit/forum thread that calls it out, a "best
+videos on X" listicle, a blog post that says "watch this", a course
+syllabus that links it. NEVER pick a video purely by its YouTube title or
+search rank. Record the recommendation source in "recommended_by". If you
+can't find a recommended one, skip the video — better none than a random.
+
 ${
   braveApiKey
     ? `You have web access through the Brave Search MCP tools:
 - mcp__brave__brave_web_search — use it to verify facts, find concrete
-  examples, current best practices, and citations relevant to this
-  submodule. Cite urls inline where helpful.
-- mcp__brave__brave_image_search — use it to find REAL image URLs for
-  image widgets. When you find a good image, set its "url" field to the
-  direct image URL and "source" to the source page url; the UI will
-  display it. If you can't find a suitable image, leave url empty and the
-  UI will show a placeholder with your description.
+  examples, current best practices, and citations. For videos, search
+  things like "best youtube videos to learn X reddit", "<topic>
+  recommended video tutorials site:reddit.com", "<topic> video
+  recommendations forum" — find videos others suggest, not whatever
+  ranks first.
+- mcp__brave__brave_image_search — find REAL image URLs for image
+  widgets. When you find a good one, set "url" to the direct image URL
+  and "source" to the page url. If nothing fits, leave url empty —
+  the UI will show a placeholder + your description.
 
-Use search tools liberally during research, but write the article in your
-own voice. Don't quote large blocks; weave findings in naturally.
+Use search liberally during research, but write the article in your own
+voice. Don't quote large blocks; weave findings in naturally. Only put
+a fact in the article if you actually have a source backing it.
 `
     : ""
 }
+
+SOURCES: at the end, return a "sources" array listing every URL you
+ACTUALLY consulted while writing this submodule. Be honest — do not
+invent URLs, do not include sources you didn't read. If you wrote
+entirely from your own knowledge with no web lookups, return [].
+
 ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
-{"article":"<markdown with widget markers>","widgets":[<widget objects>]}
+{"article":"<markdown with widget markers>","widgets":[<widget objects>],"sources":[<source objects>]}
 
 Each widget object:
 - image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
+- video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
 
-If no widgets, use [].`;
+Each source object: {"title":"<page title>","url":"<url>"}
+If no widgets, use []. If no sources, use [].`;
   onProgress?.({ label: "thinking" });
   const text = await runStreamed(prompt, onProgress, { braveApiKey });
   const parsed = extractJson(text);
@@ -218,6 +237,7 @@ If no widgets, use [].`;
   return {
     article: parsed.article.trim(),
     widgets: normalizeWidgets(parsed.widgets),
+    sources: normalizeSources(parsed.sources),
   };
 }
 
@@ -245,9 +265,33 @@ function normalizeWidgets(raw) {
         source: typeof w.source === "string" ? w.source.trim() : "",
         caption: typeof w.caption === "string" ? w.caption.trim() : "",
       };
+    } else if (w.type === "video") {
+      const url = typeof w.url === "string" ? w.url.trim() : "";
+      if (!url) continue;
+      out[id] = {
+        type: "video",
+        url,
+        title: typeof w.title === "string" ? w.title.trim() : "",
+        recommended_by:
+          typeof w.recommended_by === "string" ? w.recommended_by.trim() : "",
+        why: typeof w.why === "string" ? w.why.trim() : "",
+      };
     }
   }
   return out;
+}
+
+function normalizeSources(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => {
+      if (!s || typeof s.url !== "string" || !s.url.trim()) return null;
+      return {
+        title: typeof s.title === "string" ? s.title.trim() : "",
+        url: s.url.trim(),
+      };
+    })
+    .filter(Boolean);
 }
 
 /** Stage 2 — editor + fact-check + consistency pass. */

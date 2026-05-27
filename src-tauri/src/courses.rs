@@ -491,6 +491,24 @@ pub fn write_submodule_widgets(
     Ok(())
 }
 
+pub fn write_submodule_sources(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    sources: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let arr = sources.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    if !arr {
+        return Ok(());
+    }
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(sources).unwrap_or_else(|_| "[]".to_string());
+    fs::write(dir.join("sources.json"), json)?;
+    Ok(())
+}
+
 pub fn write_submodule_review_notes(
     paths: &AppPaths,
     course_id: &str,
@@ -511,6 +529,7 @@ pub fn write_submodule_review_notes(
 pub struct SubmoduleContent {
     pub article: String,
     pub widgets: serde_json::Value,
+    pub sources: serde_json::Value,
     pub review_notes: String,
 }
 
@@ -526,10 +545,15 @@ pub fn read_submodule_content(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
+    let sources = fs::read_to_string(dir.join("sources.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
     let review_notes = fs::read_to_string(dir.join("review_notes.md")).unwrap_or_default();
     Ok(SubmoduleContent {
         article,
         widgets,
+        sources,
         review_notes,
     })
 }

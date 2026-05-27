@@ -454,6 +454,10 @@ fn spawn_generate_submodule(
             .get("widgets")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let draft_sources = draft
+            .get("sources")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
 
         // Stage 2 — review
         emit_stage_event(&app2, &cid, &sid, "review");
@@ -556,6 +560,11 @@ fn spawn_generate_submodule(
         }
         if let Err(e) = courses::write_submodule_widgets(&paths, &cid, &mid, &sid, &widgets) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
+        if let Err(e) =
+            courses::write_submodule_sources(&paths, &cid, &mid, &sid, &draft_sources)
+        {
+            eprintln!("[generate_submodule] write sources (non-fatal): {e}");
         }
         if let Err(e) = courses::write_submodule_review_notes(&paths, &cid, &mid, &sid, &notes) {
             return fail(&db, &app2, &cid, &sid, e.to_string());

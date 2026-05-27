@@ -1129,6 +1129,115 @@ button {
   font-size: 13px;
 }
 
+.widget-video {
+  display: flex;
+  flex-direction: column;
+}
+.widget-video-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.widget-video-frame iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.widget-video-fallback {
+  display: block;
+  padding: 28px 22px;
+  background: var(--surface-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  text-align: center;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 500;
+}
+.widget-video-fallback:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.widget-video figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.widget-video-title {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--text);
+}
+.widget-video-why {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+.widget-video-rec {
+  font-size: 11.5px;
+  color: var(--text-subtle);
+}
+.widget-video-rec a {
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+}
+.widget-video-rec a:hover {
+  color: var(--primary);
+  text-decoration-color: var(--primary);
+}
+
+.sources {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.sources-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+.sources-list {
+  list-style: decimal;
+  padding-left: 22px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sources-list li {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.sources-list a {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+}
+.sources-list a:hover {
+  color: var(--primary);
+  text-decoration-color: var(--primary);
+}
+.sources-host {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
 .state-icon {
   display: inline-flex;
   align-items: center;

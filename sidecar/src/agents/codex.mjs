@@ -288,8 +288,35 @@ const draftSchema = {
         required: ["id", "source", "caption"],
       },
     },
+    videoWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          url: { type: "string" },
+          title: { type: "string" },
+          recommended_by: { type: "string" },
+          why: { type: "string" },
+        },
+        required: ["id", "url", "title", "recommended_by", "why"],
+      },
+    },
+    sources: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          url: { type: "string" },
+        },
+        required: ["title", "url"],
+      },
+    },
   },
-  required: ["article", "imageWidgets", "diagramWidgets"],
+  required: ["article", "imageWidgets", "diagramWidgets", "videoWidgets", "sources"],
 };
 
 async function draftArticleInternal(
@@ -342,14 +369,25 @@ points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}      (real-world photo or illustration)
   ::widget{type="diagram" id="diag-1"}   (a Mermaid-rendered diagram)
+  ::widget{type="video" id="vid-1"}      (an embedded video — see below)
 
 Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
-Return widgets in two separate arrays:
+VIDEO WIDGETS: only include a video if you find one that is RECOMMENDED by
+real people elsewhere — a Reddit/forum thread that calls it out, a "best
+videos on X" listicle, a blog post that says "watch this", a course
+syllabus that links it. NEVER pick a video purely by its YouTube title or
+search rank. Record the recommendation source in "recommended_by". If you
+can't find a recommended one, skip the video — better none than a random.
+
+Return widgets in three separate arrays:
 - imageWidgets: [{id, description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
+- videoWidgets: [{id, url (watch url), title, recommended_by (url of the
+  recommendation source — REQUIRED, never "" unless you skip the video),
+  why (one sentence in ${lang})}]
 
 If a category is unused, return an empty array [].
 
@@ -357,20 +395,26 @@ ${
   braveApiKey
     ? `You have web access through the Brave Search MCP tools:
 - mcp__brave__brave_web_search — for verifying facts, finding concrete
-  examples, current best practices, and citations.
-- mcp__brave__brave_image_search — for finding REAL image URLs for image
-  widgets. When you find a good one, set the image widget's "url" field
-  to the direct image URL and "source" to the page url. If you can't
-  find a suitable image, leave both as "" and the UI will show a
-  placeholder with the description.
+  examples, current best practices, citations, and for finding
+  community-recommended videos. Try queries like "best youtube videos
+  to learn X reddit", "<topic> recommended video tutorials
+  site:reddit.com", "<topic> video recommendations forum".
+- mcp__brave__brave_image_search — for REAL image URLs.
 
 Codex's built-in web search is also available — use whichever fits.
 `
     : `Use Codex's built-in web search where useful to verify facts and
-find concrete examples. For image widgets, leave url and source as ""
-unless you have a confidently-correct direct image URL.
+find concrete examples + community-recommended videos. For image widgets,
+leave url/source as "" unless you have a confidently-correct direct
+image URL.
 `
 }
+
+SOURCES: at the end, return a "sources" array listing every URL you
+ACTUALLY consulted while writing this submodule. Be honest — do not
+invent URLs, do not include sources you didn't read. If you wrote
+entirely from internal knowledge with no web lookups, return [].
+
 ${terminologyGuide(lang)}`;
   onProgress?.({ label: "thinking" });
   const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey });
@@ -380,11 +424,12 @@ ${terminologyGuide(lang)}`;
   }
   return {
     article: parsed.article.trim(),
-    widgets: mergeWidgets(parsed.imageWidgets, parsed.diagramWidgets),
+    widgets: mergeWidgets(parsed.imageWidgets, parsed.diagramWidgets, parsed.videoWidgets),
+    sources: normalizeSources(parsed.sources),
   };
 }
 
-function mergeWidgets(imageWidgets, diagramWidgets) {
+function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets) {
   const out = {};
   if (Array.isArray(imageWidgets)) {
     for (const w of imageWidgets) {
@@ -414,7 +459,35 @@ function mergeWidgets(imageWidgets, diagramWidgets) {
       }
     }
   }
+  if (Array.isArray(videoWidgets)) {
+    for (const w of videoWidgets) {
+      if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
+      const url = typeof w.url === "string" ? w.url.trim() : "";
+      if (!url) continue;
+      out[w.id.trim()] = {
+        type: "video",
+        url,
+        title: typeof w.title === "string" ? w.title.trim() : "",
+        recommended_by:
+          typeof w.recommended_by === "string" ? w.recommended_by.trim() : "",
+        why: typeof w.why === "string" ? w.why.trim() : "",
+      };
+    }
+  }
   return out;
+}
+
+function normalizeSources(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => {
+      if (!s || typeof s.url !== "string" || !s.url.trim()) return null;
+      return {
+        title: typeof s.title === "string" ? s.title.trim() : "",
+        url: s.url.trim(),
+      };
+    })
+    .filter(Boolean);
 }
 
 const reviewSchema = {

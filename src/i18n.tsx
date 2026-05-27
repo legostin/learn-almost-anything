@@ -90,6 +90,9 @@ const STRINGS = {
     widgetImageAlt: "alt:",
     widgetDiagramError: "Ошибка диаграммы",
     widgetUnknown: "Неизвестный виджет",
+    widgetVideoRecommended: "Рекомендация:",
+    widgetVideoOpen: "Открыть видео",
+    sourcesTitle: "Источники",
 
     refineTitle: "Доработать с агентом",
     refineSub:
@@ -200,6 +203,9 @@ const STRINGS = {
     widgetImageAlt: "alt:",
     widgetDiagramError: "Diagram error",
     widgetUnknown: "Unknown widget",
+    widgetVideoRecommended: "Recommended by:",
+    widgetVideoOpen: "Open video",
+    sourcesTitle: "Sources",
 
     refineTitle: "Refine with agent",
     refineSub:

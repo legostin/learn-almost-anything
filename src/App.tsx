@@ -1167,13 +1167,17 @@ function SubmoduleAction({
 type SubmoduleContent = {
   article: string;
   widgets: Record<string, WidgetData>;
+  sources: Source[];
   review_notes: string;
 };
 
 type WidgetData =
-  | { type: "image"; placeholder?: boolean; description?: string; alt?: string }
+  | { type: "image"; placeholder?: boolean; description?: string; alt?: string; url?: string; source?: string }
   | { type: "diagram"; source: string; caption?: string; error?: string }
+  | { type: "video"; url: string; title?: string; recommended_by?: string; why?: string }
   | { type: string; [k: string]: any };
+
+type Source = { title: string; url: string };
 
 function SubmoduleView({
   course,
@@ -1316,7 +1320,12 @@ function SubmoduleView({
         <>
           {!content && <div className="placeholder">{t("loadingStructure")}</div>}
           {content && (
-            <ArticleReader article={content.article} widgets={content.widgets} />
+            <>
+              <ArticleReader article={content.article} widgets={content.widgets} />
+              {content.sources?.length > 0 && (
+                <SourcesList sources={content.sources} />
+              )}
+            </>
           )}
         </>
       )}
@@ -1429,10 +1438,110 @@ function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
   }
   if (widget.type === "image") return <ImagePlaceholder id={id} widget={widget as any} />;
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
+  if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
   return (
     <div className="widget widget-unknown">
       {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
     </div>
+  );
+}
+
+function videoEmbedUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    // YouTube
+    if (u.hostname.includes("youtube.com")) {
+      const v = u.searchParams.get("v");
+      if (v) return `https://www.youtube.com/embed/${v}`;
+      // youtube.com/shorts/ID
+      const m = u.pathname.match(/^\/(?:shorts|embed)\/([^/]+)/);
+      if (m) return `https://www.youtube.com/embed/${m[1]}`;
+    }
+    if (u.hostname === "youtu.be") {
+      const id = u.pathname.replace(/^\//, "").split("/")[0];
+      if (id) return `https://www.youtube.com/embed/${id}`;
+    }
+    // Vimeo
+    if (u.hostname.includes("vimeo.com")) {
+      const id = u.pathname.replace(/^\//, "").split("/")[0];
+      if (/^\d+$/.test(id)) return `https://player.vimeo.com/video/${id}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function VideoWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { url: string; title?: string; recommended_by?: string; why?: string };
+}) {
+  const t = useT();
+  const embed = videoEmbedUrl(widget.url);
+  return (
+    <figure className="widget widget-video">
+      {embed ? (
+        <div className="widget-video-frame">
+          <iframe
+            src={embed}
+            title={widget.title || `video ${id}`}
+            allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+          />
+        </div>
+      ) : (
+        <a
+          className="widget-video-fallback"
+          href={widget.url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {widget.title || t("widgetVideoOpen")} →
+        </a>
+      )}
+      <figcaption>
+        {widget.title && <div className="widget-video-title">{widget.title}</div>}
+        {widget.why && <div className="widget-video-why">{widget.why}</div>}
+        {widget.recommended_by && (
+          <div className="widget-video-rec">
+            {t("widgetVideoRecommended")}{" "}
+            <a href={widget.recommended_by} target="_blank" rel="noreferrer">
+              {hostnameOf(widget.recommended_by)}
+            </a>
+          </div>
+        )}
+      </figcaption>
+    </figure>
+  );
+}
+
+function hostnameOf(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function SourcesList({ sources }: { sources: Source[] }) {
+  const t = useT();
+  return (
+    <section className="sources">
+      <h3 className="sources-title">{t("sourcesTitle")}</h3>
+      <ol className="sources-list">
+        {sources.map((s, i) => (
+          <li key={i}>
+            <a href={s.url} target="_blank" rel="noreferrer">
+              {s.title || s.url}
+            </a>
+            <span className="sources-host">{hostnameOf(s.url)}</span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
