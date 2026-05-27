@@ -541,6 +541,205 @@ button {
 }
 
 /* ============================================================
+ * Structure — edit mode
+ * ============================================================ */
+.structure-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.structure-toolbar button {
+  padding: 7px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #fff;
+  transition: all 120ms ease;
+}
+.structure-toolbar button:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+.structure-toolbar button.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.structure-toolbar button.ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text);
+  background: transparent;
+}
+.structure-toolbar button:disabled {
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.hint.warn {
+  color: var(--accent);
+}
+
+.module.edit,
+.submodule.edit {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.module.edit {
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+}
+.submodule.edit {
+  list-style: none;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+}
+.submodule.edit::before {
+  display: none;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.row-actions .num {
+  font-size: 12px;
+  color: var(--text-subtle);
+  font-weight: 500;
+  min-width: 2em;
+  font-feature-settings: "tnum";
+}
+.edit-title {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  background: transparent;
+  color: var(--text);
+  letter-spacing: -0.01em;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.edit-title.sub {
+  font-size: 14px;
+  font-weight: 500;
+}
+.edit-title:hover {
+  border-color: var(--border);
+}
+.edit-title:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--surface-2);
+}
+.edit-summary {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  background: transparent;
+  color: var(--text-muted);
+  resize: vertical;
+  transition: border-color 120ms ease, background 120ms ease;
+  box-sizing: border-box;
+}
+.edit-summary.sub {
+  font-size: 12px;
+}
+.edit-summary:hover {
+  border-color: var(--border);
+}
+.edit-summary:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.edit-summary::placeholder {
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+.row-buttons {
+  display: flex;
+  gap: 2px;
+}
+button.icon {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 100ms ease;
+  padding: 0;
+}
+button.icon:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+button.icon.danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+button.add-sub,
+button.add-mod {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 120ms ease;
+}
+button.add-mod {
+  margin-top: 14px;
+  padding: 10px 16px;
+  font-size: 13px;
+  border-radius: var(--radius);
+  width: 100%;
+}
+button.add-sub:hover,
+button.add-mod:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+/* keep edit-mode submodules from inheriting timeline dots */
+.structure.editing .submodules {
+  border-left: none;
+  margin-left: 0;
+  padding-left: 24px;
+}
+
+/* ============================================================
  * Spinner
  * ============================================================ */
 .spinner {

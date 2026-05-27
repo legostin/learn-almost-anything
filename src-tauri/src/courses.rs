@@ -193,6 +193,138 @@ pub fn install_structure(
     Ok(file)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ModuleUpdate {
+    #[serde(default)]
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub submodules: Vec<ModuleUpdate>,
+}
+
+pub fn save_structure(
+    conn: &mut rusqlite::Connection,
+    paths: &AppPaths,
+    course_id: &str,
+    incoming: Vec<ModuleUpdate>,
+) -> Result<StructureFile, CourseError> {
+    use std::collections::HashSet;
+
+    let existing = db::list_modules(conn, course_id)?;
+    let existing_ids: HashSet<String> = existing.iter().map(|m| m.id.clone()).collect();
+    let mut kept_ids: HashSet<String> = HashSet::new();
+
+    let tx = conn.transaction()?;
+    tx.execute("PRAGMA defer_foreign_keys = TRUE", [])?;
+
+    let mut out_modules: Vec<ModuleNode> = Vec::with_capacity(incoming.len());
+    for (mod_pos, m) in incoming.into_iter().enumerate() {
+        let title = m.title.trim().to_string();
+        if title.is_empty() {
+            continue; // silently skip empty-title modules
+        }
+        let summary = m.summary.trim().to_string();
+        let summary_db = if summary.is_empty() { None } else { Some(summary.as_str()) };
+
+        let (mod_id, is_existing) = if !m.id.is_empty() && existing_ids.contains(&m.id) {
+            (m.id.clone(), true)
+        } else {
+            (Uuid::new_v4().to_string(), false)
+        };
+        kept_ids.insert(mod_id.clone());
+
+        if is_existing {
+            db::update_module(&tx, &mod_id, None, mod_pos as i64, &title, summary_db)?;
+        } else {
+            db::insert_module(
+                &tx,
+                &mod_id,
+                course_id,
+                None,
+                mod_pos as i64,
+                &title,
+                summary_db,
+                "pending",
+            )?;
+        }
+
+        let mut out_subs: Vec<ModuleNode> = Vec::with_capacity(m.submodules.len());
+        for (sub_pos, s) in m.submodules.into_iter().enumerate() {
+            let sub_title = s.title.trim().to_string();
+            if sub_title.is_empty() {
+                continue;
+            }
+            let sub_summary = s.summary.trim().to_string();
+            let sub_summary_db = if sub_summary.is_empty() {
+                None
+            } else {
+                Some(sub_summary.as_str())
+            };
+
+            let (sub_id, sub_is_existing) = if !s.id.is_empty() && existing_ids.contains(&s.id) {
+                (s.id.clone(), true)
+            } else {
+                (Uuid::new_v4().to_string(), false)
+            };
+            kept_ids.insert(sub_id.clone());
+
+            if sub_is_existing {
+                db::update_module(
+                    &tx,
+                    &sub_id,
+                    Some(&mod_id),
+                    sub_pos as i64,
+                    &sub_title,
+                    sub_summary_db,
+                )?;
+            } else {
+                db::insert_module(
+                    &tx,
+                    &sub_id,
+                    course_id,
+                    Some(&mod_id),
+                    sub_pos as i64,
+                    &sub_title,
+                    sub_summary_db,
+                    "pending",
+                )?;
+            }
+            out_subs.push(ModuleNode {
+                id: sub_id,
+                title: sub_title,
+                summary: sub_summary,
+                submodules: vec![],
+            });
+        }
+        out_modules.push(ModuleNode {
+            id: mod_id,
+            title,
+            summary,
+            submodules: out_subs,
+        });
+    }
+
+    for id in existing_ids.difference(&kept_ids) {
+        db::delete_module(&tx, id)?;
+    }
+
+    tx.commit()?;
+
+    let file = StructureFile {
+        course_id: course_id.to_string(),
+        modules: out_modules,
+    };
+    let dir = paths.course_dir(course_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(&file).expect("serialize structure");
+    fs::write(dir.join("structure.json"), json)?;
+
+    db::set_course_status(conn, course_id, "ready", now_secs()?)?;
+    Ok(file)
+}
+
 pub fn load_structure(
     conn: &rusqlite::Connection,
     course_id: &str,

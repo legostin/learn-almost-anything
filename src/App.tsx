@@ -411,10 +411,13 @@ function StructureBuilder({
 function Structure({ course }: { course: Course }) {
   const [tree, setTree] = useState<StructureFile | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState<StructureFile | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setTree(null);
+    setDraft(null);
     setError(null);
     invoke<StructureFile>("get_structure", { courseId: course.id })
       .then((s) => !cancelled && setTree(s))
@@ -424,12 +427,60 @@ function Structure({ course }: { course: Course }) {
     };
   }, [course.id]);
 
-  if (error) return <div className="placeholder">Ошибка загрузки: {error}</div>;
+  async function save() {
+    if (!draft) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const fresh = await invoke<StructureFile>("save_structure", {
+        courseId: course.id,
+        modules: draft.modules,
+      });
+      setTree(fresh);
+      setDraft(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (error && !draft) return <div className="placeholder">Ошибка загрузки: {error}</div>;
   if (!tree) return <div className="placeholder">Загружаю структуру…</div>;
+
+  if (draft) {
+    return (
+      <StructureEditor
+        draft={draft}
+        onChange={setDraft}
+        onSave={save}
+        onCancel={() => {
+          setDraft(null);
+          setError(null);
+        }}
+        saving={saving}
+        error={error}
+      />
+    );
+  }
+
   if (tree.modules.length === 0)
-    return <div className="placeholder">Структура пустая.</div>;
+    return (
+      <div className="structure">
+        <div className="placeholder">Структура пустая.</div>
+        <button className="ghost" onClick={() => setDraft(cloneTree(tree))}>
+          Редактировать
+        </button>
+      </div>
+    );
+
   return (
     <div className="structure">
+      <div className="structure-toolbar">
+        <button className="ghost" onClick={() => setDraft(cloneTree(tree))}>
+          Редактировать
+        </button>
+      </div>
       <ol className="modules">
         {tree.modules.map((m, i) => (
           <li key={m.id} className="module">
@@ -453,6 +504,191 @@ function Structure({ course }: { course: Course }) {
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+function cloneTree(t: StructureFile): StructureFile {
+  return {
+    course_id: t.course_id,
+    modules: t.modules.map((m) => ({
+      id: m.id,
+      title: m.title,
+      summary: m.summary,
+      submodules: m.submodules.map((s) => ({
+        id: s.id,
+        title: s.title,
+        summary: s.summary,
+        submodules: [],
+      })),
+    })),
+  };
+}
+
+function emptyNode(): ModuleNode {
+  return { id: "", title: "", summary: "", submodules: [] };
+}
+
+function StructureEditor({
+  draft,
+  onChange,
+  onSave,
+  onCancel,
+  saving,
+  error,
+}: {
+  draft: StructureFile;
+  onChange: (d: StructureFile) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  saving: boolean;
+  error: string | null;
+}) {
+  function patchModule(i: number, patch: Partial<ModuleNode>) {
+    onChange({
+      ...draft,
+      modules: draft.modules.map((m, idx) => (idx === i ? { ...m, ...patch } : m)),
+    });
+  }
+  function patchSub(i: number, j: number, patch: Partial<ModuleNode>) {
+    onChange({
+      ...draft,
+      modules: draft.modules.map((m, idx) =>
+        idx === i
+          ? {
+              ...m,
+              submodules: m.submodules.map((s, k) => (k === j ? { ...s, ...patch } : s)),
+            }
+          : m
+      ),
+    });
+  }
+  function moveModule(i: number, delta: number) {
+    const j = i + delta;
+    if (j < 0 || j >= draft.modules.length) return;
+    const arr = draft.modules.slice();
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+    onChange({ ...draft, modules: arr });
+  }
+  function moveSub(i: number, j: number, delta: number) {
+    const m = draft.modules[i];
+    const k = j + delta;
+    if (k < 0 || k >= m.submodules.length) return;
+    const arr = m.submodules.slice();
+    [arr[j], arr[k]] = [arr[k], arr[j]];
+    patchModule(i, { submodules: arr });
+  }
+  function removeModule(i: number) {
+    onChange({ ...draft, modules: draft.modules.filter((_, idx) => idx !== i) });
+  }
+  function removeSub(i: number, j: number) {
+    patchModule(i, { submodules: draft.modules[i].submodules.filter((_, k) => k !== j) });
+  }
+  function addModule() {
+    onChange({ ...draft, modules: [...draft.modules, emptyNode()] });
+  }
+  function addSub(i: number) {
+    patchModule(i, { submodules: [...draft.modules[i].submodules, emptyNode()] });
+  }
+
+  const hasEmpty =
+    draft.modules.some((m) => !m.title.trim()) ||
+    draft.modules.some((m) => m.submodules.some((s) => !s.title.trim()));
+
+  return (
+    <div className="structure editing">
+      <div className="structure-toolbar">
+        <button onClick={onSave} disabled={saving || hasEmpty}>
+          {saving ? "Сохраняю…" : "Сохранить"}
+        </button>
+        <button className="ghost" onClick={onCancel} disabled={saving}>
+          Отмена
+        </button>
+        {hasEmpty && <span className="hint warn">У некоторых модулей пустое название</span>}
+      </div>
+      {error && <p style={{ color: "var(--danger)" }}>Ошибка: {error}</p>}
+      <ol className="modules">
+        {draft.modules.map((m, i) => (
+          <li key={i} className="module edit">
+            <div className="row-actions">
+              <span className="num">{i + 1}</span>
+              <input
+                className="edit-title"
+                value={m.title}
+                placeholder="Название модуля"
+                onChange={(e) => patchModule(i, { title: e.target.value })}
+              />
+              <div className="row-buttons">
+                <button className="icon" title="Вверх" onClick={() => moveModule(i, -1)}>
+                  ↑
+                </button>
+                <button className="icon" title="Вниз" onClick={() => moveModule(i, 1)}>
+                  ↓
+                </button>
+                <button
+                  className="icon danger"
+                  title="Удалить модуль"
+                  onClick={() => removeModule(i)}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+            <textarea
+              className="edit-summary"
+              value={m.summary}
+              placeholder="Краткое описание модуля…"
+              rows={2}
+              onChange={(e) => patchModule(i, { summary: e.target.value })}
+            />
+            <ol className="submodules">
+              {m.submodules.map((s, j) => (
+                <li key={j} className="submodule edit">
+                  <div className="row-actions">
+                    <span className="num">
+                      {i + 1}.{j + 1}
+                    </span>
+                    <input
+                      className="edit-title sub"
+                      value={s.title}
+                      placeholder="Название сабмодуля"
+                      onChange={(e) => patchSub(i, j, { title: e.target.value })}
+                    />
+                    <div className="row-buttons">
+                      <button className="icon" title="Вверх" onClick={() => moveSub(i, j, -1)}>
+                        ↑
+                      </button>
+                      <button className="icon" title="Вниз" onClick={() => moveSub(i, j, 1)}>
+                        ↓
+                      </button>
+                      <button
+                        className="icon danger"
+                        title="Удалить сабмодуль"
+                        onClick={() => removeSub(i, j)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    className="edit-summary sub"
+                    value={s.summary}
+                    placeholder="Краткое описание сабмодуля…"
+                    rows={1}
+                    onChange={(e) => patchSub(i, j, { summary: e.target.value })}
+                  />
+                </li>
+              ))}
+            </ol>
+            <button className="add-sub" onClick={() => addSub(i)}>
+              + сабмодуль
+            </button>
+          </li>
+        ))}
+      </ol>
+      <button className="add-mod" onClick={addModule}>
+        + модуль
+      </button>
     </div>
   );
 }

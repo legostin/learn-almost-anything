@@ -161,3 +161,24 @@ pub fn delete_modules_for_course(
     conn.execute("DELETE FROM modules WHERE course_id = ?1", [course_id])?;
     Ok(())
 }
+
+pub fn update_module(
+    conn: &Connection,
+    id: &str,
+    parent_id: Option<&str>,
+    position: i64,
+    title: &str,
+    summary: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET parent_id = ?2, position = ?3, title = ?4, summary = ?5 \
+         WHERE id = ?1",
+        rusqlite::params![id, parent_id, position, title, summary],
+    )?;
+    Ok(())
+}
+
+pub fn delete_module(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM modules WHERE id = ?1", [id])?;
+    Ok(())
+}

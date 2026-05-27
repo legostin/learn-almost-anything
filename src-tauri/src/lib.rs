@@ -171,6 +171,17 @@ fn get_structure(
     courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn save_structure(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    modules: Vec<courses::ModuleUpdate>,
+) -> Result<courses::StructureFile, String> {
+    let mut conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    courses::save_structure(&mut conn, &paths, &course_id, modules).map_err(|e| e.to_string())
+}
+
 fn sidecar_script_path() -> PathBuf {
     // In dev: src-tauri/ is CARGO_MANIFEST_DIR; sidecar/ is its sibling.
     // TODO(prod): switch to app.path().resource_dir() once we bundle the sidecar.
@@ -211,7 +222,8 @@ pub fn run() {
             save_wizard_answers,
             start_wizard_questions,
             start_build_structure,
-            get_structure
+            get_structure,
+            save_structure
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
