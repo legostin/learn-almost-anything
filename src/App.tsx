@@ -26,6 +26,7 @@ type ModuleNode = {
   title: string;
   summary: string;
   generation_state: GenState;
+  test_passed?: boolean;
   submodules: ModuleNode[];
 };
 
@@ -65,7 +66,14 @@ type View =
   | { kind: "course"; id: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
 
-type StageName = "draft" | "review" | "annotate" | "illustrate";
+type StageName = "draft" | "review" | "annotate" | "illustrate" | "test";
+
+type TestQuestion = {
+  text: string;
+  options: string[];
+  correct: number;
+  explanation: string;
+};
 
 type StageEvent = {
   courseId: string;
@@ -1192,7 +1200,13 @@ function StructureTree({
                         {i + 1}.{j + 1}
                       </span>
                       {s.title}
-                      <SubmoduleStateIcon state={s.generation_state} />
+                      {s.test_passed ? (
+                        <span className="learned-dot" title="изучено">
+                          ✓
+                        </span>
+                      ) : (
+                        <SubmoduleStateIcon state={s.generation_state} />
+                      )}
                     </div>
                     {onOpenSub && onStartSubGen && (
                       <SubmoduleAction
@@ -1287,6 +1301,7 @@ type SubmoduleContent = {
   article: string;
   widgets: Record<string, WidgetData>;
   sources: Source[];
+  test: TestQuestion[];
   review_notes: string;
 };
 
@@ -1414,6 +1429,7 @@ function SubmoduleView({
       </button>
       <div className="sub-numbering">
         {moduleIdx + 1}.{subIdx + 1}
+        {sub.test_passed && <span className="learned-badge">✓ {t("subLearned")}</span>}
       </div>
       <h1 className="sub-h1">{sub.title}</h1>
       {sub.summary && <div className="sub-lead">{sub.summary}</div>}
@@ -1454,6 +1470,19 @@ function SubmoduleView({
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
               )}
+              {content.test?.length > 0 && (
+                <TestSection
+                  questions={content.test}
+                  alreadyPassed={!!sub.test_passed}
+                  onPassed={async () => {
+                    await invoke("submit_test_result", {
+                      submoduleId: submoduleId,
+                      passed: true,
+                    });
+                    await reloadTree();
+                  }}
+                />
+              )}
             </>
           )}
         </>
@@ -1462,7 +1491,9 @@ function SubmoduleView({
   );
 }
 
-const STAGE_ORDER: StageName[] = ["draft", "review", "annotate", "illustrate"];
+const STAGE_ORDER: StageName[] = ["draft", "review", "annotate", "illustrate", "test"];
+
+const TEST_PASS_THRESHOLD = 0.7;
 
 const ACT_KEYS: Record<string, string> = {
   thinking: "actThinking",
@@ -1515,6 +1546,7 @@ function StageStrip({ current }: { current: StageName }) {
     review: t("stageReview"),
     annotate: t("stageAnnotate"),
     illustrate: t("stageIllustrate"),
+    test: t("stageTest"),
   };
   return (
     <ol className="stage-strip">
@@ -1654,6 +1686,123 @@ function hostnameOf(url: string) {
   } catch {
     return url;
   }
+}
+
+function TestSection({
+  questions,
+  alreadyPassed,
+  onPassed,
+}: {
+  questions: TestQuestion[];
+  alreadyPassed: boolean;
+  onPassed: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [started, setStarted] = useState(false);
+  const [answers, setAnswers] = useState<(number | null)[]>(
+    questions.map(() => null)
+  );
+  const [submitted, setSubmitted] = useState(false);
+
+  const correctCount = questions.reduce(
+    (n, q, i) => (answers[i] === q.correct ? n + 1 : n),
+    0
+  );
+  const ratio = questions.length > 0 ? correctCount / questions.length : 0;
+  const passed = ratio >= TEST_PASS_THRESHOLD;
+  const allAnswered = answers.every((a) => a !== null);
+
+  async function submit() {
+    setSubmitted(true);
+    if (ratio >= TEST_PASS_THRESHOLD) {
+      await onPassed();
+    }
+  }
+
+  function retake() {
+    setAnswers(questions.map(() => null));
+    setSubmitted(false);
+  }
+
+  if (!started) {
+    return (
+      <section className="test">
+        <div className="test-header">
+          <h3 className="test-title">{t("testTitle")}</h3>
+          {alreadyPassed && <span className="learned-badge">✓ {t("subLearned")}</span>}
+        </div>
+        <button className="test-start" onClick={() => setStarted(true)}>
+          {alreadyPassed ? t("testRetake") : t("testStart")}
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="test">
+      <div className="test-header">
+        <h3 className="test-title">{t("testTitle")}</h3>
+      </div>
+      <ol className="test-questions">
+        {questions.map((q, i) => (
+          <li key={i} className="test-q">
+            <div className="test-q-text">{q.text}</div>
+            <div className="test-options">
+              {q.options.map((opt, j) => {
+                const chosen = answers[i] === j;
+                let cls = "test-option";
+                if (submitted) {
+                  if (j === q.correct) cls += " correct";
+                  else if (chosen) cls += " wrong";
+                } else if (chosen) {
+                  cls += " chosen";
+                }
+                return (
+                  <label key={j} className={cls}>
+                    <input
+                      type="radio"
+                      name={`tq-${i}`}
+                      checked={chosen}
+                      disabled={submitted}
+                      onChange={() =>
+                        setAnswers((prev) =>
+                          prev.map((a, k) => (k === i ? j : a))
+                        )
+                      }
+                    />
+                    <span>{opt}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {submitted && q.explanation && (
+              <div className="test-explanation">{q.explanation}</div>
+            )}
+          </li>
+        ))}
+      </ol>
+
+      {!submitted ? (
+        <button className="test-start" onClick={submit} disabled={!allAnswered}>
+          {t("testSubmit")}
+        </button>
+      ) : (
+        <div className={`test-result ${passed ? "pass" : "fail"}`}>
+          <div className="test-result-score">
+            {t("testScore", { correct: correctCount, total: questions.length })}
+          </div>
+          <div className="test-result-verdict">
+            {passed
+              ? `✓ ${t("testPassed")}`
+              : t("testFailed", { threshold: Math.round(TEST_PASS_THRESHOLD * 100) })}
+          </div>
+          <button className="test-start ghost" onClick={retake}>
+            {t("testRetake")}
+          </button>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function SourcesList({ sources }: { sources: Source[] }) {

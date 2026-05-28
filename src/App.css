@@ -1352,6 +1352,159 @@ button {
   margin: 6px 0 0;
 }
 
+.learned-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: none;
+  background: var(--status-ready-bg);
+  color: var(--status-ready-fg);
+}
+.learned-dot {
+  margin-left: 8px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--status-ready-fg);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.test {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+  max-width: 760px;
+}
+.test-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.test-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.test-start {
+  padding: 9px 18px;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 120ms ease;
+}
+.test-start:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.test-start:disabled {
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.test-start.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  margin-top: 12px;
+}
+.test-start.ghost:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+.test-questions {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.test-q-text {
+  font-weight: 500;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+.test-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.test-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 100ms ease;
+}
+.test-option:hover {
+  border-color: var(--border-strong);
+}
+.test-option input {
+  accent-color: var(--primary);
+  margin: 0;
+}
+.test-option.chosen {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.test-option.correct {
+  border-color: var(--status-ready-fg);
+  background: var(--status-ready-bg);
+}
+.test-option.wrong {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.test-explanation {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.55;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-strong);
+}
+.test-result {
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.test-result.pass {
+  background: var(--status-ready-bg);
+  color: var(--status-ready-fg);
+}
+.test-result.fail {
+  background: var(--accent-soft);
+  color: #92400e;
+}
+.test-result-score {
+  font-size: 18px;
+  font-weight: 600;
+}
+.test-result-verdict {
+  font-size: 14px;
+}
+
 .sources {
   margin-top: 48px;
   padding-top: 24px;

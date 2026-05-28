@@ -344,6 +344,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
             title: m.title,
             summary: m.summary.unwrap_or_default(),
             generation_state: "pending".to_string(),
+            test_passed: false,
             submodules: m
                 .submodules
                 .into_iter()
@@ -352,6 +353,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
                     title: s.title,
                     summary: s.summary.unwrap_or_default(),
                     generation_state: "pending".to_string(),
+                    test_passed: false,
                     submodules: vec![],
                 })
                 .collect(),
@@ -554,9 +556,34 @@ fn spawn_generate_submodule(
             widgets
         };
 
+        // Stage 5 — test. Soft-fail: a missing test never blocks the article.
+        emit_stage_event(&app2, &cid, &sid, "test");
+        let test_params = json!({
+            "backend": course.agent,
+            "topic": course.topic,
+            "language": course.language,
+            "submodulePath": { "title": sub_title, "summary": sub_summary },
+            "article": final_article,
+        });
+        let test_questions = match sidecar.call_with_progress(
+            "generate_test",
+            test_params,
+            Duration::from_secs(180),
+            make_progress_cb("test"),
+        ) {
+            Ok(v) => v.get("questions").cloned().unwrap_or_else(|| json!([])),
+            Err(e) => {
+                eprintln!("[generate_submodule] test stage failed (soft): {e}");
+                json!([])
+            }
+        };
+
         // Persist
         if let Err(e) = courses::write_submodule_article(&paths, &cid, &mid, &sid, &final_article) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
+        }
+        if let Err(e) = courses::write_submodule_test(&paths, &cid, &mid, &sid, &test_questions) {
+            eprintln!("[generate_submodule] write test (non-fatal): {e}");
         }
         if let Err(e) = courses::write_submodule_widgets(&paths, &cid, &mid, &sid, &widgets) {
             return fail(&db, &app2, &cid, &sid, e.to_string());
@@ -842,6 +869,23 @@ fn read_submodule_article(
 }
 
 #[tauri::command]
+fn submit_test_result(
+    db_state: tauri::State<'_, Arc<Db>>,
+    submodule_id: String,
+    passed: bool,
+) -> Result<(), String> {
+    if !passed {
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs() as i64;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn start_generate_submodule(
     app: AppHandle,
     db_state: tauri::State<'_, Arc<Db>>,
@@ -1017,6 +1061,7 @@ pub fn run() {
             start_generate_submodule,
             start_first_pending_submodule,
             read_submodule_article,
+            submit_test_result,
             delete_course,
             get_settings_status,
             set_brave_key,

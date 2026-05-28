@@ -121,6 +121,8 @@ pub struct ModuleNode {
     pub summary: String,
     #[serde(default = "default_pending")]
     pub generation_state: String,
+    #[serde(default)]
+    pub test_passed: bool,
     pub submodules: Vec<ModuleNode>,
 }
 
@@ -145,6 +147,7 @@ pub fn install_structure(
             title: m.title,
             summary: m.summary.unwrap_or_default(),
             generation_state: default_pending(),
+            test_passed: false,
             submodules: m
                 .submodules
                 .into_iter()
@@ -153,6 +156,7 @@ pub fn install_structure(
                     title: s.title,
                     summary: s.summary.unwrap_or_default(),
                     generation_state: default_pending(),
+                    test_passed: false,
                     submodules: vec![],
                 })
                 .collect(),
@@ -304,6 +308,7 @@ pub fn save_structure(
                 title: sub_title,
                 summary: sub_summary,
                 generation_state: default_pending(),
+                test_passed: false,
                 submodules: vec![],
             });
         }
@@ -312,6 +317,7 @@ pub fn save_structure(
             title,
             summary,
             generation_state: default_pending(),
+            test_passed: false,
             submodules: out_subs,
         });
     }
@@ -509,6 +515,24 @@ pub fn write_submodule_sources(
     Ok(())
 }
 
+pub fn write_submodule_test(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    questions: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let arr = questions.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    if !arr {
+        return Ok(());
+    }
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(questions).unwrap_or_else(|_| "[]".to_string());
+    fs::write(dir.join("test.json"), json)?;
+    Ok(())
+}
+
 pub fn write_submodule_review_notes(
     paths: &AppPaths,
     course_id: &str,
@@ -530,6 +554,7 @@ pub struct SubmoduleContent {
     pub article: String,
     pub widgets: serde_json::Value,
     pub sources: serde_json::Value,
+    pub test: serde_json::Value,
     pub review_notes: String,
 }
 
@@ -549,11 +574,16 @@ pub fn read_submodule_content(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!([]));
+    let test = fs::read_to_string(dir.join("test.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
     let review_notes = fs::read_to_string(dir.join("review_notes.md")).unwrap_or_default();
     Ok(SubmoduleContent {
         article,
         widgets,
         sources,
+        test,
         review_notes,
     })
 }
@@ -627,12 +657,14 @@ pub fn load_structure(
     course_id: &str,
 ) -> Result<StructureFile, CourseError> {
     let rows = db::list_modules(conn, course_id)?;
+    let passed = db::passed_submodule_ids(conn, course_id)?;
     let mut top: Vec<ModuleNode> = Vec::new();
     let mut sub_by_parent: std::collections::HashMap<String, Vec<ModuleNode>> =
         std::collections::HashMap::new();
 
     for m in rows {
         let node = ModuleNode {
+            test_passed: passed.contains(&m.id),
             id: m.id.clone(),
             title: m.title,
             summary: m.summary.unwrap_or_default(),

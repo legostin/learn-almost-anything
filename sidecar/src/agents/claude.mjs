@@ -710,6 +710,64 @@ Shape:
  * @returns {Promise<{ questions: Array<{ text: string, options: string[] }> }>}
  */
 /**
+ * Generate a multiple-choice test for a submodule, based on its article.
+ * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string}} params
+ * @returns {Promise<{questions: Array<{text:string, options:string[], correct:number, explanation:string}>}>}
+ */
+export async function generateTest({ topic, language, submodulePath, article }, ctx) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for test generation");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are writing a short comprehension test for a submodule of
+a course on "${topic}" (language: ${lang}).
+
+Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
+
+Article the test must be based on:
+<article>
+${article}
+</article>
+
+Write 5-8 multiple-choice questions that check real UNDERSTANDING of this
+article — not trivia or verbatim recall. Each question:
+- has 3-5 plausible options, exactly ONE correct;
+- "correct" is the 0-based index of the right option;
+- includes a one-sentence "explanation" of why the answer is right;
+- is written in language "${lang}".
+
+${terminologyGuide(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"questions":[{"text":"...","options":["...","..."],"correct":0,"explanation":"..."}]}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, ctx?.progress);
+  const parsed = extractJson(text);
+  return { questions: normalizeTestQuestions(parsed?.questions) };
+}
+
+function normalizeTestQuestions(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((q) => {
+      if (!q || typeof q.text !== "string" || !q.text.trim()) return null;
+      const options = Array.isArray(q.options)
+        ? q.options.filter((o) => typeof o === "string" && o.trim()).map((o) => o.trim())
+        : [];
+      if (options.length < 2) return null;
+      let correct = typeof q.correct === "number" ? Math.round(q.correct) : 0;
+      if (correct < 0 || correct >= options.length) correct = 0;
+      return {
+        text: q.text.trim(),
+        options,
+        correct,
+        explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+      };
+    })
+    .filter(Boolean);
+}
+
+/**
  * Vision review of candidate images for one image-widget slot.
  * @param {{language:string, description:string, alt:string, topic:string, candidates:{path:string}[]}} params
  * @returns {Promise<{pick: number|null, reason: string, refinedQuery: string}>}

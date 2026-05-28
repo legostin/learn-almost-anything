@@ -196,6 +196,79 @@ ${formatted}
 `;
 }
 
+const testSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          options: { type: "array", items: { type: "string" } },
+          correct: { type: "integer" },
+          explanation: { type: "string" },
+        },
+        required: ["text", "options", "correct", "explanation"],
+      },
+    },
+  },
+  required: ["questions"],
+};
+
+/**
+ * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string, braveApiKey?:string}} params
+ */
+export async function generateTest({ topic, language, submodulePath, article, braveApiKey }, ctx) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for test generation");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are writing a short comprehension test for a submodule of
+a course on "${topic}" (language: ${lang}).
+
+Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
+
+Article the test must be based on:
+<article>
+${article}
+</article>
+
+Write 5-8 multiple-choice questions that check real UNDERSTANDING of this
+article — not trivia or verbatim recall. Each question has 3-5 plausible
+options, exactly ONE correct ("correct" = 0-based index), and a one-sentence
+"explanation". All in language "${lang}".
+
+${terminologyGuide(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, testSchema, ctx?.progress, { braveApiKey });
+  const parsed = JSON.parse(text);
+  return { questions: normalizeTestQuestions(parsed?.questions) };
+}
+
+function normalizeTestQuestions(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((q) => {
+      if (!q || typeof q.text !== "string" || !q.text.trim()) return null;
+      const options = Array.isArray(q.options)
+        ? q.options.filter((o) => typeof o === "string" && o.trim()).map((o) => o.trim())
+        : [];
+      if (options.length < 2) return null;
+      let correct = typeof q.correct === "number" ? Math.round(q.correct) : 0;
+      if (correct < 0 || correct >= options.length) correct = 0;
+      return {
+        text: q.text.trim(),
+        options,
+        correct,
+        explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+      };
+    })
+    .filter(Boolean);
+}
+
 // Minimal JSON extractor for Codex review (no schema — needs LLM image input
 // which can't co-exist easily with strict outputSchema).
 function extractJsonLoose(text) {

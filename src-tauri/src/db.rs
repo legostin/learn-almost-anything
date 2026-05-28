@@ -223,6 +223,28 @@ pub fn get_module_generation_state(
     })
 }
 
+pub fn set_test_passed(conn: &Connection, module_id: &str, now: i64) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO progress (module_id, test_passed_at) VALUES (?1, ?2) \
+         ON CONFLICT(module_id) DO UPDATE SET test_passed_at = ?2",
+        rusqlite::params![module_id, now],
+    )?;
+    Ok(())
+}
+
+pub fn passed_submodule_ids(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<std::collections::HashSet<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT p.module_id FROM progress p \
+         JOIN modules m ON m.id = p.module_id \
+         WHERE m.course_id = ?1 AND p.test_passed_at IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([course_id], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// (module_id, submodule_id) of the first submodule in 'pending' state, ordered
 /// by parent position then submodule position. None if everything is generated
 /// or generating.
