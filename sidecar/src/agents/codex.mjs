@@ -5,9 +5,19 @@
 // uses whatever auth the local CLI has configured — same subscription pattern
 // as the Claude side.
 
+import { readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { Codex } from "@openai/codex-sdk";
 
-import { repairPrompt, validateInteractive } from "../lib/interactive.mjs";
+import {
+  repairPrompt,
+  validateInteractive,
+  renderWidgetPng,
+  rendererAvailable,
+} from "../lib/interactive.mjs";
+import { braveStdioServer } from "../lib/brave.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
@@ -17,11 +27,7 @@ function makeCodex(braveApiKey) {
   return new Codex({
     config: {
       mcp_servers: {
-        brave: {
-          command: "npx",
-          args: ["-y", "@modelcontextprotocol/server-brave-search"],
-          env: { BRAVE_API_KEY: braveApiKey },
-        },
+        brave: braveStdioServer(braveApiKey),
       },
     },
   });
@@ -39,19 +45,51 @@ const baseThreadOptions = {
   skipGitRepoCheck: true,
   // No filesystem mutation during these turns.
   sandboxMode: "read-only",
+  // Internet by default for every stage (draft, structure, refine, …) — applied
+  // to all calls via threadOptions(). Keep both enabled; the content quality
+  // depends on the agent being able to verify facts online.
   networkAccessEnabled: true,
   webSearchEnabled: true,
 };
 
+// Maps a { model, reasoning } config (from settings) onto Codex ThreadOptions.
+// Codex has no "off" — the closest is "minimal"; Claude-only "max" → "high".
+function modelThreadOptions(modelConfig) {
+  const out = {};
+  const model = modelConfig?.model;
+  if (typeof model === "string" && model.trim()) out.model = model.trim();
+  const reasoning = modelConfig?.reasoning;
+  if (typeof reasoning === "string" && reasoning.trim()) {
+    const map = {
+      off: "minimal",
+      none: "minimal",
+      disabled: "minimal",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "high",
+    };
+    const eff = map[reasoning.trim().toLowerCase()];
+    if (eff) out.modelReasoningEffort = eff;
+  }
+  return out;
+}
+
+function threadOptions(opts) {
+  return { ...baseThreadOptions, ...modelThreadOptions(opts?.modelConfig) };
+}
+
 async function runOnce(prompt, outputSchema, opts) {
-  const thread = makeCodex(opts?.braveApiKey).startThread(baseThreadOptions);
+  const thread = makeCodex(opts?.braveApiKey).startThread(threadOptions(opts));
   const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
   return turn.finalResponse;
 }
 
 async function runStreamed(prompt, outputSchema, onProgress, opts) {
   if (!onProgress) return await runOnce(prompt, outputSchema, opts);
-  const thread = makeCodex(opts?.braveApiKey).startThread(baseThreadOptions);
+  const thread = makeCodex(opts?.braveApiKey).startThread(threadOptions(opts));
   const stream = await thread.runStreamed(
     prompt,
     outputSchema ? { outputSchema } : undefined
@@ -64,14 +102,16 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
       if (item.type === "web_search" && item.query) {
         onProgress({ label: "searching", detail: item.query });
       } else if (item.type === "reasoning" && typeof item.text === "string" && item.text.trim()) {
-        const tail = item.text.replace(/\s+/g, " ").trim().slice(-100);
-        onProgress({ label: "thinking", detail: tail });
+        // Full reasoning text — drives the live transcript bubbles.
+        onProgress({ label: "thinking", detail: item.text.trim() });
       } else if (
         item.type === "agent_message" &&
         typeof item.text === "string" &&
         item.text.trim()
       ) {
-        const tail = item.text.replace(/\s+/g, " ").trim().slice(-100);
+        // The final message is structured JSON for most stages — keep it a
+        // short indicator rather than dumping the whole payload.
+        const tail = item.text.replace(/\s+/g, " ").trim().slice(-80);
         onProgress({ label: "writing", detail: tail });
       } else if (item.type === "command_execution" && item.command) {
         onProgress({ label: "running", detail: String(item.command).slice(0, 100) });
@@ -88,6 +128,86 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
   return final;
 }
 
+// The Codex CLI caches the live model catalog at ~/.codex/models_cache.json —
+// read it for the real list + each model's real reasoning-effort levels.
+export async function listModels() {
+  try {
+    const path = join(homedir(), ".codex", "models_cache.json");
+    const cache = JSON.parse(readFileSync(path, "utf8"));
+    const models = (cache.models || [])
+      .filter((m) => m && m.slug && m.visibility === "list")
+      .map((m) => ({
+        value: m.slug,
+        label: m.display_name || m.slug,
+        description: m.description || "",
+        effortLevels: (m.supported_reasoning_levels || [])
+          .map((r) => r.effort)
+          .filter(Boolean),
+      }));
+    if (models.length) return { models };
+  } catch {
+    /* fall through to the minimal fallback */
+  }
+  return {
+    models: [
+      {
+        value: "gpt-5.1-codex",
+        label: "GPT-5.1 Codex",
+        description: "Coding model",
+        effortLevels: ["low", "medium", "high", "xhigh"],
+      },
+    ],
+  };
+}
+
+const GENERATED_IMAGES_DIR = join(homedir(), ".codex", "generated_images");
+
+function listImages(dir) {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+function mtimeOf(p) {
+  try {
+    return statSync(p).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Generate an illustration via Codex's $imagegen skill (gpt-image-2). Output
+ * lands in ~/.codex/generated_images/ — we diff the dir to find the new file.
+ * Best-effort: returns { path: null } if the skill didn't produce anything.
+ * @param {{ prompt: string }} params
+ * @returns {Promise<{ path: string|null }>}
+ */
+export async function generateImage({ prompt }, ctx) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    throw new Error("prompt required for image generation");
+  }
+  const before = new Set(listImages(GENERATED_IMAGES_DIR));
+  ctx?.progress?.({ label: "generating", detail: prompt.slice(0, 100) });
+  const thread = defaultCodex.startThread({
+    skipGitRepoCheck: true,
+    sandboxMode: "workspace-write",
+    networkAccessEnabled: true,
+    webSearchEnabled: false,
+  });
+  const input = `Generate ONE high-quality educational illustration using the $imagegen skill. Produce only the image — no code, no explanation.\n\nIllustration: ${prompt}`;
+  await thread.run(input);
+  const fresh = listImages(GENERATED_IMAGES_DIR).filter(
+    (f) => !before.has(f) && /\.(png|jpe?g|webp)$/i.test(f)
+  );
+  if (fresh.length === 0) return { path: null };
+  fresh.sort(
+    (a, b) => mtimeOf(join(GENERATED_IMAGES_DIR, b)) - mtimeOf(join(GENERATED_IMAGES_DIR, a))
+  );
+  return { path: join(GENERATED_IMAGES_DIR, fresh[0]) };
+}
+
 /**
  * @param {{ prompt: string }} params
  */
@@ -102,7 +222,7 @@ export async function chat({ prompt }) {
 /**
  * @param {{ topic: string, language: string }} params
  */
-export async function wizardQuestions({ topic, language }) {
+export async function wizardQuestions({ topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -156,7 +276,7 @@ ${terminologyGuide(lang)}`;
     required: ["questions"],
   };
 
-  const text = await runOnce(prompt, schema);
+  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.questions)) {
     throw new Error("Codex response missing 'questions' array");
@@ -221,7 +341,7 @@ const testSchema = {
 /**
  * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string, braveApiKey?:string}} params
  */
-export async function generateTest({ topic, language, submodulePath, article, braveApiKey }, ctx) {
+export async function generateTest({ topic, language, submodulePath, article, braveApiKey, modelConfig }, ctx) {
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
@@ -243,7 +363,7 @@ options, exactly ONE correct ("correct" = 0-based index), and a one-sentence
 
 ${terminologyGuide(lang)}`;
   ctx?.progress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, testSchema, ctx?.progress, { braveApiKey });
+  const text = await runStreamed(prompt, testSchema, ctx?.progress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
   return { questions: normalizeTestQuestions(parsed?.questions) };
 }
@@ -281,13 +401,168 @@ function extractJsonLoose(text) {
   throw new Error("no JSON in response: " + trimmed.slice(0, 200));
 }
 
+// ── Homework assignments ────────────────────────────────────────────────────
+
+const ASSIGNMENT_TYPES = ["image", "text", "document", "archive", "github"];
+const CRITICALITIES = ["critical", "major", "minor"];
+
+const assignmentSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    assignments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          prompt: { type: "string" },
+          type: { type: "string", enum: ["image", "text", "document", "archive", "github"] },
+          criteria: { type: "string" },
+        },
+        required: ["title", "prompt", "type", "criteria"],
+      },
+    },
+  },
+  required: ["assignments"],
+};
+
+function normalizeAssignments(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  raw.forEach((a, i) => {
+    if (!a || typeof a.title !== "string" || !a.title.trim()) return;
+    if (typeof a.prompt !== "string" || !a.prompt.trim()) return;
+    let type = typeof a.type === "string" ? a.type.trim().toLowerCase() : "text";
+    if (!ASSIGNMENT_TYPES.includes(type)) type = "text";
+    out.push({
+      id: `a${i + 1}`,
+      title: a.title.trim(),
+      prompt: a.prompt.trim(),
+      type,
+      criteria: typeof a.criteria === "string" ? a.criteria.trim() : "",
+    });
+  });
+  return out.slice(0, 4);
+}
+
+function normalizeReview(parsed) {
+  const remarks = Array.isArray(parsed?.remarks)
+    ? parsed.remarks
+        .filter((r) => r && typeof r.text === "string" && r.text.trim())
+        .map((r) => ({
+          text: r.text.trim(),
+          criticality: CRITICALITIES.includes(String(r.criticality).toLowerCase())
+            ? String(r.criticality).toLowerCase()
+            : "minor",
+        }))
+    : [];
+  let verdict = String(parsed?.verdict || "").toLowerCase();
+  if (verdict !== "passed" && verdict !== "revise") verdict = "revise";
+  if (remarks.some((r) => r.criticality === "critical" || r.criticality === "major")) {
+    verdict = "revise";
+  }
+  return {
+    remarks,
+    verdict,
+    summary: typeof parsed?.summary === "string" ? parsed.summary.trim() : "",
+  };
+}
+
+/** Design a short chain of practical homework assignments for a submodule. */
+export async function generateAssignments({ topic, language, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for assignment generation");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are designing practical homework for one submodule of a
+course on "${topic}" (language: ${lang}).
+
+Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
+
+The article the learner just studied:
+<article>
+${article}
+</article>
+
+Design a SHORT CHAIN of 1-3 practical assignments that make the learner APPLY
+what they learned, ordered as a progression. For each pick the single best
+submission type: "image" (drawing/sketch/diagram/photo), "text" (written
+answer/essay), "document" (uploaded file), "archive" (.zip of a program),
+"github" (link to a repo). Match type to skill: drawing→image,
+writing→text, coding→archive/github, longer deliverables→document.
+For each write clear "criteria" — concrete checkable things a reviewer grades
+against (drives an iterative review-and-revise loop). Concrete, achievable from
+the article; no busywork. All text in language "${lang}".
+
+${terminologyGuide(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, assignmentSchema, ctx?.progress, { braveApiKey, modelConfig });
+  const parsed = JSON.parse(text);
+  return { assignments: normalizeAssignments(parsed?.assignments) };
+}
+
+/** Review one homework submission (vision + web aware) against its assignment. */
+export async function reviewAssignment(params, ctx) {
+  const { topic, language, assignment, submission, history, braveApiKey, modelConfig } = params;
+  const lang = (language || "en").trim();
+  const a = assignment || {};
+  const sub = submission || {};
+  const images = Array.isArray(sub.images) ? sub.images.filter((im) => im && im.path) : [];
+
+  const histBlock =
+    Array.isArray(history) && history.length
+      ? `Conversation so far on this assignment (most recent last):\n${history
+          .map((h) => `${h.role === "agent" ? "Reviewer" : "Learner"}: ${h.text}`)
+          .join("\n")}\n\n`
+      : "";
+  const githubBlock = sub.githubUrl
+    ? `\nThe learner submitted a GitHub repository: ${sub.githubUrl}\nInspect its README and key files (you have web access) before judging.\n`
+    : "";
+  const textBlock =
+    typeof sub.text === "string" && sub.text.trim()
+      ? `\nThe learner's submission (text / extracted file content):\n<submission>\n${sub.text.slice(0, 24000)}\n</submission>\n`
+      : "";
+  const imageNote = images.length
+    ? `\nThe submission includes ${images.length} image(s) below — examine them visually.\n`
+    : "";
+
+  const promptText = `You are a strict but encouraging reviewer grading one homework assignment in a course on "${topic}". Respond in language "${lang}".
+
+Assignment: ${a.title || ""}
+Task: ${a.prompt || ""}
+${a.criteria ? `Grading criteria:\n${a.criteria}\n` : ""}
+${histBlock}Now review the learner's NEW submission below.${imageNote}${githubBlock}${textBlock}
+
+Judge the submission against the task and criteria. Produce:
+- "remarks": specific, actionable points. Each has "text" and "criticality" ∈
+  "critical" | "major" | "minor". critical/major mean it does not yet meet the
+  assignment.
+- "verdict": "passed" ONLY if there are no critical or major remarks AND the work
+  genuinely satisfies the assignment; otherwise "revise".
+- "summary": 1-3 sentences on what to fix next (or congratulations if passed).
+Reference what you actually see; don't pass weak work, don't nitpick endlessly.
+
+Output ONLY a single-line JSON object:
+{"remarks":[{"text":"...","criticality":"major"}],"verdict":"revise","summary":"..."}`;
+
+  const input = [{ type: "text", text: promptText }];
+  for (const im of images) input.push({ type: "local_image", path: im.path });
+
+  ctx?.progress?.({ label: "reviewing" });
+  const thread = makeCodex(braveApiKey).startThread(threadOptions({ braveApiKey, modelConfig }));
+  const turn = await thread.run(input);
+  return normalizeReview(extractJsonLoose(turn.finalResponse));
+}
+
 /**
  * Vision review of candidate images for one image-widget slot.
  * @param {{language:string, description:string, alt:string, topic:string, candidates:{path:string}[], braveApiKey?:string}} params
  * @returns {Promise<{pick: number|null, reason: string, refinedQuery: string}>}
  */
 export async function reviewImages(params, ctx) {
-  const { language, description, alt, topic, candidates, braveApiKey } = params;
+  const { language, description, alt, topic, candidates, braveApiKey, modelConfig } = params;
   if (!Array.isArray(candidates) || candidates.length === 0) {
     return { pick: null, reason: "no candidates", refinedQuery: "" };
   }
@@ -315,7 +590,7 @@ Output ONLY a single-line JSON object:
   }
 
   ctx?.progress?.({ label: "reviewing" });
-  const thread = makeCodex(braveApiKey).startThread(baseThreadOptions);
+  const thread = makeCodex(braveApiKey).startThread(threadOptions({ braveApiKey, modelConfig }));
   const turn = await thread.run(input);
   const parsed = extractJsonLoose(turn.finalResponse);
   return {
@@ -335,6 +610,7 @@ const draftSchema = {
   additionalProperties: false,
   properties: {
     article: { type: "string" },
+    notes: { type: "string" },
     imageWidgets: {
       type: "array",
       items: {
@@ -342,12 +618,13 @@ const draftSchema = {
         additionalProperties: false,
         properties: {
           id: { type: "string" },
+          mode: { type: "string", enum: ["search", "generate"] },
           description: { type: "string" },
           alt: { type: "string" },
           url: { type: "string" },
           source: { type: "string" },
         },
-        required: ["id", "description", "alt", "url", "source"],
+        required: ["id", "mode", "description", "alt", "url", "source"],
       },
     },
     diagramWidgets: {
@@ -410,6 +687,7 @@ const draftSchema = {
   },
   required: [
     "article",
+    "notes",
     "imageWidgets",
     "diagramWidgets",
     "videoWidgets",
@@ -429,6 +707,7 @@ async function draftArticleInternal(
     submodulePath,
     previousArticles,
     braveApiKey,
+    modelConfig,
   },
   onProgress
 ) {
@@ -498,8 +777,18 @@ Hard rules — your widget WILL BE REJECTED if it breaks any of these:
     setTimeout, Math.
   • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
 
+IMAGE WIDGETS — set "mode" per image:
+  • "search" — a real, specific, existing thing to FIND not invent: a particular
+    famous artwork (e.g. a specific Leonardo da Vinci painting), a real photo of
+    a real place/person/object/event, a historical artifact, a real screenshot.
+    "description" = a precise search target.
+  • "generate" — a custom conceptual/explanatory illustration that won't exist
+    as a findable photo. "description" = a rich, detailed image-generation prompt
+    (subject, style, composition).
+  When unsure, prefer "search" — a real image beats an invented one for facts.
+
 Return widgets in four separate arrays:
-- imageWidgets: [{id, description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
+- imageWidgets: [{id, mode ("search"|"generate"), description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
@@ -534,15 +823,29 @@ ACTUALLY consulted while writing this submodule. Be honest — do not
 invent URLs, do not include sources you didn't read. If you wrote
 entirely from internal knowledge with no web lookups, return [].
 
+EDITOR PASS — before returning, re-read your draft and fix it as a careful
+editor + fact-checker. Do this silently; return only the polished result:
+1. Punctuation — fix errors.
+2. Typography for "${lang}" — proper quotes («» in Russian, "" in English),
+   em-dashes — where appropriate, no double spaces, proper ellipses (…),
+   non-breaking spaces where idiomatic.
+3. Factual claims — verify them (use web search). Fix what's wrong; if you
+   cannot verify a load-bearing claim, soften it or drop it.
+4. Consistency — do not contradict the previous submodules above; reuse their
+   terminology and level assumptions.
+5. Flow — light polish only; do NOT restructure or change the voice.
+Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
+
 ${terminologyGuide(lang)}`;
   onProgress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey });
+  const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
     throw new Error("Codex returned no article");
   }
   return {
     article: parsed.article.trim(),
+    notes: typeof parsed.notes === "string" ? parsed.notes.trim() : "",
     widgets: mergeWidgets(
       parsed.imageWidgets,
       parsed.diagramWidgets,
@@ -562,6 +865,7 @@ function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets, interactiveWid
         out[w.id.trim()] = {
           type: "image",
           placeholder: !url,
+          mode: w.mode === "generate" ? "generate" : "search",
           description: typeof w.description === "string" ? w.description.trim() : "",
           alt: typeof w.alt === "string" ? w.alt.trim() : "",
           ...(url ? { url } : {}),
@@ -647,7 +951,7 @@ export async function submoduleReview(params, ctx) {
 }
 
 async function reviewArticle(
-  { article, language, topic, previousArticles },
+  { article, language, topic, previousArticles, modelConfig },
   onProgress
 ) {
   const lang = (language || "en").trim();
@@ -677,7 +981,7 @@ ${terminologyGuide(lang)}
 Return the full revised article in "article" and a brief log of fixes in
 "notes" (empty string if nothing changed materially).`;
   onProgress?.({ label: "reviewing" });
-  const text = await runStreamed(prompt, reviewSchema, onProgress);
+  const text = await runStreamed(prompt, reviewSchema, onProgress, { modelConfig });
   const parsed = JSON.parse(text);
   return {
     article:
@@ -719,7 +1023,8 @@ export async function submoduleAnnotate(params, ctx) {
         w,
         id,
         ctx,
-        params?.braveApiKey
+        params?.braveApiKey,
+        params?.modelConfig
       );
       if (repairs > 0 && !error) intRepaired++;
       if (error) {
@@ -744,9 +1049,78 @@ export async function submoduleAnnotate(params, ctx) {
 
 const INTERACTIVE_MAX_REPAIRS = 2;
 
-async function validateAndRepairInteractive(widget, id, ctx, braveApiKey) {
+const WIDGET_SEVERITIES = ["critical", "minor"];
+
+function widgetReviewPrompt(title, description) {
+  return `You are reviewing a SCREENSHOT of a rendered interactive learning widget to check it actually renders correctly.
+
+Widget title: ${title || "(none)"}
+What it should let the learner do: ${description || "(none)"}
+
+Judge ONLY real rendering failures:
+- Is anything actually rendered (NOT a blank/empty/white/black area)?
+- Is the layout geometrically intact: text not clipped or cut off, elements not overlapping or spilling outside the frame, controls and labels readable and reasonably sized?
+- For drawings/diagrams (e.g. a perspective cube): are the shapes coherent — lines meet where they should, no obviously broken or garbled geometry?
+Do NOT nitpick anti-aliasing, exact fonts, pixel-perfect spacing, color/theme choices, or light vs dark.
+
+Severity: "critical" = blank, unusable, or broken geometry/layout that defeats the widget's purpose; "minor" = cosmetic only.
+
+Output ONLY a single-line JSON object:
+{"ok":<true if it renders correctly>,"defects":[{"text":"<what is wrong>","severity":"critical|minor"}],"summary":"<one short sentence>"}`;
+}
+
+function normalizeWidgetReview(parsed) {
+  const defects = Array.isArray(parsed?.defects)
+    ? parsed.defects
+        .filter((d) => d && typeof d.text === "string" && d.text.trim())
+        .map((d) => ({
+          text: d.text.trim(),
+          severity: WIDGET_SEVERITIES.includes(String(d.severity).toLowerCase())
+            ? String(d.severity).toLowerCase()
+            : "minor",
+        }))
+    : [];
+  const ok = parsed?.ok === true && !defects.some((d) => d.severity === "critical");
+  return { ok, defects, summary: typeof parsed?.summary === "string" ? parsed.summary.trim() : "" };
+}
+
+export async function reviewWidgetRender({ title, description, pngPath, braveApiKey, modelConfig }, ctx) {
+  const input = [
+    { type: "text", text: widgetReviewPrompt(title, description) },
+    { type: "local_image", path: pngPath },
+  ];
+  ctx?.progress?.({ label: "validating", detail: "visual check" });
+  const thread = makeCodex(braveApiKey).startThread(threadOptions({ braveApiKey, modelConfig }));
+  const turn = await thread.run(input);
+  return normalizeWidgetReview(extractJsonLoose(turn.finalResponse));
+}
+
+async function visualCheck(widget, id, braveApiKey, modelConfig, ctx) {
+  if (!(await rendererAvailable())) return null;
+  ctx?.progress?.({ label: "validating", detail: `${id}: rendering` });
+  const out = join(tmpdir(), `wv-${id}-${process.pid}-${Date.now()}.png`);
+  const png = await renderWidgetPng(widget, out);
+  if (!png) return null;
+  try {
+    const review = await reviewWidgetRender(
+      { title: widget.title, description: widget.description, pngPath: png, braveApiKey, modelConfig },
+      ctx
+    );
+    if (review.ok) return null;
+    const critical = review.defects.filter((d) => d.severity === "critical").map((d) => d.text);
+    if (critical.length === 0) return null;
+    return `render looks broken: ${critical.slice(0, 2).join("; ")}`;
+  } finally {
+    try {
+      unlinkSync(png);
+    } catch {}
+  }
+}
+
+async function validateAndRepairInteractive(widget, id, ctx, braveApiKey, modelConfig) {
   let current = widget;
   let lastError = await validateInteractive(current);
+  if (!lastError) lastError = await visualCheck(current, id, braveApiKey, modelConfig, ctx);
   if (!lastError) return { final: current, error: null, repairs: 0 };
   ctx?.progress?.({ label: "validating", detail: `${id}: ${lastError}` });
   for (let attempt = 1; attempt <= INTERACTIVE_MAX_REPAIRS; attempt++) {
@@ -756,7 +1130,7 @@ async function validateAndRepairInteractive(widget, id, ctx, braveApiKey) {
     });
     let repaired;
     try {
-      repaired = await repairInteractiveCodex(current, lastError, braveApiKey);
+      repaired = await repairInteractiveCodex(current, lastError, braveApiKey, modelConfig);
     } catch (e) {
       lastError = `repair call failed: ${e?.message || e}`;
       break;
@@ -767,6 +1141,7 @@ async function validateAndRepairInteractive(widget, id, ctx, braveApiKey) {
     }
     current = { ...current, ...repaired };
     lastError = await validateInteractive(current);
+    if (!lastError) lastError = await visualCheck(current, id, braveApiKey, modelConfig, ctx);
     if (!lastError) return { final: current, error: null, repairs: attempt };
     ctx?.progress?.({ label: "validating", detail: `${id}: ${lastError}` });
   }
@@ -785,9 +1160,9 @@ const repairSchema = {
   required: ["html", "css", "js", "height"],
 };
 
-async function repairInteractiveCodex(widget, errorMsg, braveApiKey) {
+async function repairInteractiveCodex(widget, errorMsg, braveApiKey, modelConfig) {
   const prompt = repairPrompt(widget, errorMsg);
-  const text = await runOnce(prompt, repairSchema, { braveApiKey });
+  const text = await runOnce(prompt, repairSchema, { braveApiKey, modelConfig });
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -953,12 +1328,14 @@ const refineSchema = {
 /**
  * @param {{topic:string, language:string, courseMd:string, currentStructure:object, memoryFiles:{filename:string,content:string}[], chatHistory:{role:string,text:string}[], userMessage:string}} params
  */
-export async function refineStructure(params) {
+export async function refineStructure(params, ctx) {
   if (typeof params?.userMessage !== "string" || !params.userMessage.trim()) {
     throw new Error("userMessage must be a non-empty string");
   }
   const prompt = buildRefinePrompt(params);
-  const text = await runOnce(prompt, refineSchema);
+  const text = await runStreamed(prompt, refineSchema, ctx?.progress, {
+    modelConfig: params.modelConfig,
+  });
   const parsed = JSON.parse(text);
   return normalizeRefineResponse(parsed);
 }
@@ -966,7 +1343,7 @@ export async function refineStructure(params) {
 /**
  * @param {{ courseMd: string, topic: string, language: string }} params
  */
-export async function buildStructure({ courseMd, topic, language }) {
+export async function buildStructure({ courseMd, topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -1041,7 +1418,7 @@ ${terminologyGuide(lang)}`;
     required: ["modules"],
   };
 
-  const text = await runOnce(prompt, schema);
+  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
     throw new Error("Codex response missing non-empty 'modules' array");

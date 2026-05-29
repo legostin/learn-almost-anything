@@ -549,6 +549,278 @@ pub fn write_submodule_review_notes(
     Ok(())
 }
 
+/// Intermediate generation state, persisted after the expensive draft/review
+/// stages so a failed run resumes instead of restarting from scratch.
+/// `stage` is the last completed stage: "draft" or "review".
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubmoduleCheckpoint {
+    pub stage: String,
+    pub article: String,
+    pub widgets: serde_json::Value,
+    pub sources: serde_json::Value,
+    pub notes: String,
+}
+
+pub fn write_submodule_checkpoint(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    cp: &SubmoduleCheckpoint,
+) -> Result<(), CourseError> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(cp).unwrap_or_default();
+    fs::write(dir.join("checkpoint.json"), json)?;
+    Ok(())
+}
+
+pub fn read_submodule_checkpoint(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+) -> Option<SubmoduleCheckpoint> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    let s = fs::read_to_string(dir.join("checkpoint.json")).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+pub fn clear_submodule_checkpoint(paths: &AppPaths, course_id: &str, mod_id: &str, sub_id: &str) {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    let _ = fs::remove_file(dir.join("checkpoint.json"));
+}
+
+// Last generation error, persisted so the failed-state screen can show what
+// happened even after the app is reopened (the live event is in-memory only).
+pub fn write_submodule_error(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    err: &str,
+) -> Result<(), CourseError> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("error.txt"), err)?;
+    Ok(())
+}
+
+pub fn read_submodule_error(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+) -> Option<String> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::read_to_string(dir.join("error.txt"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn clear_submodule_error(paths: &AppPaths, course_id: &str, mod_id: &str, sub_id: &str) {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    let _ = fs::remove_file(dir.join("error.txt"));
+}
+
+// ── Homework assignments ────────────────────────────────────────────────────
+
+pub fn assignment_dir(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignment_id: &str,
+) -> PathBuf {
+    submodule_dir(paths, course_id, mod_id, sub_id)
+        .join("assignments")
+        .join(assignment_id)
+}
+
+pub fn write_submodule_assignments(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignments: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let has = assignments.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    if !has {
+        return Ok(());
+    }
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(assignments).unwrap_or_else(|_| "[]".to_string());
+    fs::write(dir.join("assignments.json"), json)?;
+    Ok(())
+}
+
+pub fn read_submodule_assignments(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+) -> serde_json::Value {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::read_to_string(dir.join("assignments.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!([]))
+}
+
+pub fn append_assignment_chat(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignment_id: &str,
+    turn: &serde_json::Value,
+) -> Result<(), CourseError> {
+    use std::io::Write;
+    let dir = assignment_dir(paths, course_id, mod_id, sub_id, assignment_id);
+    fs::create_dir_all(&dir)?;
+    let line = serde_json::to_string(turn).unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("chat.jsonl"))?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+pub fn read_assignment_chat(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignment_id: &str,
+) -> Vec<serde_json::Value> {
+    let path = assignment_dir(paths, course_id, mod_id, sub_id, assignment_id).join("chat.jsonl");
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+pub fn read_assignment_status(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignment_id: &str,
+) -> String {
+    let path = assignment_dir(paths, course_id, mod_id, sub_id, assignment_id).join("state.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("status").and_then(|x| x.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "pending".to_string())
+}
+
+pub fn write_assignment_status(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    assignment_id: &str,
+    status: &str,
+    attempts: i64,
+) -> Result<(), CourseError> {
+    let dir = assignment_dir(paths, course_id, mod_id, sub_id, assignment_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "status": status,
+        "attempts": attempts,
+    }))
+    .unwrap_or_default();
+    fs::write(dir.join("state.json"), json)?;
+    Ok(())
+}
+
+fn is_texty(name: &str) -> bool {
+    let n = name.to_lowercase();
+    const EXTS: &[&str] = &[
+        ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".java", ".kt", ".go", ".c",
+        ".h", ".cpp", ".hpp", ".cc", ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash",
+        ".sql", ".html", ".css", ".scss", ".vue", ".svelte", ".md", ".txt", ".json", ".yaml",
+        ".yml", ".toml", ".xml", ".csv", ".ini", ".cfg", ".gradle",
+    ];
+    EXTS.iter().any(|e| n.ends_with(e)) || n.ends_with("readme") || n.contains("readme.")
+}
+
+fn extract_zip_text(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut out = String::from("Archive contents:\n");
+    for i in 0..zip.len() {
+        if let Ok(f) = zip.by_index(i) {
+            out.push_str("  ");
+            out.push_str(f.name());
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    let cap = 40_000usize;
+    for i in 0..zip.len() {
+        if out.len() >= cap {
+            break;
+        }
+        let mut f = match zip.by_index(i) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if f.is_dir() || !is_texty(f.name()) || f.size() > 200_000 {
+            continue;
+        }
+        let name = f.name().to_string();
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        if let Ok(s) = String::from_utf8(buf) {
+            let remaining = cap.saturating_sub(out.len()).min(8_000);
+            let body: String = s.chars().take(remaining).collect();
+            out.push_str(&format!("\n----- {name} -----\n"));
+            out.push_str(&body);
+        }
+    }
+    Some(out)
+}
+
+/// Best-effort text extraction from a submitted file for agent review.
+/// Returns text for UTF-8 text/code files and the text entries of .zip
+/// archives; None for binary (image/pdf/docx) which is handled separately.
+pub fn extract_submission_text(path: &std::path::Path) -> Option<String> {
+    let lower = path.to_string_lossy().to_lowercase();
+    if lower.ends_with(".zip") {
+        return extract_zip_text(path);
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    match String::from_utf8(bytes) {
+        Ok(s) => Some(s.chars().take(24_000).collect()),
+        Err(_) => None,
+    }
+}
+
+pub fn is_image_file(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.ends_with(".png")
+        || n.ends_with(".jpg")
+        || n.ends_with(".jpeg")
+        || n.ends_with(".webp")
+        || n.ends_with(".gif")
+}
+
 #[derive(Debug, Serialize)]
 pub struct SubmoduleContent {
     pub article: String,

@@ -1,6 +1,8 @@
 // Validation for type="interactive" widgets — used by both backends.
 // 1) Static lint (regex + JS parse) — fast.
 // 2) Runtime check via jsdom — catches runtime errors that lint misses.
+// 3) (optional) Visual render via headless Chrome → screenshot, so a vision
+//    model can catch render failures jsdom can't see (jsdom has no CSS layout).
 
 import { JSDOM, VirtualConsole } from "jsdom";
 
@@ -103,6 +105,85 @@ export async function validateInteractive(widget) {
   const lintError = staticLint(widget);
   if (lintError) return lintError;
   return await runtimeCheck(widget);
+}
+
+// ── Visual render (headless Chrome) ──────────────────────────────────────────
+// jsdom has no layout engine, so it cannot see CSS/SVG render breakage. We
+// render the widget in real Chrome (reusing the user's installed browser via
+// playwright-core's channel:"chrome" — no Chromium download) and screenshot it
+// for a vision model. The whole stage self-disables if Chrome isn't available.
+
+// Mirrors the frontend's buildInteractiveDoc (src/App.tsx) so the screenshot
+// matches what the learner actually sees.
+export function buildInteractiveDoc(html, css, js) {
+  const csp =
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>
+:root{color-scheme:light dark}
+body{margin:0;padding:14px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;font-size:14px;line-height:1.5;color:#1c1917;background:#fafaf9}
+@media (prefers-color-scheme: dark){body{background:#1c1917;color:#fafaf9}}
+${css || ""}
+</style></head><body>${html || ""}<script>${js || ""}</script></body></html>`;
+}
+
+let _chromium = null; // chromium launcher, or false if playwright-core absent
+let _browser = null; // cached browser instance (reused across renders)
+let _probe = null; // cached availability Promise<boolean>
+
+async function chromiumLauncher() {
+  if (_chromium !== null) return _chromium;
+  try {
+    _chromium = (await import("playwright-core")).chromium;
+  } catch {
+    _chromium = false;
+  }
+  return _chromium;
+}
+
+async function getBrowser() {
+  const chromium = await chromiumLauncher();
+  if (!chromium) return null;
+  if (_browser && _browser.isConnected()) return _browser;
+  try {
+    _browser = await chromium.launch({ channel: "chrome", headless: true });
+    return _browser;
+  } catch (e) {
+    process.stderr.write(`[interactive] chrome launch failed: ${e?.message || e}\n`);
+    _browser = null;
+    return null;
+  }
+}
+
+// One-time (cached) probe: can we render at all? Lets callers self-disable the
+// visual stage when Chrome is missing without throwing.
+export async function rendererAvailable() {
+  if (_probe === null) _probe = getBrowser().then((b) => !!b);
+  return _probe;
+}
+
+// Render a widget to a PNG at `outPath`. Returns outPath on success, else null.
+export async function renderWidgetPng(widget, outPath) {
+  const browser = await getBrowser();
+  if (!browser) return null;
+  const doc = buildInteractiveDoc(widget.html, widget.css, widget.js);
+  const height = Math.max(160, Math.min(640, Number(widget.height) || 320));
+  let page;
+  try {
+    page = await browser.newPage({ viewport: { width: 720, height }, deviceScaleFactor: 2 });
+    await page.setContent(doc, { waitUntil: "load" });
+    await page.waitForTimeout(450); // let RAF / setTimeout animations settle
+    await page.screenshot({ path: outPath, fullPage: true });
+    return outPath;
+  } catch (e) {
+    process.stderr.write(`[interactive] render failed: ${e?.message || e}\n`);
+    return null;
+  } finally {
+    if (page) {
+      try {
+        await page.close();
+      } catch {}
+    }
+  }
 }
 
 export function repairPrompt(widget, errorMsg) {

@@ -32,15 +32,19 @@ function pickAgent(params) {
 const methods = {
   ping: async () => ({ pong: true, time: Date.now() }),
   chat: async (params) => pickAgent(params).chat(params),
-  wizard_questions: async (params) => pickAgent(params).wizardQuestions(params),
-  build_structure: async (params) => pickAgent(params).buildStructure(params),
-  refine_structure: async (params) => pickAgent(params).refineStructure(params),
+  wizard_questions: async (params, ctx) => pickAgent(params).wizardQuestions(params, ctx),
+  build_structure: async (params, ctx) => pickAgent(params).buildStructure(params, ctx),
+  refine_structure: async (params, ctx) => pickAgent(params).refineStructure(params, ctx),
   generate_submodule: async (params) => pickAgent(params).generateSubmodule(params),
   submodule_draft: async (params, ctx) => pickAgent(params).submoduleDraft(params, ctx),
   submodule_review: async (params, ctx) => pickAgent(params).submoduleReview(params, ctx),
   submodule_annotate: async (params, ctx) => pickAgent(params).submoduleAnnotate(params, ctx),
   submodule_review_images: async (params, ctx) => pickAgent(params).reviewImages(params, ctx),
   generate_test: async (params, ctx) => pickAgent(params).generateTest(params, ctx),
+  generate_assignments: async (params, ctx) => pickAgent(params).generateAssignments(params, ctx),
+  review_assignment: async (params, ctx) => pickAgent(params).reviewAssignment(params, ctx),
+  list_models: async (params) => pickAgent(params).listModels(),
+  generate_image: async (params, ctx) => pickAgent(params).generateImage(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };

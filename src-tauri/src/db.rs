@@ -99,6 +99,19 @@ pub fn set_course_status(
     Ok(())
 }
 
+pub fn set_course_agent(
+    conn: &Connection,
+    id: &str,
+    agent: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET agent = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, agent, now],
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct Module {
     pub id: String,

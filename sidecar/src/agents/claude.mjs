@@ -4,66 +4,127 @@
 // `claude` CLI auth (Claude Pro/Max subscription). The Rust side strips
 // ANTHROPIC_API_KEY from the spawned env to guarantee subscription billing.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { repairPrompt, validateInteractive } from "../lib/interactive.mjs";
+import {
+  repairPrompt,
+  validateInteractive,
+  renderWidgetPng,
+  rendererAvailable,
+} from "../lib/interactive.mjs";
+import { braveStdioServer } from "../lib/brave.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
 
-async function runOnce(prompt) {
-  return await runStreamed(prompt);
+async function runOnce(prompt, opts) {
+  return await runStreamed(prompt, undefined, opts);
 }
 
-// Builds Claude Agent SDK options. When braveApiKey is provided, spawns the
-// official Brave Search MCP server as a stdio subprocess and whitelists its
-// tools. Without a key the agent runs without Brave (no web search).
-function buildClaudeOptions({ maxTurns, braveApiKey } = {}) {
-  const options = { maxTurns: maxTurns ?? 1 };
+// Maps a { model, reasoning } config (from settings) onto Claude Agent SDK
+// option fields. Blank fields are omitted so the agent uses its defaults.
+// reasoning: "off" disables thinking; low/medium/high/xhigh/max set effort.
+function modelOptions(modelConfig) {
+  const out = {};
+  const model = modelConfig?.model;
+  if (typeof model === "string" && model.trim()) out.model = model.trim();
+  const reasoning = modelConfig?.reasoning;
+  if (typeof reasoning === "string" && reasoning.trim()) {
+    const r = reasoning.trim().toLowerCase();
+    if (r === "off" || r === "none" || r === "disabled") {
+      out.thinking = { type: "disabled" };
+    } else if (["low", "medium", "high", "xhigh", "max"].includes(r)) {
+      out.effort = r;
+    }
+  }
+  return out;
+}
+
+// Isolation applied to EVERY embedded agent call:
+// - settingSources: [] — never load the user's global/project Claude settings.
+//   Otherwise the SDK spawns their personal MCP servers (godot, blender, …) and,
+//   if the model calls one, blocks on a permission prompt nothing can answer in
+//   headless mode — hanging until the stage timeout fires (the ~40-min stall).
+// - permissionMode: "dontAsk" — run only the tools we pre-approve via
+//   allowedTools, deny anything else instantly instead of prompting (no hang).
+const AGENT_ISOLATION = { settingSources: [], permissionMode: "dontAsk" };
+
+// Builds Claude Agent SDK options. When `web` is set, the agent gets the SDK's
+// built-in WebSearch + WebFetch tools — native internet on subscription auth,
+// no key needed. When braveApiKey is provided, the Brave MCP server is added
+// too (its image search complements web search for finding real image URLs).
+function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig } = {}) {
+  const hasTools = web || !!braveApiKey;
+  const options = {
+    // Generous ceiling so the agent never errors with "max turns reached"
+    // before it writes the article. Research depth is throttled in the prompt
+    // (a few targeted lookups, then write), not by starving the turn budget.
+    maxTurns: maxTurns ?? (hasTools ? 10 : 1),
+    ...AGENT_ISOLATION,
+    ...modelOptions(modelConfig),
+  };
+  const allowedTools = [];
+  if (web) {
+    // WebSearch + WebFetch. Safe under permissionMode "dontAsk": both are
+    // pre-approved (verified WebFetch runs for any domain without prompting,
+    // so it can't hang the way it did under the default permission mode).
+    allowedTools.push("WebSearch", "WebFetch");
+  }
   if (braveApiKey) {
     options.mcpServers = {
-      brave: {
-        type: "stdio",
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-brave-search"],
-        env: { BRAVE_API_KEY: braveApiKey },
-      },
+      brave: { type: "stdio", ...braveStdioServer(braveApiKey) },
     };
-    options.allowedTools = [
-      "mcp__brave__brave_web_search",
-      "mcp__brave__brave_image_search",
-    ];
+    allowedTools.push("mcp__brave__brave_web_search", "mcp__brave__brave_image_search");
   }
+  if (allowedTools.length) options.allowedTools = allowedTools;
   return options;
 }
 
 async function runStreamed(prompt, onProgress, opts) {
   let text = "";
-  // When Brave MCP is available, the agent may take several turns (search,
-  // read, write). Without tools, one turn is enough.
+  // With web/Brave tools the agent may take several turns (search, read,
+  // write); buildClaudeOptions picks the turn budget from the enabled tools.
   const options = buildClaudeOptions({
-    maxTurns: opts?.braveApiKey ? 8 : 1,
+    web: opts?.web,
     braveApiKey: opts?.braveApiKey,
+    modelConfig: opts?.modelConfig,
   });
   for await (const message of query({ prompt, options })) {
     if (message.type === "assistant") {
       const content = message.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
-          if (block?.type === "text" && block.text) {
-            const tail = block.text.replace(/\s+/g, " ").trim().slice(-100);
+          if (block?.type === "thinking" && onProgress) {
+            // Full reasoning text — feeds the live transcript bubbles.
+            const think = (block.thinking || "").trim();
+            if (think) onProgress({ label: "thinking", detail: think });
+          } else if (block?.type === "text" && block.text) {
+            // The final text is structured JSON for most stages — keep it a
+            // short indicator rather than the whole payload.
+            const tail = block.text.replace(/\s+/g, " ").trim().slice(-80);
             if (tail && onProgress) onProgress({ label: "writing", detail: tail });
           } else if (block?.type === "tool_use" && block.name && onProgress) {
-            // Surface tool calls in progress (e.g. brave_web_search query).
-            const q =
-              block.input && typeof block.input.query === "string"
-                ? block.input.query
-                : "";
-            const label = block.name.includes("image") ? "searching images" : "searching";
-            onProgress({ label, detail: q || block.name });
+            // Surface what the tool is actually doing so the UI shows live
+            // progress (a query or a URL) instead of a static tool name.
+            const input = block.input || {};
+            const name = block.name;
+            let label, detail;
+            if (name.includes("image")) {
+              label = "searching images";
+              detail = typeof input.query === "string" ? input.query : "";
+            } else if (/fetch/i.test(name)) {
+              label = "reading";
+              detail = typeof input.url === "string" ? input.url : "";
+            } else {
+              label = "searching";
+              detail = typeof input.query === "string" ? input.query : "";
+            }
+            onProgress({ label, detail: detail || name });
           }
         }
       }
@@ -89,6 +150,33 @@ function extractJson(text) {
     } catch {}
   }
   throw new Error("response did not contain valid JSON: " + text.slice(0, 200));
+}
+
+// Real model list from the Claude CLI (cached — it spawns the CLI). Each entry
+// carries the effort levels that specific model actually supports.
+let _modelsCache = null;
+export async function listModels() {
+  if (_modelsCache) return { models: _modelsCache };
+  const q = query({ prompt: "list models", options: { maxTurns: 1, ...AGENT_ISOLATION } });
+  try {
+    const models = await q.supportedModels();
+    _modelsCache = (models || []).map((m) => ({
+      value: m.value,
+      label: m.displayName || m.value,
+      description: m.description || "",
+      effortLevels: Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels : [],
+    }));
+  } finally {
+    try {
+      await q.interrupt?.();
+    } catch {}
+  }
+  return { models: _modelsCache };
+}
+
+// Claude has no image generation; the dispatcher stays uniform via this stub.
+export async function generateImage() {
+  throw new Error("image generation is not supported by the claude agent");
 }
 
 /**
@@ -140,6 +228,7 @@ async function draftArticleInternal(
     submodulePath,
     previousArticles,
     braveApiKey,
+    modelConfig,
   },
   onProgress
 ) {
@@ -186,6 +275,17 @@ Use 0-4 widgets total — skip them if the topic is purely textual prose.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
+IMAGE WIDGETS — for each, set "mode":
+  • "search" — a real, specific, existing thing that we should FIND, not invent:
+    a particular famous artwork (e.g. a specific Leonardo da Vinci painting),
+    a real photo of a real place/person/object/event, a historical artifact,
+    a real screenshot. Write "description" as a precise search target.
+  • "generate" — a custom conceptual/explanatory illustration that won't exist
+    as a findable photo: a stylized scene, an abstract concept made visual, a
+    specific detailed composition you describe. Write "description" as a rich,
+    detailed prompt for an image generator (subject, style, composition).
+  When unsure, prefer "search" — a real image beats an invented one for facts.
+
 VIDEO WIDGETS: only include a video if you find one that is RECOMMENDED by
 real people elsewhere — a Reddit/forum thread that calls it out, a "best
 videos on X" listicle, a blog post that says "watch this", a course
@@ -223,39 +323,54 @@ Provide:
   - "height": integer pixels, clamp 160-640. Pick a reasonable default
     based on content (compact card ~220, animation canvas ~360).
 
+You have live web access — use it:
+- WebSearch — search the web to verify facts, find concrete examples,
+  current best practices, and citations. For videos, search things like
+  "best youtube videos to learn X reddit", "<topic> recommended video
+  tutorials site:reddit.com" — find videos others suggest, not whatever
+  ranks first.
+- WebFetch — open a specific URL and read the actual page before relying on
+  it; don't cite a source you only saw as a search snippet.
 ${
   braveApiKey
-    ? `You have web access through the Brave Search MCP tools:
-- mcp__brave__brave_web_search — use it to verify facts, find concrete
-  examples, current best practices, and citations. For videos, search
-  things like "best youtube videos to learn X reddit", "<topic>
-  recommended video tutorials site:reddit.com", "<topic> video
-  recommendations forum" — find videos others suggest, not whatever
-  ranks first.
-- mcp__brave__brave_image_search — find REAL image URLs for image
+    ? `- mcp__brave__brave_image_search — find REAL image URLs for image
   widgets. When you find a good one, set "url" to the direct image URL
   and "source" to the page url. If nothing fits, leave url empty —
   the UI will show a placeholder + your description.
-
-Use search liberally during research, but write the article in your own
-voice. Don't quote large blocks; weave findings in naturally. Only put
-a fact in the article if you actually have a source backing it.
 `
     : ""
 }
+Research efficiently: a few targeted lookups (about 3-4 web calls total),
+then STOP and write. Finishing the article matters more than exhaustive
+research. Write in your own voice — don't quote large blocks; weave findings
+in naturally. Only state a fact if you actually have a source backing it.
 
 SOURCES: at the end, return a "sources" array listing every URL you
 ACTUALLY consulted while writing this submodule. Be honest — do not
 invent URLs, do not include sources you didn't read. If you wrote
 entirely from your own knowledge with no web lookups, return [].
 
+EDITOR PASS — before you return, re-read your draft and fix it as a careful
+editor + fact-checker. Do this silently; return only the polished result:
+1. Punctuation — fix errors.
+2. Typography for "${lang}" — proper quotes («» in Russian, "" in English),
+   em-dashes — where appropriate, no double spaces, proper ellipses (…),
+   non-breaking spaces where idiomatic.
+3. Factual claims — verify them (use web search). Fix
+   what's wrong; if you cannot verify a load-bearing claim, soften it
+   ("часто", "в большинстве случаев") or drop it.
+4. Consistency — do not contradict the previous submodules above; use the
+   same terminology and level assumptions.
+5. Flow — light polish only; do NOT restructure or change the voice.
+Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
+
 ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
-{"article":"<markdown with widget markers>","widgets":[<widget objects>],"sources":[<source objects>]}
+{"article":"<markdown with widget markers>","widgets":[<widget objects>],"sources":[<source objects>],"notes":"<editor log>"}
 
 Each widget object:
-- image: {"id":"img-1","type":"image","description":"<what to depict, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
+- image: {"id":"img-1","type":"image","mode":"search|generate","description":"<what to depict / search target / generation prompt, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 - video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
 - interactive: {"id":"int-1","type":"interactive","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","html":"<body content>","css":"<stylesheet>","js":"<script>","height":320}
@@ -263,7 +378,7 @@ Each widget object:
 Each source object: {"title":"<page title>","url":"<url>"}
 If no widgets, use []. If no sources, use [].`;
   onProgress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, onProgress, { braveApiKey });
+  const text = await runStreamed(prompt, onProgress, { web: true, braveApiKey, modelConfig });
   const parsed = extractJson(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
     throw new Error("LLM returned no article");
@@ -272,6 +387,7 @@ If no widgets, use []. If no sources, use [].`;
     article: parsed.article.trim(),
     widgets: normalizeWidgets(parsed.widgets),
     sources: normalizeSources(parsed.sources),
+    notes: typeof parsed.notes === "string" ? parsed.notes.trim() : "",
   };
 }
 
@@ -286,6 +402,7 @@ function normalizeWidgets(raw) {
       out[id] = {
         type: "image",
         placeholder: !url,
+        mode: w.mode === "generate" ? "generate" : "search",
         description: typeof w.description === "string" ? w.description.trim() : "",
         alt: typeof w.alt === "string" ? w.alt.trim() : "",
         ...(url ? { url } : {}),
@@ -347,7 +464,7 @@ export async function submoduleReview(params, ctx) {
 }
 
 async function reviewArticle(
-  { article, language, topic, previousArticles },
+  { article, language, topic, previousArticles, modelConfig },
   onProgress
 ) {
   const lang = (language || "en").trim();
@@ -377,7 +494,7 @@ ${terminologyGuide(lang)}
 Output ONLY a JSON object on a single line:
 {"article":"<full revised article markdown>","notes":"<1-3 sentences describing what you fixed; empty string if nothing>"}`;
   onProgress?.({ label: "reviewing" });
-  const text = await runStreamed(prompt, onProgress);
+  const text = await runStreamed(prompt, onProgress, { modelConfig });
   const parsed = extractJson(text);
   return {
     article:
@@ -398,7 +515,7 @@ export async function submoduleAnnotate(params, ctx) {
   return await validateWidgets(params, ctx?.progress);
 }
 
-async function validateWidgets({ article, widgets }, onProgress) {
+async function validateWidgets({ article, widgets, modelConfig }, onProgress) {
   onProgress?.({ label: "validating" });
   const out = {};
   let diagChecked = 0;
@@ -422,7 +539,8 @@ async function validateWidgets({ article, widgets }, onProgress) {
       const { final, error, repairs } = await validateAndRepairInteractive(
         w,
         id,
-        onProgress
+        onProgress,
+        modelConfig
       );
       if (repairs > 0 && !error) intRepaired++;
       if (error) {
@@ -447,9 +565,99 @@ async function validateWidgets({ article, widgets }, onProgress) {
 
 const INTERACTIVE_MAX_REPAIRS = 2;
 
-async function validateAndRepairInteractive(widget, id, onProgress) {
+const WIDGET_SEVERITIES = ["critical", "minor"];
+
+function widgetReviewPrompt(title, description) {
+  return `You are reviewing a SCREENSHOT of a rendered interactive learning widget to check it actually renders correctly.
+
+Widget title: ${title || "(none)"}
+What it should let the learner do: ${description || "(none)"}
+
+Judge ONLY real rendering failures:
+- Is anything actually rendered (NOT a blank/empty/white/black area)?
+- Is the layout geometrically intact: text not clipped or cut off, elements not overlapping or spilling outside the frame, controls and labels readable and reasonably sized?
+- For drawings/diagrams (e.g. a perspective cube): are the shapes coherent — lines meet where they should, no obviously broken or garbled geometry?
+Do NOT nitpick anti-aliasing, exact fonts, pixel-perfect spacing, color/theme choices, or light vs dark.
+
+Severity: "critical" = blank, unusable, or broken geometry/layout that defeats the widget's purpose; "minor" = cosmetic only.
+
+Output ONLY a single-line JSON object:
+{"ok":<true if it renders correctly>,"defects":[{"text":"<what is wrong>","severity":"critical|minor"}],"summary":"<one short sentence>"}`;
+}
+
+function normalizeWidgetReview(parsed) {
+  const defects = Array.isArray(parsed?.defects)
+    ? parsed.defects
+        .filter((d) => d && typeof d.text === "string" && d.text.trim())
+        .map((d) => ({
+          text: d.text.trim(),
+          severity: WIDGET_SEVERITIES.includes(String(d.severity).toLowerCase())
+            ? String(d.severity).toLowerCase()
+            : "minor",
+        }))
+    : [];
+  const ok = parsed?.ok === true && !defects.some((d) => d.severity === "critical");
+  return { ok, defects, summary: typeof parsed?.summary === "string" ? parsed.summary.trim() : "" };
+}
+
+// Vision review of a rendered widget screenshot.
+export async function reviewWidgetRender({ title, description, pngPath, modelConfig }, ctx) {
+  let bytes;
+  try {
+    bytes = readFileSync(pngPath);
+  } catch {
+    return { ok: true, defects: [], summary: "render unavailable" };
+  }
+  const content = [
+    { type: "text", text: widgetReviewPrompt(title, description) },
+    {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: bytes.toString("base64") },
+    },
+  ];
+  async function* userPrompt() {
+    yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  }
+  ctx?.progress?.({ label: "validating", detail: "visual check" });
+  let text = "";
+  for await (const m of query({
+    prompt: userPrompt(),
+    options: { maxTurns: 1, ...AGENT_ISOLATION, ...modelOptions(modelConfig) },
+  })) {
+    if (m.type === "result" && m.subtype === "success") text = m.result;
+  }
+  return normalizeWidgetReview(extractJson(text));
+}
+
+// Render + vision-check one widget. Returns a defect string (only for CRITICAL
+// render failures) to feed the repair loop, or null (skip/ok/minor). Self-
+// disables when Chrome isn't available.
+async function visualCheck(widget, id, modelConfig, onProgress) {
+  if (!(await rendererAvailable())) return null;
+  onProgress?.({ label: "validating", detail: `${id}: rendering` });
+  const out = join(tmpdir(), `wv-${id}-${process.pid}-${Date.now()}.png`);
+  const png = await renderWidgetPng(widget, out);
+  if (!png) return null;
+  try {
+    const review = await reviewWidgetRender(
+      { title: widget.title, description: widget.description, pngPath: png, modelConfig },
+      { progress: onProgress }
+    );
+    if (review.ok) return null;
+    const critical = review.defects.filter((d) => d.severity === "critical").map((d) => d.text);
+    if (critical.length === 0) return null;
+    return `render looks broken: ${critical.slice(0, 2).join("; ")}`;
+  } finally {
+    try {
+      unlinkSync(png);
+    } catch {}
+  }
+}
+
+async function validateAndRepairInteractive(widget, id, onProgress, modelConfig) {
   let current = widget;
   let lastError = await validateInteractive(current);
+  if (!lastError) lastError = await visualCheck(current, id, modelConfig, onProgress);
   if (!lastError) return { final: current, error: null, repairs: 0 };
 
   onProgress?.({ label: "validating", detail: `${id}: ${lastError}` });
@@ -461,7 +669,7 @@ async function validateAndRepairInteractive(widget, id, onProgress) {
     });
     let repaired;
     try {
-      repaired = await repairInteractive(current, lastError);
+      repaired = await repairInteractive(current, lastError, modelConfig);
     } catch (e) {
       lastError = `repair call failed: ${e?.message || e}`;
       break;
@@ -472,15 +680,16 @@ async function validateAndRepairInteractive(widget, id, onProgress) {
     }
     current = { ...current, ...repaired };
     lastError = await validateInteractive(current);
+    if (!lastError) lastError = await visualCheck(current, id, modelConfig, onProgress);
     if (!lastError) return { final: current, error: null, repairs: attempt };
     onProgress?.({ label: "validating", detail: `${id}: ${lastError}` });
   }
   return { final: current, error: lastError, repairs: INTERACTIVE_MAX_REPAIRS };
 }
 
-async function repairInteractive(widget, errorMsg) {
+async function repairInteractive(widget, errorMsg, modelConfig) {
   const prompt = repairPrompt(widget, errorMsg);
-  const text = await runStreamed(prompt);
+  const text = await runStreamed(prompt, undefined, { modelConfig });
   const parsed = extractJson(text);
   if (!parsed || typeof parsed !== "object") return null;
   return {
@@ -624,12 +833,12 @@ function normalizeRefineResponse(parsed) {
  * @param {{topic:string, language:string, courseMd:string, currentStructure:object, memoryFiles:{filename:string,content:string}[], chatHistory:{role:string,text:string}[], userMessage:string}} params
  * @returns {Promise<{reply:string, modules: Array<{title:string, summary:string, submodules:{title:string,summary:string}[]}>}>}
  */
-export async function refineStructure(params) {
+export async function refineStructure(params, ctx) {
   if (typeof params?.userMessage !== "string" || !params.userMessage.trim()) {
     throw new Error("userMessage must be a non-empty string");
   }
   const prompt = buildRefinePrompt(params);
-  const text = await runOnce(prompt);
+  const text = await runStreamed(prompt, ctx?.progress, { web: true, modelConfig: params.modelConfig });
   const parsed = extractJson(text);
   return normalizeRefineResponse(parsed);
 }
@@ -639,7 +848,7 @@ export async function refineStructure(params) {
  * @param {{ courseMd: string, topic: string, language: string }} params
  * @returns {Promise<{ modules: Array<{ title: string, summary?: string, submodules: Array<{ title: string, summary?: string }> }> }>}
  */
-export async function buildStructure({ courseMd, topic, language }) {
+export async function buildStructure({ courseMd, topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -658,7 +867,9 @@ ${courseMd}
 
 Design a curriculum: a list of top-level modules, each with a few submodules.
 
-Research first. Before sketching anything, look up how this subject is taught
+Research first. You have live web access (WebSearch + WebFetch) — actually use
+it, but keep it focused (a few targeted searches are enough; don't
+over-research). Before sketching anything, look up how this subject is taught
 in serious places: university programs (especially the best ones —
 top art academies, top engineering schools, etc. as relevant), well-regarded
 online courses, established certifications, and the canonical reading paths
@@ -679,7 +890,7 @@ ${terminologyGuide(lang)}
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
 {"modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
-  const text = await runOnce(prompt);
+  const text = await runStreamed(prompt, ctx?.progress, { web: true, modelConfig });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
     throw new Error("LLM response missing non-empty 'modules' array");
@@ -714,7 +925,7 @@ Shape:
  * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string}} params
  * @returns {Promise<{questions: Array<{text:string, options:string[], correct:number, explanation:string}>}>}
  */
-export async function generateTest({ topic, language, submodulePath, article }, ctx) {
+export async function generateTest({ topic, language, submodulePath, article, modelConfig }, ctx) {
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
@@ -736,12 +947,22 @@ article — not trivia or verbatim recall. Each question:
 - includes a one-sentence "explanation" of why the answer is right;
 - is written in language "${lang}".
 
+CRITICAL — make options indistinguishable except by their meaning:
+- All options must be roughly the same length and level of detail. The correct
+  answer must NOT be longer, more specific, more hedged, or more "textbook"
+  than the distractors — if it stands out by wording or length, the question is
+  useless. Write distractors that are just as confident and concrete.
+- Make the distractors genuinely tempting (common misconceptions, near-misses),
+  not obviously wrong throwaways.
+- Vary which option is correct from question to question; do not default to the
+  first option.
+
 ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
 {"questions":[{"text":"...","options":["...","..."],"correct":0,"explanation":"..."}]}`;
   ctx?.progress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, ctx?.progress);
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
   return { questions: normalizeTestQuestions(parsed?.questions) };
 }
@@ -757,14 +978,202 @@ function normalizeTestQuestions(raw) {
       if (options.length < 2) return null;
       let correct = typeof q.correct === "number" ? Math.round(q.correct) : 0;
       if (correct < 0 || correct >= options.length) correct = 0;
+      // The model tends to place the correct option first; shuffle so position
+      // carries no signal. Track the correct option through the permutation.
+      const order = options.map((_, i) => i);
+      for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
       return {
         text: q.text.trim(),
-        options,
-        correct,
+        options: order.map((i) => options[i]),
+        correct: order.indexOf(correct),
         explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
       };
     })
     .filter(Boolean);
+}
+
+// ── Homework assignments ────────────────────────────────────────────────────
+
+const ASSIGNMENT_TYPES = ["image", "text", "document", "archive", "github"];
+const CRITICALITIES = ["critical", "major", "minor"];
+
+function guessImageMime(p) {
+  const s = (p || "").toLowerCase();
+  if (s.endsWith(".png")) return "image/png";
+  if (s.endsWith(".jpg") || s.endsWith(".jpeg")) return "image/jpeg";
+  if (s.endsWith(".webp")) return "image/webp";
+  if (s.endsWith(".gif")) return "image/gif";
+  return "image/png";
+}
+
+function normalizeAssignments(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  raw.forEach((a, i) => {
+    if (!a || typeof a.title !== "string" || !a.title.trim()) return;
+    if (typeof a.prompt !== "string" || !a.prompt.trim()) return;
+    let type = typeof a.type === "string" ? a.type.trim().toLowerCase() : "text";
+    if (!ASSIGNMENT_TYPES.includes(type)) type = "text";
+    out.push({
+      id: `a${i + 1}`,
+      title: a.title.trim(),
+      prompt: a.prompt.trim(),
+      type,
+      criteria: typeof a.criteria === "string" ? a.criteria.trim() : "",
+    });
+  });
+  return out.slice(0, 4);
+}
+
+function normalizeReview(parsed) {
+  const remarks = Array.isArray(parsed?.remarks)
+    ? parsed.remarks
+        .filter((r) => r && typeof r.text === "string" && r.text.trim())
+        .map((r) => ({
+          text: r.text.trim(),
+          criticality: CRITICALITIES.includes(String(r.criticality).toLowerCase())
+            ? String(r.criticality).toLowerCase()
+            : "minor",
+        }))
+    : [];
+  let verdict = String(parsed?.verdict || "").toLowerCase();
+  if (verdict !== "passed" && verdict !== "revise") verdict = "revise";
+  // Never pass while critical/major issues remain.
+  if (remarks.some((r) => r.criticality === "critical" || r.criticality === "major")) {
+    verdict = "revise";
+  }
+  return {
+    remarks,
+    verdict,
+    summary: typeof parsed?.summary === "string" ? parsed.summary.trim() : "",
+  };
+}
+
+/**
+ * Design a short chain of practical homework assignments for a submodule.
+ * @returns {Promise<{assignments: Array<{id,title,prompt,type,criteria}>}>}
+ */
+export async function generateAssignments({ topic, language, submodulePath, article, modelConfig }, ctx) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for assignment generation");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are designing practical homework for one submodule of a
+course on "${topic}" (language: ${lang}).
+
+Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
+
+The article the learner just studied:
+<article>
+${article}
+</article>
+
+Design a SHORT CHAIN of 1-3 practical assignments that make the learner APPLY
+what they learned, ordered as a progression (each builds on the previous).
+For each assignment pick the single best submission type:
+- "image"    — the learner produces a drawing/sketch/diagram/photo (e.g. "draw a
+               cube in two-point perspective"). Best for visual/art/design skills.
+- "text"     — a written answer, analysis, or short essay submitted as text.
+- "document" — the learner uploads a file (report, notes, PDF, spreadsheet).
+- "archive"  — the learner uploads a .zip of a small program/project.
+- "github"   — the learner submits a link to a GitHub repository.
+Match the type to the skill: drawing→image, writing/analysis→text,
+coding→archive or github, longer deliverables→document.
+
+For each assignment write clear "criteria" — the concrete, checkable things a
+reviewer grades against (this drives an iterative review-and-revise loop).
+Tasks must be concrete and achievable from the article; no busywork.
+All text in language "${lang}".
+
+${terminologyGuide(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"assignments":[{"title":"...","prompt":"...","type":"image|text|document|archive|github","criteria":"..."}]}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  return { assignments: normalizeAssignments(parsed?.assignments) };
+}
+
+/**
+ * Review one homework submission against its assignment. Vision-aware (images)
+ * and web-aware (github links). Returns remarks + criticality + verdict.
+ * @returns {Promise<{remarks:Array<{text,criticality}>, verdict:"passed"|"revise", summary}>}
+ */
+export async function reviewAssignment(params, ctx) {
+  const { topic, language, assignment, submission, history, modelConfig } = params;
+  const lang = (language || "en").trim();
+  const a = assignment || {};
+  const sub = submission || {};
+  const images = Array.isArray(sub.images) ? sub.images.filter((im) => im && im.path) : [];
+
+  const histBlock =
+    Array.isArray(history) && history.length
+      ? `Conversation so far on this assignment (most recent last):\n${history
+          .map((h) => `${h.role === "agent" ? "Reviewer" : "Learner"}: ${h.text}`)
+          .join("\n")}\n\n`
+      : "";
+  const githubBlock = sub.githubUrl
+    ? `\nThe learner submitted a GitHub repository: ${sub.githubUrl}\nUse WebFetch to inspect its README and key files before judging.\n`
+    : "";
+  const textBlock =
+    typeof sub.text === "string" && sub.text.trim()
+      ? `\nThe learner's submission (text / extracted file content):\n<submission>\n${sub.text.slice(0, 24000)}\n</submission>\n`
+      : "";
+  const imageNote = images.length
+    ? `\nThe submission includes ${images.length} image(s) shown below — examine them visually.\n`
+    : "";
+
+  const promptText = `You are a strict but encouraging reviewer grading one homework assignment in a course on "${topic}". Respond in language "${lang}".
+
+Assignment: ${a.title || ""}
+Task: ${a.prompt || ""}
+${a.criteria ? `Grading criteria:\n${a.criteria}\n` : ""}
+${histBlock}Now review the learner's NEW submission below.${imageNote}${githubBlock}${textBlock}
+
+Judge the submission against the task and criteria. Produce:
+- "remarks": specific, actionable points. Each has "text" and "criticality" ∈
+  "critical" | "major" | "minor". critical/major mean the work does not yet meet
+  the assignment.
+- "verdict": "passed" ONLY if there are no critical or major remarks AND the work
+  genuinely satisfies the assignment; otherwise "revise".
+- "summary": 1-3 sentences telling the learner what to fix next (or congratulating
+  them if passed). Encouraging but honest.
+Reference what you actually see. Don't pass weak work; don't nitpick endlessly —
+minor remarks alone don't block passing.
+
+Output ONLY a single-line JSON object:
+{"remarks":[{"text":"...","criticality":"major"}],"verdict":"revise","summary":"..."}`;
+
+  const content = [{ type: "text", text: promptText }];
+  for (const im of images) {
+    try {
+      const bytes = readFileSync(im.path);
+      content.push({
+        type: "image",
+        source: { type: "base64", media_type: guessImageMime(im.path), data: bytes.toString("base64") },
+      });
+    } catch (e) {
+      content.push({ type: "text", text: `(could not read image ${im.path}: ${e.message})` });
+    }
+  }
+
+  async function* userPrompt() {
+    yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  }
+
+  ctx?.progress?.({ label: "reviewing" });
+  const wantWeb = !!sub.githubUrl; // only github submissions need to fetch the web
+  const options = buildClaudeOptions({ web: wantWeb, modelConfig });
+  if (!wantWeb) options.maxTurns = 1; // vision/text need a single turn
+  let text = "";
+  for await (const m of query({ prompt: userPrompt(), options })) {
+    if (m.type === "result" && m.subtype === "success") text = m.result;
+  }
+  return normalizeReview(extractJson(text));
 }
 
 /**
@@ -773,7 +1182,7 @@ function normalizeTestQuestions(raw) {
  * @returns {Promise<{pick: number|null, reason: string, refinedQuery: string}>}
  */
 export async function reviewImages(params, ctx) {
-  const { language, description, alt, topic, candidates } = params;
+  const { language, description, alt, topic, candidates, modelConfig } = params;
   if (!Array.isArray(candidates) || candidates.length === 0) {
     return { pick: null, reason: "no candidates", refinedQuery: "" };
   }
@@ -827,7 +1236,7 @@ Output ONLY a single-line JSON object:
   let text = "";
   for await (const m of query({
     prompt: userPrompt(),
-    options: { maxTurns: 1 },
+    options: { maxTurns: 1, ...AGENT_ISOLATION, ...modelOptions(modelConfig) },
   })) {
     if (m.type === "result" && m.subtype === "success") {
       text = m.result;
@@ -841,7 +1250,7 @@ Output ONLY a single-line JSON object:
   };
 }
 
-export async function wizardQuestions({ topic, language }) {
+export async function wizardQuestions({ topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -882,7 +1291,7 @@ ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape: {"questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
-  const text = await runOnce(prompt);
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.questions)) {
     throw new Error("LLM response missing 'questions' array");
