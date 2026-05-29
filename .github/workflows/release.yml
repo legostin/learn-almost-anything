@@ -55,11 +55,18 @@ jobs:
       - name: Install sidecar deps
         run: pnpm --dir sidecar install --frozen-lockfile
 
-      # tauri-action runs `pnpm tauri build`, which in turn runs the
-      # `beforeBuildCommand` (`pnpm build`) — that copies the sidecar into
-      # src-tauri/sidecar/ via scripts/copy-sidecar.mjs and builds the frontend.
-      # On tag push it creates a draft GitHub Release with the bundles
-      # attached; otherwise it just builds (artifacts uploaded below).
+      # Copy sidecar/ → src-tauri/sidecar/ BEFORE tauri-action runs. The Tauri
+      # bundle config has `resources: ["sidecar/**"]` and the cargo build
+      # script errors out the moment it can't glob that path, even though the
+      # frontend's `beforeBuildCommand` would have populated it. Doing the
+      # copy explicitly here removes the timing dependency entirely.
+      - name: Stage sidecar for Tauri bundle
+        run: pnpm build:sidecar
+
+      # tauri-action runs `pnpm tauri build`, which still invokes the frontend
+      # `beforeBuildCommand` (`pnpm build`) for tsc + vite. On tag push it
+      # creates a draft GitHub Release with the bundles attached; otherwise it
+      # just builds (artifacts uploaded below).
       - name: Tauri build
         uses: tauri-apps/tauri-action@v0
         env:

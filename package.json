@@ -34,6 +34,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:sidecar": "node scripts/copy-sidecar.mjs",
     "build": "node scripts/copy-sidecar.mjs && tsc && vite build",
     "build:watch": "vite build --watch",
     "preview": "vite preview",
