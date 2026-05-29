@@ -1,4 +1,4 @@
-// Learn Anything sidecar — JSON-RPC over stdio.
+// Learn (Almost) Anything sidecar — JSON-RPC over stdio.
 //
 // Protocol (line-delimited JSON, one message per line):
 //   Request:   { "id": <string>, "method": <string>, "params": <object> }

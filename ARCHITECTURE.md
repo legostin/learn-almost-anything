@@ -1,4 +1,4 @@
-# Архитектура — Learn Anything
+# Архитектура — Learn (Almost) Anything
 
 > Tauri desktop app для создания и прохождения курсов на любую тему, управляемое AI-агентами (Claude Agent SDK + Codex SDK), без прямого использования API-ключей — через подписки пользователя.
 

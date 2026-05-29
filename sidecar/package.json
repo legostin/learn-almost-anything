@@ -1,9 +1,9 @@
 {
-  "name": "learn-anything-sidecar",
+  "name": "learn-almost-anything-sidecar",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent sidecar for Learn Anything — JSON-RPC over stdio, Claude Agent SDK (Codex SDK to be added).",
+  "description": "Agent sidecar for Learn (Almost) Anything — JSON-RPC over stdio, Claude Agent SDK + Codex SDK.",
   "main": "src/index.mjs",
   "scripts": {
     "start": "node src/index.mjs"

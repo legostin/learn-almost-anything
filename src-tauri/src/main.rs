@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    learn_anything_lib::run()
+    learn_almost_anything_lib::run()
 }

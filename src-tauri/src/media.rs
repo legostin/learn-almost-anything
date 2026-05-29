@@ -114,7 +114,7 @@ pub fn download_resize_jpeg(url: &str, max_dim: u32) -> Result<Vec<u8>, MediaErr
     let resp = agent
         .get(url)
         .set("Accept", "image/*")
-        .set("User-Agent", "Mozilla/5.0 (Learn Anything)")
+        .set("User-Agent", "Mozilla/5.0 (Learn-Almost-Anything)")
         .call()
         .map_err(|e| MediaError::Download(e.to_string()))?;
     let mut bytes: Vec<u8> = Vec::new();

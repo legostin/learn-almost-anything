@@ -11,7 +11,7 @@ export type Lang = "ru" | "en";
 
 const STRINGS = {
   ru: {
-    brand: "Learn Anything",
+    brand: "Learn (Almost) Anything",
     newCourse: "+ Новый курс",
     noCourses: "Курсов пока нет",
     generatingTitle: "Идёт генерация…",
@@ -221,7 +221,7 @@ const STRINGS = {
       "Запускает ngrok-туннель к локальному серверу. Откройте ссылку на планшете, чтобы создавать и проходить курсы. При первом заходе ngrok покажет страницу-предупреждение — нажмите «Visit Site». Доступ открыт, пока приложение запущено.",
   },
   en: {
-    brand: "Learn Anything",
+    brand: "Learn (Almost) Anything",
     newCourse: "+ New course",
     noCourses: "No courses yet",
     generatingTitle: "Generation in progress…",
