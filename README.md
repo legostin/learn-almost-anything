@@ -1,6 +1,12 @@
 # Learn (Almost) Anything
 
-> Local AI tutor that designs courses for you and walks you through them. Desktop app on Tauri (macOS / Windows).
+> Local **AI course generator and personal tutor**: designs personalized courses on any topic, then walks you through them with articles, interactive widgets, comprehension tests, homework with agent review, and TTS lectures. Desktop app for **macOS / Windows**, built on Tauri.
+
+[![Release](https://img.shields.io/github/v/release/legostin/learn-almost-anything?include_prereleases&label=release)](https://github.com/legostin/learn-almost-anything/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/legostin/learn-almost-anything/release.yml?label=build)](https://github.com/legostin/learn-almost-anything/actions/workflows/release.yml)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://github.com/legostin/learn-almost-anything/releases)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
+[![Claude Agent SDK](https://img.shields.io/badge/agents-Claude%20%7C%20Codex-7c3aed)](https://docs.claude.com/en/api/agent-sdk/overview)
 
 > ⚠️ **Free — uses *your* existing subscriptions.** Courses and assignment review are written by Claude Code or the Codex CLI through your **Claude Pro/Max** or **ChatGPT Plus/Pro** subscription — no per-token API spend. Brave Search (free tier) and Gemini API (paid — for image generation and premium TTS) are optional.
 

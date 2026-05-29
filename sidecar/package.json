@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Agent sidecar for Learn (Almost) Anything — JSON-RPC over stdio, Claude Agent SDK + Codex SDK.",
+  "keywords": [
+    "claude-agent-sdk",
+    "codex-sdk",
+    "mcp",
+    "ai-agents",
+    "sidecar",
+    "json-rpc",
+    "tauri"
+  ],
+  "homepage": "https://github.com/legostin/learn-almost-anything",
   "main": "src/index.mjs",
   "scripts": {
     "start": "node src/index.mjs"
