@@ -1,402 +1,516 @@
-# Архитектура — Learn (Almost) Anything
+# Architecture — Learn (Almost) Anything
 
-> Tauri desktop app для создания и прохождения курсов на любую тему, управляемое AI-агентами (Claude Agent SDK + Codex SDK), без прямого использования API-ключей — через подписки пользователя.
+> A local-first desktop tutor that turns any topic into a personalised course.
+> Courses are authored by Claude or Codex through the user's own subscription —
+> no API keys, no servers, no telemetry.
 
-Документ описывает структуру приложения, модель данных, потоки данных и контракты с агентами.
-
----
-
-## 1. Принципы
-
-- **Минимальная функциональность на старте.** Виджет только один (code snippet). SDK для агентов — оба, но контракт один. Никакой "будущей гибкости", которую сейчас не используем.
-- **Память — first-class.** Регенерация без учёта прошлых правок = провал продукта.
-- **Долгие операции — фоновые.** Генерация модуля занимает минуты; UI должен жить, видеть прогресс, и переживать сбои.
-- **Subscription billing вместо API-ключей.** Claude Agent SDK и Codex SDK работают через локальный `claude login` / `codex login`.
+This document describes the codebase as it actually is, not as it was once
+planned. Each section names the files it talks about so the doc can be checked
+against reality.
 
 ---
 
-## 2. Высокоуровневая архитектура
+## 1. Process model
+
+The app is three processes that talk over two transports:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                       Tauri Desktop App                         │
-│                                                                  │
-│  ┌──────────────────────────┐    ┌────────────────────────────┐│
-│  │       React UI (TS)      │◀──▶│      Rust Core (Tauri)     ││
-│  │  - Wizard                │    │  - tauri commands          ││
-│  │  - Course/module browser │    │  - SQLite (sqlx/rusqlite)  ││
-│  │  - Article renderer      │    │  - FS read/write (MD/JSON) ││
-│  │  - Widget host           │    │  - Job orchestrator        ││
-│  │  - Test/homework UI      │    │  - Brave Search proxy      ││
-│  └──────────────────────────┘    └──────────┬─────────────────┘│
-│                                              │ stdio / IPC      │
-│                                  ┌───────────▼──────────────┐  │
-│                                  │   Agent Sidecar (Node)   │  │
-│                                  │  - Claude Agent SDK      │  │
-│                                  │  - Codex SDK             │  │
-│                                  │  - Prompt templates      │  │
-│                                  │  - Tool runners          │  │
-│                                  └──────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
-                         │
-                         ▼
-        ~/Library/Application Support/LearnAnything/
-        ├── learn-anything.db        (метаданные, прогресс)
-        ├── courses/<course_id>/
-        │   ├── course.md            (топик, язык, ответы визарда)
-        │   ├── structure.json       (дерево модулей)
-        │   ├── memory/              (MD-файлы с фидбеком регенераций)
-        │   └── modules/<mod_id>/<sub_id>/
-        │       ├── article.md       (контент со встроенными виджетами)
-        │       ├── widgets.json     (данные виджетов: код, языки и т.п.)
-        │       ├── test.json        (вопросы)
-        │       └── homework.md
-        └── auth/                    (токены подписок, если нужно)
+┌──────────────────────────────────────────────────────────────────────────┐
+│                       Tauri desktop bundle                                │
+│                                                                            │
+│  ┌─────────────────────────────┐        ┌──────────────────────────────┐  │
+│  │  React 19 + Vite (WebView)  │ ◀IPC▶ │   Rust core (src-tauri/)     │  │
+│  │  src/App.tsx                │        │   lib.rs / courses / db /    │  │
+│  │  src/transport.ts           │        │   settings / media / share   │  │
+│  │  - wizard / structure       │        │   - SQLite (rusqlite)        │  │
+│  │  - article reader           │        │   - filesystem layout        │  │
+│  │  - widget host              │        │   - HTTP /api server         │  │
+│  │  - assignments              │        │   - background workers       │  │
+│  │  - audio player             │        │                              │  │
+│  └─────────────────────────────┘        └────────────┬─────────────────┘  │
+│                                                       │ JSON-RPC / stdio   │
+│                                          ┌────────────▼─────────────────┐  │
+│                                          │   Node sidecar                │  │
+│                                          │   sidecar/src/index.mjs       │  │
+│                                          │   - Claude Agent SDK          │  │
+│                                          │   - Codex SDK                 │  │
+│                                          │   - widget validator          │  │
+│                                          └──────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
+                            │                       │
+                            ▼                       ▼
+                ~/Library/Application Support/   embedded HTTP :8787
+                com.legostin.learnanything/      + optional ngrok tunnel
+                ├── learn-anything.db
+                ├── courses/<id>/…
+                ├── settings.json
+                └── tts_cache/<fnv1a>.wav
 ```
 
-**Почему sidecar для агентов, а не прямо из Rust:** Claude Agent SDK и Codex SDK — TypeScript-библиотеки. Тащить их в Rust значит переписывать обвязку или вызывать через `node` всё равно. Sidecar — стандартная практика Tauri (`tauri.conf.json -> bundle.externalBin`), даёт изоляцию процессов и переживаемость падений.
+- **Rust core** owns persistence, file IO, secrets, the background job
+  pipeline, image post-processing, and the HTTP bridge that lets a remote
+  browser tab control the same app.
+- **Node sidecar** owns every LLM call. It is a single process started at
+  launch and reused for the session; it exposes a tiny JSON-RPC protocol over
+  its stdio. See `src-tauri/src/sidecar.rs` (Rust side) and
+  `sidecar/src/index.mjs` (Node side).
+- **React frontend** is one SPA. It runs inside the Tauri WebView on the
+  desktop, but the same bundle is served by the embedded HTTP server when the
+  user shares the app, so it also runs in a normal browser tab.
+
+The bundle identifier `com.legostin.learnanything` and the database filename
+`learn-anything.db` are stable: changing either would orphan every user's
+existing courses, so they are intentionally kept under the older project name.
 
 ---
 
-## 3. Модель данных
+## 2. Sidecar protocol
 
-### 3.1 SQLite (метаданные и прогресс)
+Line-delimited JSON over stdin/stdout. Defined in `sidecar/src/index.mjs`:
+
+```
+Request:  {"id": <string>, "method": <string>, "params": <object>}
+Response: {"id": <string>, "result": <any>}
+Error:    {"id": <string>, "error": <string>}
+Progress: {"progress": {"id": <string>, "label": <string>, "detail"?: <string>}}
+```
+
+Progress frames are emitted zero or more times **before** the matching
+`Response`. The Rust side (`sidecar::Sidecar::call_with_progress`) forwards them
+into `agent_stage` Tauri events so the UI sees live status without polling.
+
+Backend selection is a `backend: "claude" | "codex"` field on every LLM
+method's params. The dispatcher routes to the matching agent module.
+
+Methods exposed (`sidecar/src/index.mjs`):
+
+| Method                      | Purpose                                                |
+|-----------------------------|--------------------------------------------------------|
+| `wizard_questions`          | Generate 3–7 clarifying questions for the wizard        |
+| `build_structure`           | Research and propose the full module/submodule tree     |
+| `refine_structure`          | Apply a user chat message to the current structure      |
+| `submodule_draft`           | Write the article + pick widget placeholders            |
+| `submodule_annotate`        | JS-only Mermaid sanity-check + interactive widget repair|
+| `submodule_review_images`   | Vision pass picks the best Brave-search candidate       |
+| `generate_test`             | Multiple-choice comprehension test                      |
+| `generate_assignments`      | Homework assignment chain                               |
+| `review_assignment`         | Grade a learner submission (text / image / archive / GitHub) |
+| `generate_image`            | Codex `$imagegen` wrapper (Claude has no image gen)     |
+| `list_models`               | Live model catalog from the CLI                         |
+| `chat`, `claude_chat`       | One-shot smoke-test                                     |
+
+Both backends implement the same surface in `sidecar/src/agents/claude.mjs` and
+`sidecar/src/agents/codex.mjs`.
+
+### 2.1 Claude isolation
+
+Every Claude `query()` call is built through `buildClaudeOptions` in
+`claude.mjs` with a fixed isolation block:
+
+```js
+const AGENT_ISOLATION = { settingSources: [], permissionMode: "dontAsk" };
+```
+
+- `settingSources: []` prevents the SDK from loading the user's global Claude
+  config. Without this, the embedded agent would inherit whatever MCP servers
+  the user has installed (godot, blender, …) and could hang on a permission
+  prompt nothing can answer in headless mode.
+- `permissionMode: "dontAsk"` runs only the tools listed in `allowedTools` and
+  denies anything else instantly instead of prompting.
+
+The Rust sidecar spawner also strips `ANTHROPIC_API_KEY` from the child's env
+so the agent always falls back to the local CLI subscription auth.
+
+### 2.2 Web access
+
+Claude gets `WebSearch` + `WebFetch` added to `allowedTools` whenever a
+content stage runs (`draftArticleInternal`, `buildStructure`,
+`refineStructure`). These are the SDK's built-in tools — they work on the
+user's subscription with no key required. When a Brave API key is configured,
+the Brave MCP server is added on top via `sidecar/src/lib/brave.mjs`; it
+resolves the installed package directly to avoid a per-call `npx` cold start.
+
+Codex has native `webSearchEnabled: true` on every thread, so its web access
+is unconditional.
+
+---
+
+## 3. Persistence layout
+
+### 3.1 SQLite — metadata only
+
+Schema lives in `src-tauri/migrations/`:
 
 ```sql
--- Курсы
-courses (
-  id              TEXT PRIMARY KEY,    -- uuid
-  topic           TEXT NOT NULL,       -- "академическая живопись"
-  language        TEXT NOT NULL,       -- BCP-47, напр. "ru"
-  status          TEXT NOT NULL,       -- 'wizard' | 'structuring' | 'ready'
-  created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL
-)
-
--- Модули
-modules (
-  id              TEXT PRIMARY KEY,
-  course_id       TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-  parent_id       TEXT REFERENCES modules(id),    -- NULL = top-level; иначе сабмодуль
-  position        INTEGER NOT NULL,                -- порядок среди сиблингов
-  title           TEXT NOT NULL,
-  summary         TEXT,                            -- краткое описание для UI
-  generation_state TEXT NOT NULL                   -- 'pending' | 'generating' | 'ready' | 'failed'
-)
-
--- Прогресс пользователя
-progress (
-  module_id       TEXT PRIMARY KEY REFERENCES modules(id) ON DELETE CASCADE,
-  test_passed_at  INTEGER,            -- NULL = не сдан
-  marked_done_at  INTEGER             -- NULL = не отмечен
-)
-
--- Фоновые задачи (генерация модуля, регенерация и т.п.)
-jobs (
-  id              TEXT PRIMARY KEY,
-  course_id       TEXT NOT NULL,
-  module_id       TEXT,
-  kind            TEXT NOT NULL,      -- 'wizard_questions' | 'build_structure' | 'generate_submodule' | 'regenerate_submodule'
-  status          TEXT NOT NULL,      -- 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
-  agent           TEXT NOT NULL,      -- 'claude' | 'codex'
-  started_at      INTEGER,
-  finished_at     INTEGER,
-  log_path        TEXT,               -- путь к стрим-логу
-  error           TEXT
-)
+courses (id, topic, language, status, agent, created_at, updated_at)
+modules (id, course_id, parent_id, position, title, summary, generation_state)
+progress (module_id, test_passed_at, marked_done_at)
+jobs    (id, course_id, module_id, kind, status, agent, …)
 ```
 
-**Сознательные упрощения:** нет таблиц `users` (single-user локальное приложение), нет тегов/категорий курсов, нет версионирования контента (контент — это файлы на диске, под git/бэкапы пусть отвечает пользователь).
+`agent` is per-course (Claude or Codex) and was added by `V2__add_course_agent.sql`.
+`generation_state ∈ { pending, generating, ready, failed }`. The `jobs` table
+exists for future job inspection but the live pipeline streams progress via
+events rather than polling rows.
 
-### 3.2 Файловая система (контент и память)
+At startup `db::reset_stuck_generations` flips any `generating` row left over
+from a previous process back to `failed`, since the worker thread that owned
+it died with the previous app process.
 
-Контент держим **в файлах, а не в БД** — потому что:
-- легко открыть в любом редакторе/посмотреть глазами;
-- легко версионировать (если пользователь захочет — положит под git);
-- агентам проще читать/писать как обычные инструменты.
+### 3.2 Filesystem — everything else
 
-**`courses/<course_id>/course.md`** — заголовочный документ:
-```markdown
----
-topic: академическая живопись
-language: ru
-created_at: 2026-05-27T...
----
+Content lives under the per-platform `app_data_dir`, namespaced by course:
 
-## Тема
-академическая живопись
-
-## Ответы визарда
-**Вопрос:** Какой у вас опыт?
-**Ответ:** Полный новичок, рисовал только в школе.
-
-**Вопрос:** Сколько часов в неделю готовы уделять?
-**Ответ:** 5-7 часов.
-...
+```
+courses/<course_id>/
+├── course.md                              # wizard answers, plain markdown
+├── structure.json                         # full tree mirror of the SQLite rows
+├── chat.json                              # structure-refinement chat history
+├── memory/                                # accepted refinement memos (.md)
+└── modules/<mod_id>/<sub_id>/
+    ├── article.md                         # the lesson
+    ├── widgets.json                       # widget data keyed by id
+    ├── sources.json                       # citations the agent surfaced
+    ├── review-notes.md                    # validator/self-review notes
+    ├── test.json                          # comprehension questions
+    ├── assignments.json                   # homework chain
+    ├── checkpoint.json                    # draft resume snapshot (deleted on success)
+    ├── error.txt                          # last failure message (deleted on success)
+    ├── images/                            # final illustration JPEGs
+    │   └── _candidates/                   # search candidates, cleaned after pick
+    └── assignments/<assignment_id>/
+        ├── status.json
+        ├── chat.json
+        └── uploads/attempt-N/<file>       # learner submissions
 ```
 
-**`structure.json`** — дерево модулей (зеркало того, что в SQLite, но человекочитаемое для агента):
-```json
-{
-  "course_id": "...",
-  "modules": [
-    {
-      "id": "mod_intro",
-      "title": "Введение в академический рисунок",
-      "summary": "...",
-      "submodules": [
-        { "id": "sub_history", "title": "История академической школы", "summary": "..." }
-      ]
-    }
-  ]
-}
-```
+Content is kept on disk rather than in the DB so it stays inspectable,
+diff-able, and easy for agents to read or rewrite via plain file IO. Tools and
+status are written through helpers in `src-tauri/src/courses.rs`.
 
-**`memory/`** — папка с MD-файлами фидбека по регенерациям. Один файл = одна сохранённая правка/предпочтение:
-```
-memory/
-├── 2026-05-27-tone-too-academic.md
-├── 2026-05-28-prefer-concrete-examples.md
-└── 2026-06-01-no-historical-tangents.md
-```
+### 3.3 Secrets and settings
 
-Содержимое одного файла:
-```markdown
----
-scope: course        # course | module:<id> | submodule:<id>
-created_at: 2026-05-27
-trigger: "Сабмодуль 'История' — пользователь нажал 'перегенерировать'"
----
+`settings.json` (`SettingsState` in `src-tauri/src/settings.rs`) holds the
+Brave key, Gemini key, ngrok reserved domain(s), per-stage model preferences,
+and the TTS engine/voice/model choice. It is never committed to the repo. The
+Tauri commands `set_brave_key`, `set_gemini_key`, `set_model_settings`,
+`set_tts_*`, `set_gemini_*_model`, etc. each persist immediately.
 
-## Что не устроило
-Слишком академичный тон, чувствуется как лекция в универе.
-
-## Что нужно
-Больше конкретных примеров художников и работ. Меньше дат.
-```
-
-Все файлы из `memory/`, релевантные текущему запросу (по scope), агрегируются в промпт при генерации/регенерации.
-
-**`modules/<mod_id>/<sub_id>/article.md`** — статья со встроенными виджетами через спец-разметку:
-```markdown
-# История академической школы
-
-Академический рисунок зародился в...
-
-::widget{type="code-snippet" id="w1"}
-::
-
-Подробнее о технике штриховки...
-```
-
-Сами данные виджетов — в соседнем `widgets.json` (отделяем структуру от текста):
-```json
-{
-  "w1": {
-    "type": "code-snippet",
-    "language": "python",
-    "code": "import turtle\nturtle.forward(100)",
-    "caption": "Простая отрисовка линии"
-  }
-}
-```
+The TTS audio cache lives at `tts_cache/<fnv1a_hex>.wav` keyed by
+`voice|model|text` so the same chunk is paid for at most once.
 
 ---
 
-## 4. Потоки данных
+## 4. Submodule generation pipeline
 
-### 4.1 Создание курса (визард)
-
-```
-User                UI                Rust Core            Agent Sidecar
- │                   │                    │                       │
- │ "академическая    │                    │                       │
- │  живопись"        │                    │                       │
- ├──────────────────▶│                    │                       │
- │                   │ create_course(...) │                       │
- │                   ├───────────────────▶│                       │
- │                   │                    │ INSERT courses        │
- │                   │                    │ (status='wizard')     │
- │                   │                    │ detect language       │
- │                   │                    │                       │
- │                   │                    │ run_job(wizard_qs)    │
- │                   │                    ├──────────────────────▶│
- │                   │                    │                       │ LLM: сгенерируй
- │                   │                    │                       │ уточняющие
- │                   │                    │                       │ вопросы (3-10)
- │                   │  job event stream  │                       │
- │                   │◀──────────────────────────────────────────│
- │   показ вопросов  │                    │                       │
- │◀──────────────────│                    │                       │
- │                   │                    │                       │
- │  ответы           │                    │                       │
- ├──────────────────▶│ save_wizard_answers│                       │
- │                   ├───────────────────▶│ write course.md       │
- │                   │                    │ run_job(structure)    │
- │                   │                    ├──────────────────────▶│
- │                   │                    │                       │ LLM: исследуй
- │                   │                    │                       │ принятые программы
- │                   │                    │                       │ (Brave Search tool)
- │                   │                    │                       │ + рефлексия
- │                   │                    │                       │ → structure.json
- │                   │ событие "готова    │                       │
- │                   │ предв. структура"  │                       │
- │                   │◀───────────────────────────────────────────│
- │ редактирование    │                    │                       │
- │ структуры         │                    │                       │
- ├──────────────────▶│ save_structure     │                       │
- │                   │                    │ status='ready'        │
-```
-
-**Сколько именно уточняющих вопросов** — решает агент. UI просто рендерит список и ждёт ответы. Жёсткого лимита нет.
-
-**Распознавание языка** — простое: используем существующую библиотеку (`whichlang` для Rust или `franc`/`cld3` через sidecar). LLM для этого — избыточно.
-
-### 4.2 Генерация сабмодуля
-
-Триггер: пользователь жмёт "сгенерировать" рядом с `pending` сабмодулем (или входит в первый — генерируется автоматически).
+`spawn_generate_submodule` in `src-tauri/src/lib.rs` is the core orchestrator.
+Every stage emits `agent_stage` events for live UI, persists artefacts as soon
+as they are durable, and soft-fails on enrichment errors. The key property is
+that the article — the only artefact the learner actually needs to start
+reading — is written and the submodule is marked `ready` **before**
+illustrations, tests, and assignments finish. Everything else backfills.
 
 ```
-User → UI → Rust: start_job(generate_submodule, sub_id)
-Rust:
-  - Создаёт jobs row, status='running'
-  - Собирает контекст:
-      * course.md
-      * structure.json
-      * все memory/*.md где scope охватывает этот сабмодуль
-      * соседние сабмодули (для согласованности)
-  - Запускает agent sidecar с этим контекстом
-Agent (несколько шагов в одном "разговоре"):
-  1. Research-pass: Brave Search по теме сабмодуля, читает источники
-  2. Outline-pass: набрасывает структуру статьи, рефлексирует
-  3. Write-pass: пишет article.md с виджетами
-  4. Test-pass: генерирует test.json (вопросы + варианты + правильный)
-  5. Homework-pass: генерирует homework.md
-  6. Self-check: проверяет, что всё консистентно с курсом и memory
-UI получает стриминг прогресса через tauri events, показывает шаги.
-Когда готово — generation_state='ready', UI обновляется.
+spawn_generate_submodule
+│
+├─ stage: draft         (sidecar.submodule_draft)
+│  • web-search + write article + widget placeholders
+│  • on transient failure: retry up to 3× with on_retry progress
+│  • on success: checkpoint.json → checkpoint.json deleted only after success
+│  • on resume: skip if the checkpoint already has stage="draft"
+│
+├─ stage: annotate      (sidecar.submodule_annotate)
+│  • JS-only Mermaid sanity check, interactive widget repair loop
+│  • soft-fail: notes are appended, originals kept
+│
+├─ persist article + widgets + sources + notes
+├─ set generation_state = "ready"
+├─ emit agent_job { ok: true, enriching: true }
+│  ← reader is now usable
+│
+├─ background: test         (sidecar.generate_test)        ── parallel
+├─ background: assignments  (sidecar.generate_assignments) ── parallel
+└─ stage: illustrate
+   • Per image widget marked mode="generate": Gemini (or Codex $imagegen) ──┐
+   • Per image widget marked mode="search":   Brave → download → vision pick │
+   • Up to 3 search rounds with refined query                                 │
+   • Per-widget concurrency capped at 3                                       │
+       (illustrate_widgets + illustrate_one_widget in lib.rs)
+   • Falls back to placeholder if neither generate nor search succeeds
+
+… join test + assignments threads
+… persist widgets + test + assignments (all non-fatal on write)
+… emit agent_enrich  ── tells an open reader to reload
+… emit agent_assignments ── tells the reader to mount homework
 ```
 
-### 4.3 Регенерация с обратной связью
+Timings for every stage are recorded by `log_timing` (stderr + `agent_stage`
+"готово" event with a duration), so the real per-stage cost is observable in
+the UI transcript.
 
+### 4.1 Retries and resume
+
+`retry_stage` in `lib.rs` runs the draft up to `STAGE_MAX_ATTEMPTS = 3` times,
+calling an `on_retry(next_attempt, last_error)` callback so the UI shows the
+retry number and the last error. The annotate / test / assignments /
+illustrate stages do **not** retry: they are soft-fail enrichments, the
+article is already saved.
+
+If the process dies mid-draft, `checkpoint.json` lets a future
+`start_generate_submodule` resume with the article+widgets+sources already
+drafted, skipping straight to annotate. The checkpoint and `error.txt` are
+deleted as soon as the article is durable.
+
+### 4.2 Capability gates
+
+Before launching, the orchestrator decides whether illustration is even
+possible:
+
+```rust
+let can_illustrate = brave_api_key.is_some() || gemini_key.is_some() || course.agent == "codex";
 ```
-User → нажимает "перегенерировать" в материале сабмодуля
-UI → показывает модалку "Что именно не подошло?"
-User → вводит фидбек ("слишком академично, дай больше примеров")
-UI → Rust: regenerate_submodule(sub_id, feedback_text)
-Rust:
-  - Сохраняет фидбек как новый файл в memory/ (с правильным scope)
-  - Запускает generate_submodule заново — он подхватит новый memory-файл
-```
 
-Память накапливается. Старые memory-файлы не удаляются, но если их становится много — отдельный шаг рефлексии (потом, не в MVP) сможет их сжать.
+If none is available the stage is skipped entirely and the article keeps its
+placeholder widgets. Generate mode prefers Gemini (`media::gemini_generate_image`)
+and falls back to Codex `$imagegen` when the course is Codex. Search mode
+needs a Brave key.
 
 ---
 
-## 5. Контракт с агентами
+## 5. Widgets
 
-**Один абстрактный интерфейс — две реализации (Claude / Codex).** Выбор бэкенда — настройка приложения; в идеале можно менять под задачу (например, research — Codex с web search, написание — Claude).
+Articles are markdown with inline placeholders `::widget{id="w1"}`. The
+frontend (`src/App.tsx::splitWidgetMarkers` → `WidgetRenderer`) walks each
+article and renders the matching entry from `widgets.json`.
 
-### 5.1 Типы задач (job kinds)
+Four widget types are supported today:
 
-| kind                    | вход                                   | выход                          |
-|-------------------------|----------------------------------------|--------------------------------|
-| `wizard_questions`      | topic, language                        | `{questions: string[]}`        |
-| `build_structure`       | course.md, опционально existing tree   | `structure.json`               |
-| `generate_submodule`    | course.md, structure.json, memory/*, sub_id | `article.md` + `widgets.json` + `test.json` + `homework.md` |
-| `regenerate_submodule`  | то же + новый memory-файл              | то же                          |
+| Type          | Source / runtime                                                     |
+|---------------|----------------------------------------------------------------------|
+| `image`       | JPEG on disk (illustration pipeline) or external URL                 |
+| `diagram`     | Mermaid source rendered client-side                                  |
+| `video`       | Recommended URL (YouTube etc.) embedded via `videoEmbedUrl`          |
+| `interactive` | Vanilla HTML + CSS + JS, rendered inside a sandboxed `<iframe>` with a strict CSP from `buildInteractiveDoc` (matches `sidecar/src/lib/interactive.mjs`) |
 
-### 5.2 Инструменты, доступные агенту
+### 5.1 Interactive widget validation
 
-Минимум:
-- `brave_search(query) → results[]` — веб-поиск (через Rust proxy, чтобы ключ Brave не утёк в sidecar).
-- `fetch_url(url) → text` — выкачать страницу и привести к тексту/маркдауну.
-- `write_file(path, content)` — запись в песочницу курса.
-- `read_file(path) → content` — чтение из песочницы курса.
+Mini-apps are the only widget type that *can* fail in interesting ways, so
+they go through a multi-stage validator in `interactive.mjs`:
 
-**Песочница**: агент видит только директорию `courses/<course_id>/`. Sidecar обеспечивает chroot-подобную защиту на уровне валидации путей.
+1. **Static lint** — size cap (8 KB total), regex blocklist (no `eval`,
+   `new Function`, `fetch`, `iframe`, storage APIs, etc.), `new Function(js)`
+   to catch syntax errors without executing.
+2. **Runtime check** — `jsdom` with `runScripts: "outside-only"`, a virtual
+   console capturing errors, and a 1.5s settle window for `setTimeout` /
+   `requestAnimationFrame`.
+3. **Visual render** (optional) — `playwright-core` with `channel: "chrome"`
+   reuses the user's installed Chrome (no Chromium download) to screenshot
+   the widget. A vision agent then inspects the PNG; if it flags a render
+   defect, the error is fed into the same repair loop as the lint/runtime
+   stages (`validateAndRepairInteractive` in both agents). The whole visual
+   stage self-disables if Chrome isn't present so the validator still works.
 
-### 5.3 Аутентификация / биллинг
+The repair loop runs at most `INTERACTIVE_MAX_REPAIRS = 2` rounds; on
+exhaustion the original widget is kept with a noted defect rather than
+removed.
 
-Claude Agent SDK и Codex SDK используют локальную аутентификацию через `claude login` / `codex login` — подписочные кредиты пользователя, не API-ключи.
-
-В UI — экран "Подключение аккаунтов" с инструкцией запустить логин.
-
----
-
-## 6. Виджеты
-
-**На MVP — один тип:** `code-snippet`. Расширяемость минимальная, но честная:
-
-- Парсер `article.md` ищет `::widget{type="X" id="Y"}` блоки.
-- Реестр виджетов на фронте — `Map<string, ReactComponent>`. Сейчас один ключ — `code-snippet`. Добавить новый = одна строка в реестр + компонент.
-- Промпт агента содержит список доступных типов виджетов и их JSON-схемы. Когда добавим новый тип — обновим оба места.
-
-**Не делаем сейчас:** редактор виджетов в UI, drag-n-drop, версионирование виджетов, кастомные пользовательские виджеты. Это легко доделать, когда понадобится.
-
----
-
-## 7. Brave Search
-
-Brave Search API-ключ хранится в `auth/` (или в системном keychain через `tauri-plugin-keyring`). Rust Core проксирует запросы — sidecar никогда не видит ключ напрямую, только endpoint `brave_search(query)`.
-
-Используется и для текстового поиска (research-pass), и для поиска изображений (когда добавим image-виджет).
+The frontend renders interactives inside `<iframe sandbox="allow-scripts">` so
+even if a malicious script slipped past validation it still cannot reach the
+host page.
 
 ---
 
-## 8. Безопасность
+## 6. Illustrations
 
-- Все файловые операции агента — через ограниченный set tauri commands, не через прямой FS access.
-- Brave-ключ — в keychain, не в env.
-- Sidecar — отдельный процесс, без сетевого доступа кроме как через предоставленные tools (validated через allow-list).
-- При запуске CLI агентов (если придётся) — никакого `shell=true`, только argv-массив.
+`illustrate_widgets` (`lib.rs`) consumes the image-widget descriptions the
+draft agent left behind and resolves each one into a final JPEG on disk:
 
----
+- Widgets with `mode = "generate"`: call `media::gemini_generate_image` first
+  (model from `settings.gemini_image_model`, default
+  `gemini-2.5-flash-image`); on failure for Codex courses, fall back to
+  `generate_image` via the sidecar (Codex's `$imagegen` writes a file under
+  `~/.codex/generated_images/`, picked up by mtime).
+- Widgets with `mode = "search"`: up to 3 search rounds against
+  `media::brave_image_search`. Each round downloads up to 3 candidates in
+  parallel (`download_resize_jpeg`), then calls
+  `sidecar.submodule_review_images` — a vision pass that either picks an
+  index or suggests a refined query for the next round.
 
-## 9. Что строим в первую очередь (предложение по фазам)
-
-> **Subscription auth подтверждена** (Claude Agent SDK и Codex SDK работают через локальный `claude login` / `codex login`) — Phase 0 спайк не нужен.
-
-**Phase 1 — скелет приложения:**
-- Tauri scaffold + React/TS/Vite.
-- SQLite миграции (схема из §3.1).
-- Базовый layout: список курсов / создать курс.
-
-**Phase 2 — визард + структура:**
-- Поток `wizard_questions` + `build_structure` с одним агентом (тем, что работает).
-- UI: топик → вопросы → дерево с возможностью править.
-
-**Phase 3 — генерация сабмодуля:**
-- `generate_submodule` с research/write/test/homework.
-- Article renderer + widget host + code-snippet widget.
-- Test UI + отметка "пройдено".
-
-**Phase 4 — регенерация и память:**
-- Кнопка перегенерировать → модалка → сохранение memory → перезапуск.
-
-**Phase 5 — Brave Search, изображения, второй виджет (когда станет ясно, какой нужен).**
+Jobs run on a bounded thread scope (`concurrency = min(jobs.len(), 3)`) so a
+submodule with many images doesn't blow past Brave's rate limit. Picked
+candidates are copied into `images/<wid>.jpg`; the `_candidates/` umbrella is
+removed at the end.
 
 ---
 
-## 10. Открытые вопросы / риски
+## 7. Homework / assignments
 
-1. **Долгие генерации (минуты-десятки минут).** Прогресс из агента — насколько подробный? Нужен ли механизм паузы/отмены?
-2. **Стоимость по подписке.** Один полный сабмодуль = research + outline + write + test + homework. Сколько это токенов? Не упрёмся ли в лимиты Pro/Max за один курс?
-3. **Параллелизм.** Можно ли генерировать несколько сабмодулей одновременно? (Одна подписка — один rate-limit.)
-4. **Формат тестов.** Только multiple-choice или ещё open-ended с проверкой через LLM? MVP — multiple-choice.
-5. **Бандлинг Node.js.** Sidecar требует Node — таскать его внутри Tauri-бандла (≈30-50MB лишних) или требовать установленный? **Предложение:** бандлить, чтобы не было барьера установки.
-6. **Память: как чистить.** Когда фидбеков накопится 50+, не уместятся в контекст. Нужен будет шаг "сжать память" — пока откладываем.
-7. **Изображения в статьях.** В MVP не делаем, но архитектура виджетов их допускает — image-виджет ставит src=URL из Brave.
+For each submodule the draft pipeline kicks off a parallel
+`generate_assignments` call. The agent returns a short chain of assignments,
+each with a type from `{image, text, document, archive, github}` and a
+criticality (`critical | major | minor`). Definitions are stored in
+`assignments.json`.
+
+`submit_assignment` (`lib.rs`):
+
+1. Sanitises the filename (`sanitize_filename`) so a malicious upload name
+   cannot escape the assignment's uploads dir.
+2. Stores each upload under
+   `assignments/<aid>/uploads/attempt-N/<safe-name>`.
+3. Extracts text from `.zip` archives via the `zip` crate or as UTF-8 from any
+   document upload (`courses::extract_submission_text`); images become
+   `local_image` references for the vision pass.
+4. Builds the prior chat history, calls `sidecar.review_assignment`, and
+   appends both the learner turn and the reviewer turn to `chat.json`.
+5. Writes the new status (`passed` or `in_progress`) to `status.json` and
+   emits `agent_assignments` so the open reader refreshes.
+
+`start_generate_assignments` is the same flow on demand, for submodules that
+were generated before the homework system existed.
 
 ---
 
-## 11. Что НЕ делаем (явно)
+## 8. Lecture audio
 
-- Multi-user, accounts, sync между устройствами.
-- Версионирование контента внутри приложения.
-- Маркетплейс курсов / шеринг.
-- Мобильную версию.
-- Поддержку любых LLM кроме Claude и Codex.
-- Кастомные виджеты от пользователя.
+Each article has a "Listen" button (`LectureAudio` in `App.tsx`). The
+`AudioPlayerProvider` chunks the article (`articleToSpeechText` strips
+markdown / widget markers; `chunkSpeech` cuts to ~220-char sentences),
+caches per-chunk audio, prefetches the next chunk while the current one
+plays, and renders a sticky footer (`StickyPlayer`) plus a fullscreen view
+(`ExpandedPlayer`) with ±10s skip and a seek bar.
 
-Эти ограничения держат scope под контролем. Снимаем по запросу.
+Two engines:
+
+- **`system`** (default) — `window.speechSynthesis`. Free, runs locally, no
+  config needed.
+- **`gemini`** — paid Gemini TTS. Only selectable in the Settings modal when
+  a Gemini key is configured. The Rust command `synthesize_speech` is
+  `async`, runs the multi-second HTTP request inside `spawn_blocking` so the
+  UI never freezes, and caches each WAV under
+  `tts_cache/<fnv1a64(voice|model|text)>.wav` — the same lecture chunk is
+  paid for at most once.
+
+The voice and model are pickers in Settings. The Gemini model lists are
+fetched live from `media::list_gemini_models` (Gemini ListModels filtered by
+name patterns) rather than hard-coded.
+
+---
+
+## 9. Sharing (remote viewer)
+
+When the user hits "Share", the app:
+
+1. Spawns `ngrok` against the local port (`share::start_ngrok`,
+   `SHARE_PORT = 8787`). If a reserved domain is configured, ngrok binds to it.
+2. Polls the ngrok admin API on `:4040` until the public HTTPS URL appears.
+3. Returns the URL; the user shows the QR code or sends the link.
+
+The embedded HTTP server (`tiny_http`, started in `share::start_http_server`
+on app boot, not on share start) speaks three endpoints:
+
+| Path             | Behaviour                                                              |
+|------------------|------------------------------------------------------------------------|
+| `/api/cmd/<n>`   | Dispatch a Tauri command by name; JSON body becomes the args           |
+| `/api/events`    | Long-poll for `agent_job`, `agent_stage`, `agent_enrich`, `agent_assignments` events since cursor |
+| `/media?path=…`  | Serve a widget image / audio file by absolute path (scoped)            |
+| `/` (else)       | Serve the same React bundle the desktop loads                          |
+
+The frontend `transport.ts` abstracts away the difference: in the native
+WebView it calls Tauri IPC and listens on Tauri events; in a remote browser
+it calls `/api/cmd/*` and runs a single shared long-poll loop over
+`/api/events`, fanning out to component listeners. Components never know
+which side they are on.
+
+The event hub (`src-tauri/src/events.rs`) is a bounded in-memory ring buffer
+(1000 events) that mirrors every Tauri-emit. Remote clients catch up by
+passing the last seq cursor; the desktop WebView still uses native Tauri
+emit and ignores the hub.
+
+---
+
+## 10. Frontend layout
+
+A single SPA in `src/App.tsx` (large by design — splitting buys nothing for a
+single-window desktop app, and keeps all the audio/transport state in scope).
+Major components:
+
+- `App` — root router by selected course / wizard step.
+- `CapabilityBanners` — shows missing-agent and missing-Brave warnings up
+  front so the user knows what won't work before they try.
+- `CreateCourse` / `Wizard` / `Structure` / `StructureBuilder` /
+  `RefineChat` — course creation flow.
+- `CourseView` / `StructureTree` / `SubmoduleAction` — the left nav.
+- `SubmoduleView` — wraps `ArticleReader`, `LiveActivity` (stage strip),
+  `AgentTranscript`, `TestSection`, `AssignmentsSection`, `SourcesList`.
+- `WidgetRenderer` dispatches to `ImagePlaceholder`, `DiagramWidget`,
+  `VideoWidget`, `InteractiveWidget` (sandboxed iframe via
+  `buildInteractiveDoc`).
+- `AudioPlayerProvider` / `useAudioPlayer` / `StickyPlayer` / `ExpandedPlayer`
+  / `LectureAudio` — the audio subsystem.
+- `SettingsModal` — keys, models per stage, TTS engine/voice/model, share
+  domains.
+
+UI strings live in `src/i18n.tsx` (en + ru). The default language is English
+unless the user has stored another choice in `localStorage`.
+
+---
+
+## 11. Models and reasoning
+
+`SettingsState::stage_model(backend, category)` (`settings.rs`) returns a
+JSON blob `{model, reasoning}` for the requested combination, e.g.
+`("claude", "planning")` for structure / wizard, `("claude", "writing")` for
+the article draft, `("claude", "tests")` for tests and assignments.
+
+The sidecar maps `reasoning` onto SDK-specific fields:
+
+- Claude (`modelOptions` in `claude.mjs`):
+  `off | none | disabled` → `thinking: {type: "disabled"}`;
+  `low | medium | high | xhigh | max` → `effort: <value>`.
+- Codex (`modelThreadOptions` in `codex.mjs`): the same vocabulary maps onto
+  Codex's `reasoning.effort` (or disables it).
+
+Empty fields are dropped so the agent falls back to its built-in default —
+the user only sets the levers they care about.
+
+The model picklists in Settings come from `sidecar.list_models` — a cached
+call to the CLI's `supportedModels()` so each entry carries the effort levels
+that specific model actually supports.
+
+---
+
+## 12. Build and distribution
+
+- `scripts/copy-sidecar.mjs` mirrors `sidecar/` into
+  `src-tauri/sidecar/` (excluding `*_test.mjs` and logs) before the Tauri
+  bundle is built. `tauri.conf.json::bundle.resources = ["sidecar/**"]`
+  ships that copy with the app.
+- At runtime, `sidecar_script_path` in `lib.rs` first looks for the bundled
+  `resource_dir/sidecar/src/index.mjs`; in dev it falls back to the source
+  tree sibling.
+- The Tauri crate is `learn-almost-anything` (lib name
+  `learn_almost_anything_lib`); the npm package is `learn-almost-anything`;
+  the sidecar package is `learn-almost-anything-sidecar`.
+- `.github/workflows/release.yml` builds macOS (universal) and Windows (x64)
+  with `tauri-apps/tauri-action@v0`; tag pushes (`v*`) cut a draft release,
+  workflow-dispatch runs upload artefacts only.
+
+---
+
+## 13. What this app is not
+
+- **Not multi-user.** No accounts, no sync, no shared cloud state. Sharing is
+  a transient tunnel to your own machine, not a service.
+- **Not server-backed.** The app is the server. There is no SaaS.
+- **Not vendor-locked to a model.** Claude and Codex are interchangeable; the
+  user picks per course.
+- **Not a sandbox for arbitrary code execution.** Interactive widgets are
+  vanilla DOM/JS only, validated and rendered inside a sandboxed iframe with
+  a strict CSP. There is no plugin system.
+- **Not free of dependencies the user already has.** It relies on the local
+  `claude` and/or `codex` CLI for subscription auth, optionally on a
+  Brave Search key, optionally on a Gemini key, optionally on the system
+  Chrome for widget visual checks, optionally on `ngrok` for sharing. Each
+  one is checked at start (`check_agent_availability`,
+  `get_settings_status`) and surfaced in `CapabilityBanners` so the user
+  knows what is and isn't on.
