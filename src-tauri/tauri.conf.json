@@ -38,6 +38,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["sidecar/**"]
+    "resources": {
+      "sidecar/src": "sidecar/src",
+      "sidecar/node_modules": "sidecar/node_modules",
+      "sidecar/package.json": "sidecar/package.json"
+    }
   }
 }
