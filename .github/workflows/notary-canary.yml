@@ -57,12 +57,34 @@ jobs:
           security list-keychains -d user -s "$keychain_path"
           security find-identity -p codesigning -v "$keychain_path" > "$DIAG_DIR/signing-identities.txt"
 
+      - name: Check notarytool account access
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -u
+          set +e
+          xcrun notarytool history \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output-format json \
+            > "$DIAG_DIR/notary-history.json" \
+            2> "$DIAG_DIR/notary-history.stderr"
+          history_status=$?
+          set -e
+
+          printf '%s\n' "$history_status" > "$DIAG_DIR/notary-history-exit-code.txt"
+          cat "$DIAG_DIR/notary-history.json" || true
+          cat "$DIAG_DIR/notary-history.stderr" || true
+
       - name: Build and sign minimal app
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          app_path="$RUNNER_TEMP/Notary Canary.app"
+          app_path="$RUNNER_TEMP/NotaryCanary.app"
           mkdir -p "$app_path/Contents/MacOS"
 
           cat > "$RUNNER_TEMP/notary-canary.c" <<'EOF'
@@ -86,7 +108,7 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>com.legostin.notary-canary</string>
             <key>CFBundleName</key>
-            <string>Notary Canary</string>
+            <string>NotaryCanary</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
