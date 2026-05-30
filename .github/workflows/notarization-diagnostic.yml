@@ -1,0 +1,211 @@
+name: Notarization Diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: macOS target to build and submit to Apple Notary
+        type: choice
+        default: aarch64-apple-darwin
+        options:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+
+jobs:
+  diagnose:
+    name: diagnose (${{ inputs.target }})
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      DIAG_DIR: notarization-diagnostics
+      TARGET: ${{ inputs.target }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install root deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install sidecar deps
+        run: pnpm --dir sidecar install --frozen-lockfile
+
+      - name: Stage sidecar for Tauri bundle
+        run: pnpm build:sidecar
+
+      - name: Check Apple secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required secret: ${name}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Build signed app without notarization
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAG_DIR"
+          pnpm tauri build --target "$TARGET" --bundles app --ci 2>&1 | tee "$DIAG_DIR/tauri-build.log"
+
+      - name: Inspect signed app
+        run: |
+          set -euo pipefail
+          app_path="$(find "src-tauri/target/$TARGET/release/bundle/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "::error::No .app bundle found for target $TARGET"
+            exit 1
+          fi
+
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+          printf '%s\n' "$app_path" > "$DIAG_DIR/app-path.txt"
+          du -sh "$app_path" > "$DIAG_DIR/app-size.txt"
+          find "$app_path" | wc -l | tr -d ' ' > "$DIAG_DIR/app-file-count.txt"
+
+          codesign --verify --deep --strict --verbose=4 "$app_path" > "$DIAG_DIR/codesign-verify-app.txt" 2>&1 || true
+          codesign -dvvv --entitlements :- "$app_path" > "$DIAG_DIR/codesign-details-app.txt" 2>&1 || true
+          spctl -a -vv "$app_path" > "$DIAG_DIR/spctl-app.txt" 2>&1 || true
+
+          python3 <<'PY'
+          import os
+          import pathlib
+          import stat
+          import subprocess
+
+          diag = pathlib.Path(os.environ["DIAG_DIR"])
+          app = pathlib.Path(os.environ["APP_PATH"])
+          candidates = []
+
+          for path in app.rglob("*"):
+              if not path.is_file():
+                  continue
+              try:
+                  mode = path.stat().st_mode
+              except OSError:
+                  continue
+              if path.suffix in {".node", ".dylib", ".so"} or mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                  candidates.append(path)
+
+          (diag / "nested-code-candidates.txt").write_text(
+              "\n".join(str(path) for path in candidates) + ("\n" if candidates else "")
+          )
+
+          with (diag / "nested-code-file-types.txt").open("w") as types, (diag / "nested-mach-o-codesign.txt").open("w") as sigs:
+              for path in candidates:
+                  file_result = subprocess.run(["file", str(path)], text=True, capture_output=True)
+                  types.write(file_result.stdout)
+                  if "Mach-O" not in file_result.stdout:
+                      continue
+
+                  sigs.write(f"\n## {path}\n")
+                  verify_result = subprocess.run(
+                      ["codesign", "--verify", "--verbose=4", str(path)],
+                      text=True,
+                      capture_output=True,
+                  )
+                  sigs.write(f"exit={verify_result.returncode}\n")
+                  sigs.write(verify_result.stdout)
+                  sigs.write(verify_result.stderr)
+          PY
+
+      - name: Zip app for notarytool
+        run: |
+          set -euo pipefail
+          zip_path="$DIAG_DIR/LearnAlmostAnything-$TARGET.app.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$zip_path"
+          shasum -a 256 "$zip_path" > "$zip_path.sha256"
+          echo "ZIP_PATH=$zip_path" >> "$GITHUB_ENV"
+
+      - name: Submit with notarytool
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -uo pipefail
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --output-format json \
+            > "$DIAG_DIR/notary-submit.json" \
+            2> "$DIAG_DIR/notary-submit.stderr"
+          submit_status=$?
+
+          printf '%s\n' "$submit_status" > "$DIAG_DIR/notary-submit-exit-code.txt"
+          cat "$DIAG_DIR/notary-submit.json" || true
+          cat "$DIAG_DIR/notary-submit.stderr" || true
+
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          diag = pathlib.Path(os.environ["DIAG_DIR"])
+          out = diag / "notary-submit.json"
+          submission_id = ""
+          if out.exists() and out.stat().st_size:
+              try:
+                  submission_id = json.loads(out.read_text()).get("id", "") or ""
+              except Exception as exc:
+                  print(f"Could not parse notary-submit.json: {exc}", file=sys.stderr)
+          (diag / "notary-submission-id.txt").write_text(submission_id)
+          PY
+
+          submission_id="$(cat "$DIAG_DIR/notary-submission-id.txt")"
+          if [[ -n "$submission_id" ]]; then
+            xcrun notarytool log "$submission_id" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --output-format json \
+              > "$DIAG_DIR/notary-log.json" \
+              2> "$DIAG_DIR/notary-log.stderr" || true
+          fi
+
+          exit "$submit_status"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarization-diagnostics-${{ inputs.target }}-${{ github.run_number }}
+          path: ${{ env.DIAG_DIR }}/
+          if-no-files-found: warn
