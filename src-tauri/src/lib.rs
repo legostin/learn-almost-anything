@@ -125,10 +125,10 @@ fn pick_course_suggestion_backend(requested: Option<String>) -> Result<String, S
             return Ok(name.to_string());
         }
     }
-    if cli_present("codex") {
-        Ok("codex".to_string())
-    } else if cli_present("claude") {
+    if cli_present("claude") {
         Ok("claude".to_string())
+    } else if cli_present("codex") {
+        Ok("codex".to_string())
     } else {
         Err("no agent available".to_string())
     }

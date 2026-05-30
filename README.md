@@ -83,6 +83,8 @@ Starting with `v0.1.2`, installed desktop builds can check GitHub Releases from 
 
 ## Latest Release
 
+`v0.1.7` prefers Claude for implicit course suggestions when both Claude and Codex are installed, so a macOS-blocked Codex CLI is not launched unless Codex is explicitly selected.
+
 `v0.1.4` stops production agent checks from launching `claude --version` or `codex --version`, so macOS Gatekeeper prompts do not appear just from opening the app or Settings. The selected CLI is launched only when generation needs it.
 
 `v0.1.3` fixed production agent discovery and stopped bundling native agent CLI binaries into the app.

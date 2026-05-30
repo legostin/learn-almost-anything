@@ -1025,7 +1025,7 @@ function App() {
     randomizeHomeTitleFont();
     if (courseSuggestion.status === "running" || courseSuggestionRunningRef.current) return;
     const backend =
-      agentAvail?.codex ? "codex" : agentAvail?.claude ? "claude" : null;
+      agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : null;
     const language = initialCourseLanguage();
     courseSuggestionRequestedRef.current = true;
     courseSuggestionRunningRef.current = true;
