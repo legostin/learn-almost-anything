@@ -42,6 +42,9 @@
       "sidecar/src": "sidecar/src",
       "sidecar/node_modules": "sidecar/node_modules",
       "sidecar/package.json": "sidecar/package.json"
+    },
+    "macOS": {
+      "entitlements": "entitlements.plist"
     }
   }
 }

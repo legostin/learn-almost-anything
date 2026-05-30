@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- WKWebView needs JIT for the V8 engine. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- Also required by V8 / Node JIT. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- The Node sidecar loads native modules (canvas, playwright-core);
+         their dylibs are unsigned (or signed by a different team), so the
+         hardened runtime must allow them. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- The Node sidecar reads NODE_PATH / NODE_OPTIONS via env. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

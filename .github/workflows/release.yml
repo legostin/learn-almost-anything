@@ -77,14 +77,24 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple Developer ID signing + notarytool notarization. Tauri-action
+          # imports the .p12 into a temp keychain, codesigns the .app with the
+          # provided identity, then runs notarytool and staples the ticket to
+          # the DMG. Windows job ignores these. Empty on PRs from forks where
+          # secrets aren't available — tauri-action then falls back to
+          # ad-hoc signing (the previous, Gatekeeper-warning behaviour).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: 'Learn (Almost) Anything ${{ github.ref_name }}'
           releaseBody: |
-            Unsigned binaries.
-
-            macOS: right-click → Open the first time (Gatekeeper).
-            Windows: SmartScreen will warn — click "More info" → "Run anyway".
+            macOS: signed with Developer ID + notarized — opens with a double-click.
+            Windows: unsigned — SmartScreen will warn, click "More info" → "Run anyway".
 
             Requires Node.js (≥ 20) installed on the user machine.
             See README for prerequisites (Claude / Codex CLI subscription).
