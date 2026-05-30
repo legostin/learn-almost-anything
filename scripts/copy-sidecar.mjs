@@ -37,12 +37,20 @@ cpSync(src, dest, {
   filter: (s) => include(s),
 });
 
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const install = spawnSync(
-  pnpm,
+  "pnpm",
   ["install", "--prod", "--frozen-lockfile", "--config.node-linker=hoisted"],
-  { cwd: dest, stdio: "inherit" },
+  {
+    cwd: dest,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+    windowsHide: true,
+  },
 );
+
+if (install.error) {
+  console.error(`[copy-sidecar] pnpm install could not start: ${install.error.message}`);
+}
 
 if (install.status !== 0) {
   console.error(`[copy-sidecar] pnpm install failed in ${dest}`);
