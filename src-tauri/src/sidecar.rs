@@ -360,7 +360,14 @@ impl Sidecar {
             .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Pipe (don't inherit) stderr: in the release build
+            // (windows_subsystem = "windows") the GUI process has no console, so
+            // the inherited stderr handle is invalid. The sidecar writes
+            // diagnostics to stderr on startup, and writing to an invalid handle
+            // crashes Node — which closes its stdin and makes every request fail
+            // with a broken-pipe error. A real pipe is always valid; we drain it
+            // below so it never fills and blocks.
+            .stderr(Stdio::piped())
             .env("PATH", &expanded_path)
             .env_remove("ANTHROPIC_API_KEY");
 
@@ -375,6 +382,18 @@ impl Sidecar {
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+
+        // Drain the sidecar's stderr so the pipe never fills (which would block
+        // Node). Forward to our own stderr for dev visibility; in the windowed
+        // release build this is a harmless no-op.
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                eprintln!("{line}");
+            }
+        });
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_reader = pending.clone();
