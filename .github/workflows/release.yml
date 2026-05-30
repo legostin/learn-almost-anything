@@ -14,10 +14,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon (M-series). Native build on the macos-latest runner.
           - platform: macos-latest
-            label: macos-universal
-            args: --target universal-apple-darwin
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            label: macos-arm64
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin
+          # Intel Macs. Cross-compile from the arm64 runner to x86_64.
+          - platform: macos-latest
+            label: macos-x64
+            args: --target x86_64-apple-darwin
+            rust-targets: x86_64-apple-darwin
           - platform: windows-latest
             label: windows-x64
             args: ''

@@ -38,7 +38,7 @@
 
 Grab a prebuilt binary from the [Releases](https://github.com/legostin/learn-almost-anything/releases) page:
 
-- **macOS** — universal `.dmg` (Apple Silicon + Intel). Unsigned: on first launch, **right-click → Open** to bypass Gatekeeper.
+- **macOS** — pick the DMG for your chip: `…_aarch64.dmg` for **Apple Silicon (M1/M2/M3/M4)**, `…_x64.dmg` for **Intel**. Unsigned: on first launch, **right-click → Open** to bypass Gatekeeper.
 - **Windows** — `.msi` / `.exe` for x64. SmartScreen will warn — click "More info" → "Run anyway".
 
 The UI starts in English; switch to Russian in Settings if you prefer.
