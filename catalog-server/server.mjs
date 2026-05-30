@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { Buffer } from "node:buffer";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +14,10 @@ const COURSE_DIR = path.join(DATA_DIR, "courses");
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_MARK_PATH = path.join(SERVER_DIR, "assets", "app-mark.png");
 const UPLOAD_TOKEN = (process.env.CATALOG_UPLOAD_TOKEN || "").trim();
-const MAX_UPLOAD_BYTES = Number(process.env.CATALOG_MAX_UPLOAD_BYTES || 80 * 1024 * 1024);
+const MAX_UPLOAD_BYTES = positiveNumber(process.env.CATALOG_MAX_UPLOAD_BYTES, 80 * 1024 * 1024);
+const WRITE_RATE_LIMIT = positiveNumber(process.env.CATALOG_WRITE_RATE_LIMIT, 30);
+const WRITE_RATE_WINDOW_MS = positiveNumber(process.env.CATALOG_WRITE_RATE_WINDOW_MS, 60 * 60 * 1000);
+const writeAttempts = new Map();
 
 await mkdir(COURSE_DIR, { recursive: true });
 
@@ -85,10 +89,10 @@ server.listen(PORT, HOST, () => {
 });
 
 async function handleUpload(req, res, requestedId = "") {
-  if (UPLOAD_TOKEN) {
-    const auth = req.headers.authorization || "";
-    if (auth !== `Bearer ${UPLOAD_TOKEN}`) return text(res, 401, "unauthorized");
-  }
+  const rate = checkWriteRate(req);
+  if (!rate.ok) return rateLimited(res, rate.retryAfter);
+  if (!requireWriteAuth(req, res)) return;
+
   const body = await readBody(req);
   let pkg;
   try {
@@ -105,11 +109,82 @@ async function handleUpload(req, res, requestedId = "") {
   if (existing && packageVersion(existing) > version) {
     return text(res, 409, "uploaded package is older than the current catalog version");
   }
-  await writeFile(packagePath(id), JSON.stringify(pkg, null, 2));
+  await writePackage(id, pkg);
   return json(res, 200, {
     id,
     url: `${PUBLIC_ORIGIN}/course/${encodeURIComponent(id)}`,
     version,
+  });
+}
+
+async function writePackage(id, pkg) {
+  const finalPath = packagePath(id);
+  const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpPath, JSON.stringify(pkg, null, 2));
+  await rename(tmpPath, finalPath);
+}
+
+function requireWriteAuth(req, res) {
+  if (!UPLOAD_TOKEN) {
+    return text(res, 503, "catalog publishing is not configured");
+  }
+
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+  if (!secureEqual(token, UPLOAD_TOKEN)) return text(res, 401, "unauthorized");
+  return true;
+}
+
+function secureEqual(left, right) {
+  const leftBytes = Buffer.from(String(left));
+  const rightBytes = Buffer.from(String(right));
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function checkWriteRate(req) {
+  if (!Number.isFinite(WRITE_RATE_LIMIT) || WRITE_RATE_LIMIT <= 0) return { ok: true };
+
+  const now = Date.now();
+  const key = clientIp(req);
+  let entry = writeAttempts.get(key);
+  if (!entry || entry.resetAt <= now) {
+    entry = { count: 0, resetAt: now + WRITE_RATE_WINDOW_MS };
+    writeAttempts.set(key, entry);
+  }
+
+  entry.count += 1;
+  pruneWriteAttempts(now);
+
+  if (entry.count <= WRITE_RATE_LIMIT) return { ok: true };
+  return {
+    ok: false,
+    retryAfter: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+  };
+}
+
+function clientIp(req) {
+  const realIp = req.headers["x-real-ip"];
+  if (typeof realIp === "string" && realIp.trim()) return realIp.trim();
+
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  return req.socket.remoteAddress || "unknown";
+}
+
+function pruneWriteAttempts(now) {
+  if (writeAttempts.size < 1000) return;
+  for (const [key, entry] of writeAttempts) {
+    if (entry.resetAt <= now) writeAttempts.delete(key);
+  }
+}
+
+function rateLimited(res, retryAfter) {
+  send(res, 429, "too many write requests", {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Retry-After": String(retryAfter),
   });
 }
 
@@ -194,6 +269,11 @@ function validatePackage(pkg) {
 
 function packageVersion(pkg) {
   return Number(pkg.course?.catalog_version || pkg.exported_at || pkg.course?.updated_at || 0);
+}
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readBody(req) {
