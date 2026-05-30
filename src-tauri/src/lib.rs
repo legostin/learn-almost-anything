@@ -2818,6 +2818,22 @@ fn accept_structure_refinement(
     Ok(saved)
 }
 
+// On Windows, Tauri's resource_dir() returns a verbatim extended-length path
+// (`\\?\C:\...`). Node's main-module resolver chokes on that prefix and aborts
+// at startup with `EISDIR: lstat 'C:'`, which kills the sidecar before it can
+// serve a single request (the user sees a broken-pipe "os error 232"). Strip
+// the prefix so the path we hand to `node` is a plain one. No-op elsewhere.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
 fn sidecar_script_path(app: &AppHandle) -> PathBuf {
     // Production: scripts/copy-sidecar.mjs copies sidecar/ into src-tauri/
     // before bundling, and tauri.conf "bundle.resources" ships it; at runtime
@@ -2825,7 +2841,7 @@ fn sidecar_script_path(app: &AppHandle) -> PathBuf {
     if let Ok(res) = app.path().resource_dir() {
         let bundled = res.join("sidecar").join("src").join("index.mjs");
         if bundled.exists() {
-            return bundled;
+            return strip_verbatim_prefix(bundled);
         }
     }
     // Dev fallback: sidecar/ is a sibling of src-tauri/ in the source tree.
