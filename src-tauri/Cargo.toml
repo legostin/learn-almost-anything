@@ -28,8 +28,9 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 ureq = { version = "2", features = ["json", "tls"] }
 urlencoding = "2"
+url = "2"
+regex = "1"
 base64 = "0.22"
 tiny_http = "0.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-

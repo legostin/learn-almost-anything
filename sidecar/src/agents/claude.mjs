@@ -17,9 +17,20 @@ import {
   rendererAvailable,
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
+import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
+}
+
+function normalizeCourseTitle(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .trim()
+    .replace(/^["'«“”]+|["'»“”]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 80)
+    .trim();
 }
 
 async function runOnce(prompt, opts) {
@@ -54,6 +65,24 @@ function modelOptions(modelConfig) {
 //   allowedTools, deny anything else instantly instead of prompting (no hang).
 const AGENT_ISOLATION = { settingSources: [], permissionMode: "dontAsk" };
 
+const REFERENCE_MCP_ALLOWED_TOOLS = [
+  "mcp__context7__resolve-library-id",
+  "mcp__context7__query-docs",
+  "mcp__mediawiki__list-wikis",
+  "mcp__mediawiki__search-page",
+  "mcp__mediawiki__search-page-by-prefix",
+  "mcp__mediawiki__get-page",
+  "mcp__mediawiki__get-pages",
+  "mcp__mediawiki__get-file",
+  "mcp__mediawiki__get-category-members",
+  "mcp__mediawiki__get-links-here",
+  "mcp__mediawiki__get-page-history",
+  "mcp__mediawiki__get-revision",
+  "mcp__mediawiki__get-site-info",
+  "mcp__mediawiki__parse-wikitext",
+  "mcp__mediawiki__compare-pages",
+];
+
 // Builds Claude Agent SDK options. When `web` is set, the agent gets the SDK's
 // built-in WebSearch + WebFetch tools — native internet on subscription auth,
 // no key needed. When braveApiKey is provided, the Brave MCP server is added
@@ -74,9 +103,16 @@ function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig } = {}) {
     // pre-approved (verified WebFetch runs for any domain without prompting,
     // so it can't hang the way it did under the default permission mode).
     allowedTools.push("WebSearch", "WebFetch");
+    options.mcpServers = {
+      ...(options.mcpServers || {}),
+      context7: { type: "stdio", ...context7StdioServer() },
+      mediawiki: { type: "stdio", ...mediawikiStdioServer() },
+    };
+    allowedTools.push(...REFERENCE_MCP_ALLOWED_TOOLS);
   }
   if (braveApiKey) {
     options.mcpServers = {
+      ...(options.mcpServers || {}),
       brave: { type: "stdio", ...braveStdioServer(braveApiKey) },
     };
     allowedTools.push("mcp__brave__brave_web_search", "mcp__brave__brave_image_search");
@@ -122,7 +158,16 @@ async function runStreamed(prompt, onProgress, opts) {
               detail = typeof input.url === "string" ? input.url : "";
             } else {
               label = "searching";
-              detail = typeof input.query === "string" ? input.query : "";
+              detail =
+                typeof input.query === "string"
+                  ? input.query
+                  : typeof input.title === "string"
+                    ? input.title
+                    : typeof input.libraryName === "string"
+                      ? input.libraryName
+                      : typeof input.libraryId === "string"
+                        ? input.libraryId
+                        : "";
             }
             onProgress({ label, detail: detail || name });
           }
@@ -267,24 +312,57 @@ You may add visual-aid widgets where they meaningfully help. Mark insertion
 points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
+  ::widget{type="gallery" id="gal-1"}      (2-6 related images shown together)
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
-Use 0-4 widgets total — skip them if the topic is purely textual prose.
+Use 0-4 widgets total, counting one gallery as one widget. Skip widgets if the
+topic is purely textual prose. Do a silent paragraph-by-paragraph visual pass:
+for each paragraph, decide whether an image, gallery, diagram, video, or
+interactive widget would make the learner understand faster. Add visuals where
+they are genuinely useful; don't decorate every paragraph.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
-IMAGE WIDGETS — for each, set "mode":
+IMAGE AND GALLERY WIDGETS — for each image item, set "mode":
   • "search" — a real, specific, existing thing that we should FIND, not invent:
-    a particular famous artwork (e.g. a specific Leonardo da Vinci painting),
-    a real photo of a real place/person/object/event, a historical artifact,
-    a real screenshot. Write "description" as a precise search target.
-  • "generate" — a custom conceptual/explanatory illustration that won't exist
-    as a findable photo: a stylized scene, an abstract concept made visual, a
-    specific detailed composition you describe. Write "description" as a rich,
-    detailed prompt for an image generator (subject, style, composition).
-  When unsure, prefer "search" — a real image beats an invented one for facts.
+    a named artwork by a known artist, a real person/place/object/event, a
+    historical artifact, a museum hall, a map, a real diagram/plan, or a real
+    software screenshot. Write "description" as a precise search target.
+  • "generate" — a custom conceptual/explanatory illustration that probably
+    will not exist as a findable photo: an ideal artist workspace, what should
+    be on a table, a staged practice setup, a stylized scene, an abstract
+    concept made visual, or a detailed composition you describe.
+    Write "description" as a rich generation prompt (subject, style,
+    composition, lighting, important objects).
+
+Hard visual sourcing rules:
+  • Famous artwork by a known artist -> ALWAYS "search", never "generate".
+    Prefer museum, Wikimedia, official collection, archive, or other credible
+    source pages. If the exact artwork cannot be found, skip the image rather
+    than invent it.
+  • Real people, real places, museum halls, historical artifacts, architecture,
+    maps, plans, technical diagrams, and software screenshots -> "search".
+    Never generate pseudo-photographs of real people/places, fake maps, fake
+    museum plans, fake historical documents, or pseudo-screenshots.
+  • Software/program UI -> search for a real screenshot or official docs image.
+    If none is confidently available, describe the UI in text or use a Mermaid
+    diagram; do NOT generate a fake screenshot.
+  • Real map/plan/schema (e.g. Hermitage floor plan) -> search for the real
+    image/source. If not found, do not hallucinate the plan. Use a textual
+    explanation or high-level Mermaid diagram only if it is clearly conceptual.
+  • Artist workspace, table setup, material layout, abstract workflow, or
+    custom teaching scene -> usually "generate", because a perfectly matching
+    real photo is unlikely.
+  • When unsure whether something exists, try search first. Use "generate" only
+    when the image is intentionally illustrative rather than evidentiary.
+
+Use a gallery instead of a single image when the paragraph benefits from
+comparison or several examples: 2-6 works by an artist, multiple views of a
+museum hall, a sequence of historical photos, several portraits of one person
+from a period, before/after examples, or multiple UI states. Keep each gallery
+coherent: one reason to look at all images together, not a random dump.
 
 VIDEO WIDGETS: only include a video if you find one that is RECOMMENDED by
 real people elsewhere — a Reddit/forum thread that calls it out, a "best
@@ -331,14 +409,26 @@ You have live web access — use it:
   ranks first.
 - WebFetch — open a specific URL and read the actual page before relying on
   it; don't cite a source you only saw as a search snippet.
+- mcp__context7__resolve-library-id + mcp__context7__query-docs — for current
+  library/framework/API/CLI/cloud-service documentation. Use these for
+  programming and tool-specific course material instead of relying on memory.
+- mcp__mediawiki__search-page / get-page / get-file — read-only access to
+  Wikimedia Commons, English Wikipedia, and Russian Wikipedia. Use these for
+  artworks, museum objects, public-domain media, encyclopedia pages, real maps,
+  file metadata, and Commons image URLs before falling back to general search.
 ${
   braveApiKey
     ? `- mcp__brave__brave_image_search — find REAL image URLs for image
-  widgets. When you find a good one, set "url" to the direct image URL
-  and "source" to the page url. If nothing fits, leave url empty —
-  the UI will show a placeholder + your description.
+  and gallery widgets. When you find a good one, set "url" to the direct
+  image URL and "source" to the page url. If nothing fits, leave url empty —
+  the app will search again or show a placeholder/generate if mode permits.
 `
-    : ""
+    : `For image and gallery widgets, use WebSearch/WebFetch to find credible
+  public source pages when the exact real image matters. Put the page URL in
+  "source"; put "url" only if you are confident it is a direct real image URL.
+  Source-only is useful: the app will extract og:image, srcset, JSON-LD, and
+  large image assets from the page later.
+`
 }
 Research efficiently: a few targeted lookups (about 3-4 web calls total),
 then STOP and write. Finishing the article matters more than exhaustive
@@ -371,6 +461,7 @@ Output ONLY a JSON object on a single line, no prose, no markdown fence:
 
 Each widget object:
 - image: {"id":"img-1","type":"image","mode":"search|generate","description":"<what to depict / search target / generation prompt, in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}
+- gallery: {"id":"gal-1","type":"gallery","caption":"<short caption in ${lang}>","items":[{"mode":"search|generate","description":"<search target or generation prompt in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}]}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 - video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
 - interactive: {"id":"int-1","type":"interactive","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","html":"<body content>","css":"<stylesheet>","js":"<script>","height":320}
@@ -410,6 +501,33 @@ function normalizeWidgets(raw) {
           ? { source: w.source.trim() }
           : {}),
       };
+    } else if (w.type === "gallery") {
+      const items = Array.isArray(w.items)
+        ? w.items
+            .map((item) => {
+              if (!item) return null;
+              const url = typeof item.url === "string" ? item.url.trim() : "";
+              return {
+                mode: item.mode === "generate" ? "generate" : "search",
+                description:
+                  typeof item.description === "string" ? item.description.trim() : "",
+                alt: typeof item.alt === "string" ? item.alt.trim() : "",
+                ...(url ? { url } : {}),
+                ...(typeof item.source === "string" && item.source.trim()
+                  ? { source: item.source.trim() }
+                  : {}),
+                placeholder: !url,
+              };
+            })
+            .filter((item) => item && (item.description || item.url))
+        : [];
+      if (items.length > 0) {
+        out[id] = {
+          type: "gallery",
+          caption: typeof w.caption === "string" ? w.caption.trim() : "",
+          items: items.slice(0, 6),
+        };
+      }
     } else if (w.type === "diagram") {
       out[id] = {
         type: "diagram",
@@ -846,7 +964,7 @@ export async function refineStructure(params, ctx) {
 /**
  * Build a curriculum tree from the course.md (topic + wizard answers).
  * @param {{ courseMd: string, topic: string, language: string }} params
- * @returns {Promise<{ modules: Array<{ title: string, summary?: string, submodules: Array<{ title: string, summary?: string }> }> }>}
+ * @returns {Promise<{ title: string, modules: Array<{ title: string, summary?: string, submodules: Array<{ title: string, summary?: string }> }> }>}
  */
 export async function buildStructure({ courseMd, topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
@@ -865,15 +983,23 @@ Below is the course brief — a markdown file with the wizard Q&A.
 ${courseMd}
 </course-md>
 
-Design a curriculum: a list of top-level modules, each with a few submodules.
+First generate a short display title for the whole course. It must NOT copy the
+learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
+written in language "${lang}", with no quotes and no "course about/on" wrapper.
 
-Research first. You have live web access (WebSearch + WebFetch) — actually use
-it, but keep it focused (a few targeted searches are enough; don't
+Then design a curriculum: a list of top-level modules, each with a few submodules.
+
+Research first. You have live web access (WebSearch + WebFetch) plus read-only
+Context7 and Wikimedia/MediaWiki MCP tools — actually use the right source, but
+keep it focused (a few targeted lookups are enough; don't
 over-research). Before sketching anything, look up how this subject is taught
 in serious places: university programs (especially the best ones —
 top art academies, top engineering schools, etc. as relevant), well-regarded
 online courses, established certifications, and the canonical reading paths
-practitioners recommend. Use the convergence of those programs as your skeleton.
+practitioners recommend. For programming/framework/API topics, use Context7 for
+current docs. For art/history/museum subjects and public-domain media, use
+MediaWiki/Wikimedia where relevant. Use the convergence of those programs as
+your skeleton.
 If multiple traditions exist (e.g. русская академическая vs European atelier),
 acknowledge them and pick the one that best fits the learner's goals from the
 brief. Never improvise a structure from intuition when established programs
@@ -889,7 +1015,7 @@ ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
-{"modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
+{"title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
   const text = await runStreamed(prompt, ctx?.progress, { web: true, modelConfig });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
@@ -911,14 +1037,14 @@ Shape:
         })),
     };
   });
-  return { modules };
+  return { title: normalizeCourseTitle(parsed?.title), modules };
 }
 
 /**
  * Generate clarifying questions for a course topic, in the course's language.
  * Each question has a small set of realistic answer options.
  * @param {{ topic: string, language: string }} params
- * @returns {Promise<{ questions: Array<{ text: string, options: string[] }> }>}
+ * @returns {Promise<{ title: string, questions: Array<{ text: string, options: string[] }> }>}
  */
 /**
  * Generate a multiple-choice test for a submodule, based on its article.
@@ -1250,6 +1376,66 @@ Output ONLY a single-line JSON object:
   };
 }
 
+/**
+ * Search the public web for image candidates when Brave image search is not
+ * configured. The Rust layer will fetch source pages and extract og:image,
+ * srcset, JSON-LD, and large img assets; this stage finds credible pages.
+ * @param {{language:string, description:string, alt?:string, topic:string, query:string, modelConfig?:object}} params
+ * @returns {Promise<{candidates:{title:string,source:string,url:string,reason:string}[], refinedQuery:string}>}
+ */
+export async function searchImageCandidates(params, ctx) {
+  const { language, description, alt, topic, query: searchQuery, modelConfig } = params;
+  const lang = (language || "en").trim();
+  const prompt = `Find public image candidates for a course article on "${topic}".
+
+The image slot needs, in language "${lang}":
+  description: "${description}"
+${alt ? `  alt text: "${alt}"\n` : ""}
+Current search query: "${searchQuery || description}"
+
+Use WebSearch and, when useful, WebFetch. Return source pages that are likely to
+contain the real image; the app can extract og:image, twitter:image, srcset,
+JSON-LD ImageObject, and large <img> assets from those pages.
+
+Rules:
+- Search only public pages. Do not use login-only, paywalled, private, or DRM
+  sources.
+- Prefer museum/official collection pages, Wikimedia/Wikipedia file pages,
+  archives, official documentation, and reputable publications.
+- For famous artworks, real people, real places, museum halls, maps/plans,
+  historical artifacts, technical diagrams, and software screenshots: find the
+  real source. Never invent or suggest generated substitutes.
+- For software screenshots, prefer official docs/product pages. Do not return
+  pseudo-screenshots.
+- It is OK if "url" is empty. Put a direct image URL there only when you are
+  confident it is a real image file/asset. Always put the public page in
+  "source" when available.
+- Return 0-8 candidates. If nothing credible is found, return [] and provide a
+  better refinedQuery.
+
+Output ONLY single-line JSON:
+{"candidates":[{"title":"...","source":"https://...","url":"https://... or empty","reason":"short reason in ${lang}"}],"refinedQuery":"english query for another try or empty"}`;
+
+  ctx?.progress?.({ label: "searching images", detail: searchQuery || description });
+  const text = await runStreamed(prompt, ctx?.progress, { web: true, modelConfig });
+  const parsed = extractJson(text);
+  const candidates = Array.isArray(parsed?.candidates)
+    ? parsed.candidates
+        .filter((c) => c && (typeof c.source === "string" || typeof c.url === "string"))
+        .slice(0, 8)
+        .map((c) => ({
+          title: String(c.title || "").slice(0, 200),
+          source: String(c.source || ""),
+          url: String(c.url || ""),
+          reason: String(c.reason || "").slice(0, 400),
+        }))
+    : [];
+  return {
+    candidates,
+    refinedQuery: typeof parsed?.refinedQuery === "string" ? parsed.refinedQuery : "",
+  };
+}
+
 export async function wizardQuestions({ topic, language, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
@@ -1285,12 +1471,16 @@ the learner.
 The user will also have a free-text fallback for both modes, so do NOT add
 an "other" option.
 
+Also generate a short display title for the whole course. It must NOT copy the
+learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
+written in language "${lang}", with no quotes and no "course about/on" wrapper.
+
 Write everything in language "${lang}".
 
 ${terminologyGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
-Shape: {"questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
+Shape: {"title":"...","questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.questions)) {
@@ -1312,5 +1502,46 @@ Shape: {"questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
     })
     .filter(Boolean);
   if (questions.length === 0) throw new Error("LLM returned zero valid questions");
-  return { questions };
+  return { title: normalizeCourseTitle(parsed?.title), questions };
+}
+
+export async function suggestCourseIdea({ courses, language, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const courseList = Array.isArray(courses) ? courses.slice(0, 50) : [];
+  const prompt = `You are helping choose the next useful course for a learner.
+The app already has these local courses:
+${JSON.stringify(courseList, null, 2)}
+
+Suggest exactly ONE NEW standalone course idea. It should be adjacent to,
+deeper than, or usefully complementary to the existing courses, but it must be
+a separate course topic, not a continuation of an existing course.
+
+Hard rules:
+- Do not duplicate or lightly rename any existing course topic/title.
+- Do not suggest the next lesson, module, submodule, unit, homework, or visit
+  inside an existing course.
+- Do not use action wording like "continue", "resume", "lesson 1", "unit 2",
+  "next module", or "part 2".
+- Do not return the current focus course with a narrower lesson title.
+- The "topic" must be suitable as the raw topic for creating a brand-new course.
+- If the list is empty, suggest a strong first course for a curious learner.
+- Avoid generic productivity/self-help suggestions.
+
+Keep this fast: do not research the web. Use only the course list above and
+general judgment. Write the topic and title in language code "${lang}".
+
+${terminologyGuide(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence.
+Shape: {"topic":"...","title":"...","reason":"..."}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  const topic = normalizeCourseTitle(parsed?.topic);
+  if (!topic) throw new Error("Claude response missing topic");
+  return {
+    topic,
+    title: normalizeCourseTitle(parsed?.title) || topic,
+    reason: typeof parsed?.reason === "string" ? parsed.reason.trim().slice(0, 240) : "",
+  };
 }

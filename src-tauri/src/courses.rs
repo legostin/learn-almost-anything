@@ -46,12 +46,21 @@ fn render_course_md(course: &db::Course, answers: &[QnA]) -> String {
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str(&format!("id: {}\n", course.id));
+    if let Some(title) = course.title.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("title: {}\n", title.trim()));
+    }
     out.push_str(&format!("topic: {}\n", course.topic));
     out.push_str(&format!("language: {}\n", course.language));
     out.push_str(&format!("created_at: {}\n", course.created_at));
     out.push_str("---\n\n");
 
-    out.push_str("## Topic\n");
+    if let Some(title) = course.title.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("## Course title\n");
+        out.push_str(title.trim());
+        out.push_str("\n\n");
+    }
+
+    out.push_str("## Learning request\n");
     out.push_str(&course.topic);
     out.push_str("\n\n");
 
@@ -84,6 +93,37 @@ pub fn save_wizard_answers(
     Ok(())
 }
 
+pub fn write_wizard_questions(
+    paths: &AppPaths,
+    course_id: &str,
+    questions: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let has_questions = questions.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    if !has_questions {
+        return Ok(());
+    }
+    let dir = paths.course_dir(course_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(questions).unwrap_or_else(|_| "[]".to_string());
+    fs::write(dir.join("wizard_questions.json"), json)?;
+    Ok(())
+}
+
+pub fn read_wizard_questions(
+    paths: &AppPaths,
+    course_id: &str,
+) -> Result<serde_json::Value, CourseError> {
+    let path = paths.course_dir(course_id).join("wizard_questions.json");
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Value::Array(vec![]));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::Value::Array(vec![])))
+}
+
 pub fn read_course_md(paths: &AppPaths, course_id: &str) -> Result<String, CourseError> {
     let path = paths.course_dir(course_id).join("course.md");
     Ok(fs::read_to_string(path)?)
@@ -107,6 +147,8 @@ pub struct SidecarModule {
 
 #[derive(Debug, Deserialize)]
 pub struct SidecarTree {
+    #[serde(default)]
+    pub title: Option<String>,
     pub modules: Vec<SidecarModule>,
 }
 
@@ -123,6 +165,8 @@ pub struct ModuleNode {
     pub generation_state: String,
     #[serde(default)]
     pub test_passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_passed_at: Option<i64>,
     pub submodules: Vec<ModuleNode>,
 }
 
@@ -138,6 +182,10 @@ pub fn install_structure(
     course_id: &str,
     raw: SidecarTree,
 ) -> Result<StructureFile, CourseError> {
+    if let Some(title) = raw.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        db::set_course_title(conn, course_id, title, now_secs()?)?;
+    }
+
     // assign UUIDs in a single pass
     let modules: Vec<ModuleNode> = raw
         .modules
@@ -148,6 +196,7 @@ pub fn install_structure(
             summary: m.summary.unwrap_or_default(),
             generation_state: default_pending(),
             test_passed: false,
+            test_passed_at: None,
             submodules: m
                 .submodules
                 .into_iter()
@@ -157,6 +206,7 @@ pub fn install_structure(
                     summary: s.summary.unwrap_or_default(),
                     generation_state: default_pending(),
                     test_passed: false,
+                    test_passed_at: None,
                     submodules: vec![],
                 })
                 .collect(),
@@ -309,6 +359,7 @@ pub fn save_structure(
                 summary: sub_summary,
                 generation_state: default_pending(),
                 test_passed: false,
+                test_passed_at: None,
                 submodules: vec![],
             });
         }
@@ -318,6 +369,7 @@ pub fn save_structure(
             summary,
             generation_state: default_pending(),
             test_passed: false,
+            test_passed_at: None,
             submodules: out_subs,
         });
     }
@@ -929,14 +981,16 @@ pub fn load_structure(
     course_id: &str,
 ) -> Result<StructureFile, CourseError> {
     let rows = db::list_modules(conn, course_id)?;
-    let passed = db::passed_submodule_ids(conn, course_id)?;
+    let passed = db::passed_submodules(conn, course_id)?;
     let mut top: Vec<ModuleNode> = Vec::new();
     let mut sub_by_parent: std::collections::HashMap<String, Vec<ModuleNode>> =
         std::collections::HashMap::new();
 
     for m in rows {
+        let test_passed_at = passed.get(&m.id).copied();
         let node = ModuleNode {
-            test_passed: passed.contains(&m.id),
+            test_passed: test_passed_at.is_some(),
+            test_passed_at,
             id: m.id.clone(),
             title: m.title,
             summary: m.summary.unwrap_or_default(),

@@ -6,7 +6,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -16,7 +19,8 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import QRCode from "qrcode";
 import { convertFileSrc, invoke, listen, isTauri } from "./transport";
-import { useLang, useT } from "./i18n";
+import { useLang, useT, type Lang } from "./i18n";
+import appMark from "./assets/app-mark.png";
 import "./App.css";
 
 type Agent = "claude" | "codex";
@@ -24,12 +28,18 @@ type Agent = "claude" | "codex";
 type Course = {
   id: string;
   topic: string;
+  title?: string | null;
   language: string;
   status: string;
   agent: Agent;
   created_at: number;
   updated_at: number;
 };
+
+function courseTitle(course: Course, fallback: string) {
+  if (course.title === undefined) return course.topic || fallback;
+  return course.title?.trim() || fallback;
+}
 
 type Question = { text: string; options: string[]; multi?: boolean };
 
@@ -41,6 +51,7 @@ type ModuleNode = {
   summary: string;
   generation_state: GenState;
   test_passed?: boolean;
+  test_passed_at?: number | null;
   submodules: ModuleNode[];
 };
 
@@ -73,6 +84,30 @@ type JobEvent = {
   result?: unknown;
   error?: string;
 };
+
+type CourseSuggestionEvent = {
+  ok: boolean;
+  topic?: string;
+  title?: string;
+  reason?: string;
+  agent?: Agent;
+  language?: string;
+  error?: string;
+};
+
+type SuggestedCourseIdea = {
+  topic: string;
+  title: string;
+  reason?: string;
+  agent: Agent;
+  language: string;
+};
+
+type CourseSuggestionState =
+  | { status: "idle" }
+  | { status: "running" }
+  | { status: "ready"; idea: SuggestedCourseIdea }
+  | { status: "error"; error: string };
 
 type View =
   | { kind: "empty" }
@@ -107,42 +142,393 @@ type BackendModels = { planning: StageModel; writing: StageModel; tests: StageMo
 type ModelConfig = { claude: BackendModels; codex: BackendModels };
 type ModelBackend = "claude" | "codex";
 type ModelCategory = "planning" | "writing" | "tests";
+type AgentAvailability = { claude: boolean; codex: boolean };
 type ModelInfoLite = {
   value: string;
   label: string;
   description?: string;
   effortLevels: string[];
 };
+type McpServerStatus = {
+  id: string;
+  name: string;
+  enabled_for: string[];
+  tools: string[];
+  source: string;
+};
+type SettingsStatus = {
+  brave_configured: boolean;
+  gemini_configured: boolean;
+  mcp_servers?: McpServerStatus[];
+  tts_engine: string;
+  tts_voice: string;
+  gemini_image_model: string;
+  gemini_tts_model: string;
+};
+type Tagline = { ru: string; en: string };
+
+const HOME_TAGLINES: Tagline[] = [
+  {
+    ru: "Учёба превращает любопытство в навык, а навык — в свободу действовать.",
+    en: "Learning turns curiosity into skill, and skill into freedom to act.",
+  },
+  {
+    ru: "Каждый хороший вопрос сокращает путь между незнанием и делом.",
+    en: "Every good question shortens the path between not knowing and doing.",
+  },
+  {
+    ru: "Знание становится вашим только после практики, ошибки и повторения.",
+    en: "Knowledge becomes yours only after practice, mistakes and repetition.",
+  },
+  {
+    ru: "Учиться — значит каждый день чуть точнее видеть мир.",
+    en: "To learn is to see the world a little more clearly every day.",
+  },
+  {
+    ru: "Сложная тема сдаётся не силе воли, а маленьким регулярным шагам.",
+    en: "A hard topic yields not to willpower, but to small regular steps.",
+  },
+  {
+    ru: "Курс полезен, когда после него проще думать, выбирать и делать.",
+    en: "A course is useful when it makes thinking, choosing and doing easier.",
+  },
+  {
+    ru: "Век живи — век учись; особенно когда знания сразу переходят в дело.",
+    en: "Keep learning for life, especially when knowledge moves straight into action.",
+  },
+  {
+    ru: "Сенека напоминал: пока живёшь, учись жить.",
+    en: "Seneca reminds us: while you live, keep learning how to live.",
+  },
+  {
+    ru: "Сократовское «я знаю, что ничего не знаю» — хорошее начало любого курса.",
+    en: "The Socratic “I know that I know nothing” is a good start for any course.",
+  },
+  {
+    ru: "Фрэнсис Бэкон говорил коротко: знание — сила. Практика делает её вашей.",
+    en: "Francis Bacon put it shortly: knowledge is power. Practice makes it yours.",
+  },
+  {
+    ru: "Конфуций ценил учёбу с повторением: понимание крепнет, когда к нему возвращаются.",
+    en: "Confucius valued learning with review: understanding grows when you return to it.",
+  },
+  {
+    ru: "Марк Аврелий искал ясность в ежедневных заметках; обучение начинается так же.",
+    en: "Marcus Aurelius sought clarity in daily notes; learning begins the same way.",
+  },
+  {
+    ru: "Леонардо видел в учёбе бесконечный источник энергии для дела.",
+    en: "Leonardo saw learning as an endless source of energy for work.",
+  },
+  {
+    ru: "Монтень учил пробовать мысль на себе: хороший курс делает именно это.",
+    en: "Montaigne tested ideas on himself; a good course does the same.",
+  },
+  {
+    ru: "Книга даёт маршрут, но понимание появляется на ваших остановках.",
+    en: "A book gives the route, but understanding appears at your own stops.",
+  },
+  {
+    ru: "Глава за главой, задача за задачей — и тема перестаёт быть чужой.",
+    en: "Chapter by chapter, exercise by exercise, the topic stops being foreign.",
+  },
+  {
+    ru: "Учебник открывает дверь; ваши вопросы решают, насколько далеко вы зайдёте.",
+    en: "A textbook opens the door; your questions decide how far you go.",
+  },
+  {
+    ru: "Хорошая лекция не заменяет мышление, а запускает его.",
+    en: "A good lecture does not replace thinking; it starts it.",
+  },
+  {
+    ru: "Читать полезно, когда после чтения меняется способ действовать.",
+    en: "Reading is useful when it changes how you act afterward.",
+  },
+  {
+    ru: "Настоящее понимание обычно начинается после первого «не получилось».",
+    en: "Real understanding often begins after the first “that did not work.”",
+  },
+  {
+    ru: "Память любит ритм: немного сегодня, немного завтра, снова через неделю.",
+    en: "Memory likes rhythm: a little today, a little tomorrow, again next week.",
+  },
+  {
+    ru: "Каждый модуль должен оставлять след: идею, упражнение или новый вопрос.",
+    en: "Every module should leave a mark: an idea, an exercise or a new question.",
+  },
+  {
+    ru: "Обучение работает лучше, когда материал спорит с вашей привычной картиной мира.",
+    en: "Learning works better when the material challenges your usual picture of the world.",
+  },
+  {
+    ru: "Полезный курс собирает не факты в кучу, а порядок в голове.",
+    en: "A useful course does not pile up facts; it creates order in the mind.",
+  },
+  {
+    ru: "Тема становится вашей, когда вы можете объяснить её без шпаргалки.",
+    en: "A topic becomes yours when you can explain it without notes.",
+  },
+  {
+    ru: "Лучший конспект — тот, который завтра поможет решить задачу.",
+    en: "The best notes are the ones that help solve a problem tomorrow.",
+  },
+  {
+    ru: "Навык растёт там, где есть обратная связь, повторение и честная ошибка.",
+    en: "Skill grows where there is feedback, repetition and an honest mistake.",
+  },
+  {
+    ru: "Не нужно знать всё сразу; нужно знать следующий понятный шаг.",
+    en: "You do not need to know everything at once; you need the next clear step.",
+  },
+  {
+    ru: "Любая сложная область становится картой, если отмечать на ней пройденные места.",
+    en: "Any complex field becomes a map when you mark the places already crossed.",
+  },
+  {
+    ru: "Учёба — это тихий способ увеличить будущие варианты выбора.",
+    en: "Learning is a quiet way to increase your future choices.",
+  },
+  {
+    ru: "Когда знания связаны с задачей, мотивация перестаёт быть отдельной проблемой.",
+    en: "When knowledge is tied to a task, motivation stops being a separate problem.",
+  },
+  {
+    ru: "Хорошее обучение не обещает лёгкость; оно делает сложность управляемой.",
+    en: "Good learning does not promise ease; it makes complexity manageable.",
+  },
+  {
+    ru: "Сегодняшний вопрос часто становится завтрашним инструментом.",
+    en: "Today’s question often becomes tomorrow’s tool.",
+  },
+  {
+    ru: "Понимание любит структуру: сначала карта, потом дорога, потом скорость.",
+    en: "Understanding likes structure: first the map, then the road, then speed.",
+  },
+  {
+    ru: "Каждый завершённый урок — маленькое доказательство, что тема поддаётся.",
+    en: "Every finished lesson is small proof that the topic can be mastered.",
+  },
+  {
+    ru: "Учиться полезно не ради галочки, а ради новой степени свободы.",
+    en: "Learning matters not for a checkmark, but for a new degree of freedom.",
+  },
+];
+
+const HOME_TITLE_FONT_CLASSES = [
+  "home-title-font-serif",
+  "home-title-font-humanist",
+  "home-title-font-condensed",
+  "home-title-font-mono",
+  "home-title-font-display",
+  "home-title-font-hand",
+];
+const HOME_TITLE_WEIGHT_CLASSES = [
+  "home-title-weight-400",
+  "home-title-weight-600",
+  "home-title-weight-700",
+  "home-title-weight-800",
+  "home-title-weight-900",
+];
+const HOME_TITLE_SLANT_CLASSES = ["home-title-slant-normal", "home-title-slant-italic"];
+
+type HomeTitleTextStyles = {
+  main: string;
+  almost: string;
+};
 
 const jobKey = (courseId: string, kind: JobKind) => `${courseId}:${kind}`;
 
+const COURSE_LANGUAGE_STORAGE_KEY = "learnAnything.courseLanguage";
+const RECENT_COURSES_STORAGE_KEY = "learnAnything.recentCourses";
+const COURSE_LANGUAGES = [
+  { code: "en", nameEn: "English", nameRu: "Английский", nativeName: "English" },
+  { code: "zh", nameEn: "Chinese", nameRu: "Китайский", nativeName: "中文" },
+  { code: "hi", nameEn: "Hindi", nameRu: "Хинди", nativeName: "हिन्दी" },
+  { code: "es", nameEn: "Spanish", nameRu: "Испанский", nativeName: "Español" },
+  { code: "fr", nameEn: "French", nameRu: "Французский", nativeName: "Français" },
+  { code: "ar", nameEn: "Arabic", nameRu: "Арабский", nativeName: "العربية" },
+  { code: "bn", nameEn: "Bengali", nameRu: "Бенгальский", nativeName: "বাংলা" },
+  { code: "pt", nameEn: "Portuguese", nameRu: "Португальский", nativeName: "Português" },
+  { code: "ru", nameEn: "Russian", nameRu: "Русский", nativeName: "Русский" },
+  { code: "ur", nameEn: "Urdu", nameRu: "Урду", nativeName: "اردو" },
+  { code: "id", nameEn: "Indonesian", nameRu: "Индонезийский", nativeName: "Indonesia" },
+  { code: "de", nameEn: "German", nameRu: "Немецкий", nativeName: "Deutsch" },
+  { code: "ja", nameEn: "Japanese", nameRu: "Японский", nativeName: "日本語" },
+  { code: "pcm", nameEn: "Nigerian Pidgin", nameRu: "Нигерийский пиджин", nativeName: "Naija" },
+  { code: "mr", nameEn: "Marathi", nameRu: "Маратхи", nativeName: "मराठी" },
+  { code: "te", nameEn: "Telugu", nameRu: "Телугу", nativeName: "తెలుగు" },
+  { code: "tr", nameEn: "Turkish", nameRu: "Турецкий", nativeName: "Türkçe" },
+  { code: "ta", nameEn: "Tamil", nameRu: "Тамильский", nativeName: "தமிழ்" },
+  { code: "vi", nameEn: "Vietnamese", nameRu: "Вьетнамский", nativeName: "Tiếng Việt" },
+  { code: "ko", nameEn: "Korean", nameRu: "Корейский", nativeName: "한국어" },
+] as const;
+
+function normalizeCourseLanguage(value: string | null | undefined) {
+  const code = (value || "").trim().toLowerCase().split("-")[0];
+  return COURSE_LANGUAGES.some((language) => language.code === code) ? code : null;
+}
+
+function initialCourseLanguage() {
+  return (
+    normalizeCourseLanguage(localStorage.getItem(COURSE_LANGUAGE_STORAGE_KEY)) ||
+    normalizeCourseLanguage(navigator.language) ||
+    "en"
+  );
+}
+
+function courseLanguageLabel(code: string, uiLang: Lang) {
+  const normalized = code.trim().toLowerCase();
+  const language = COURSE_LANGUAGES.find((item) => item.code === normalized);
+  if (!language) return normalized ? normalized.toUpperCase() : "—";
+  return uiLang === "ru" ? language.nameRu : language.nameEn;
+}
+
+function getCourseLanguageOptions(courses: Course[]) {
+  const counts = new Map<string, number>();
+  for (const course of courses) {
+    const code = (course.language || "").trim().toLowerCase() || "unknown";
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort(([a], [b]) => {
+      const rankA = COURSE_LANGUAGES.findIndex((item) => item.code === a);
+      const rankB = COURSE_LANGUAGES.findIndex((item) => item.code === b);
+      const safeA = rankA === -1 ? Number.MAX_SAFE_INTEGER : rankA;
+      const safeB = rankB === -1 ? Number.MAX_SAFE_INTEGER : rankB;
+      return safeA - safeB || a.localeCompare(b);
+    })
+    .map(([code, count]) => ({ code, count }));
+}
+
+type CourseProgress = {
+  total: number;
+  ready: number;
+  verified: number;
+  verifiedAt: number[];
+  pending: number;
+  generating: number;
+  failed: number;
+  reviewDue: number;
+  nextPending?: CoursePointer;
+  nextReady?: CoursePointer;
+};
+
+type CoursePointer = {
+  moduleId: string;
+  submoduleId: string;
+  index: number;
+  title: string;
+};
+
+function emptyProgress(): CourseProgress {
+  return {
+    total: 0,
+    ready: 0,
+    verified: 0,
+    verifiedAt: [],
+    pending: 0,
+    generating: 0,
+    failed: 0,
+    reviewDue: 0,
+  };
+}
+
+function summarizeStructure(tree: StructureFile): CourseProgress {
+  const progress = emptyProgress();
+  for (const module of tree.modules) {
+    for (const submodule of module.submodules) {
+      progress.total += 1;
+      const pointer = {
+        moduleId: module.id,
+        submoduleId: submodule.id,
+        index: progress.total,
+        title: submodule.title,
+      };
+      if (submodule.generation_state === "ready") {
+        progress.ready += 1;
+        if (!submodule.test_passed && !progress.nextReady) {
+          progress.nextReady = pointer;
+        }
+      } else if (submodule.generation_state === "pending") {
+        progress.pending += 1;
+        if (!progress.nextPending) {
+          progress.nextPending = pointer;
+        }
+      } else if (submodule.generation_state === "generating") {
+        progress.generating += 1;
+      } else if (submodule.generation_state === "failed") {
+        progress.failed += 1;
+      }
+      if (submodule.test_passed) {
+        progress.verified += 1;
+        if (submodule.test_passed_at) progress.verifiedAt.push(submodule.test_passed_at);
+      }
+    }
+  }
+  return progress;
+}
+
 function App() {
   const t = useT();
+  const [uiLang] = useLang();
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
   const [stages, setStages] = useState<Map<string, StageDetail>>(new Map());
   const [transcripts, setTranscripts] = useState<Map<string, Bubble[]>>(new Map());
   const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
+  const [recentCourseIds, setRecentCourseIds] = useState<string[]>(readRecentCourseIds);
+  const [wizardQuestionsById, setWizardQuestionsById] = useState<Map<string, Question[]>>(
+    new Map()
+  );
   // Submodules that are readable but still backfilling images + test.
   const [enrichingSubs, setEnrichingSubs] = useState<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [agentAvail, setAgentAvail] = useState<{ claude: boolean; codex: boolean } | null>(
-    null
-  );
+  const [agentAvail, setAgentAvail] = useState<AgentAvailability | null>(null);
   const [braveConfigured, setBraveConfigured] = useState<boolean | null>(null);
+  const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
+  const [modelSettings, setModelSettings] = useState<ModelConfig | null>(null);
+  const [sidebarLanguageFilter, setSidebarLanguageFilter] = useState("all");
+  const [homeTitleTextStyles, setHomeTitleTextStyles] = useState<HomeTitleTextStyles>({
+    main: "",
+    almost: "",
+  });
+  const [courseSuggestion, setCourseSuggestion] = useState<CourseSuggestionState>({
+    status: "idle",
+  });
+  const courseSuggestionRunningRef = useRef(false);
+  const courseSuggestionRequestedRef = useRef(false);
+  const sidebarLanguageOptions = useMemo(() => getCourseLanguageOptions(courses), [courses]);
+  useEffect(() => {
+    if (
+      sidebarLanguageFilter !== "all" &&
+      !sidebarLanguageOptions.some((option) => option.code === sidebarLanguageFilter)
+    ) {
+      setSidebarLanguageFilter("all");
+    }
+  }, [sidebarLanguageFilter, sidebarLanguageOptions]);
+  const sidebarCourses = useMemo(
+    () =>
+      sidebarLanguageFilter === "all"
+        ? courses
+        : courses.filter(
+            (course) => (course.language || "").trim().toLowerCase() === sidebarLanguageFilter
+          ),
+    [courses, sidebarLanguageFilter]
+  );
 
   const refreshCapabilities = useCallback(async () => {
-    try {
-      const [aa, ss] = await Promise.all([
-        invoke<{ claude: boolean; codex: boolean }>("check_agent_availability"),
-        invoke<{ brave_configured: boolean }>("get_settings_status"),
-      ]);
-      setAgentAvail(aa);
-      setBraveConfigured(ss.brave_configured);
-    } catch (e) {
-      console.error(e);
+    const [aa, ss, ms] = await Promise.allSettled([
+      invoke<AgentAvailability>("check_agent_availability"),
+      invoke<{ brave_configured: boolean; gemini_configured?: boolean }>("get_settings_status"),
+      invoke<ModelConfig>("get_model_settings"),
+    ]);
+    if (aa.status === "fulfilled") setAgentAvail(aa.value);
+    if (ss.status === "fulfilled") {
+      setBraveConfigured(ss.value.brave_configured);
+      setGeminiConfigured(Boolean(ss.value.gemini_configured));
     }
+    if (ms.status === "fulfilled") setModelSettings(ms.value);
   }, []);
 
   useEffect(() => {
@@ -159,6 +545,56 @@ function App() {
   }, [refresh]);
 
   useEffect(() => {
+    let cancelled = false;
+    const wizardCourses = courses.filter((course) => course.status === "wizard");
+    if (wizardCourses.length === 0) {
+      setWizardQuestionsById(new Map());
+      return;
+    }
+    Promise.all(
+      wizardCourses.map(async (course) => {
+        try {
+          const questions = await invoke<Question[]>("get_wizard_questions", {
+            courseId: course.id,
+          });
+          return [course.id, Array.isArray(questions) ? questions : []] as const;
+        } catch {
+          return [course.id, [] as Question[]] as const;
+        }
+      })
+    ).then((entries) => {
+      if (!cancelled) setWizardQuestionsById(new Map(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [courses]);
+
+  const rememberCourseOpen = useCallback((courseId: string) => {
+    setRecentCourseIds((prev) => {
+      const next = [courseId, ...prev.filter((id) => id !== courseId)].slice(0, 12);
+      localStorage.setItem(RECENT_COURSES_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const openCourse = useCallback(
+    (courseId: string) => {
+      rememberCourseOpen(courseId);
+      setView({ kind: "course", id: courseId });
+    },
+    [rememberCourseOpen]
+  );
+
+  const openSubmodule = useCallback(
+    (courseId: string, moduleId: string, submoduleId: string) => {
+      rememberCourseOpen(courseId);
+      setView({ kind: "submodule", courseId, moduleId, submoduleId });
+    },
+    [rememberCourseOpen]
+  );
+
+  useEffect(() => {
     const unlistenP = listen<JobEvent>("agent_job", async (e) => {
       const { courseId, kind, ok, result, error } = e.payload;
       setJobs((prev) => {
@@ -171,6 +607,14 @@ function App() {
         );
         return next;
       });
+      if (kind === "wizard_questions" && ok) {
+        const questions = (result as { questions?: Question[] } | undefined)?.questions ?? [];
+        setWizardQuestionsById((prev) => {
+          const next = new Map(prev);
+          next.set(courseId, questions);
+          return next;
+        });
+      }
       // Goal hook: after an initial structure build, kick off the first
       // submodule generation so the learner has something to start with.
       // Do this BEFORE refresh so when Structure mounts the row is already
@@ -286,6 +730,41 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const unlistenP = listen<CourseSuggestionEvent>("course_suggestion", (e) => {
+      if (!courseSuggestionRequestedRef.current) return;
+      const payload = e.payload;
+      const topic = payload.topic?.trim();
+      courseSuggestionRunningRef.current = false;
+      courseSuggestionRequestedRef.current = false;
+      if (payload.ok && topic) {
+        setCourseSuggestion({
+          status: "ready",
+          idea: {
+            topic,
+            title: payload.title?.trim() || topic,
+            reason: payload.reason?.trim(),
+            agent: payload.agent === "claude" ? "claude" : "codex",
+            language: normalizeCourseLanguage(payload.language) || initialCourseLanguage(),
+          },
+        });
+      } else {
+        setCourseSuggestion({
+          status: "error",
+          error: payload.error || "suggestion failed",
+        });
+      }
+    });
+    return () => {
+      unlistenP.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    document.title =
+      courseSuggestion.status === "ready" ? courseSuggestion.idea.topic : t("brand");
+  }, [courseSuggestion, t]);
+
   async function startSubmoduleGen(courseId: string, submoduleId: string) {
     try {
       await invoke("start_generate_submodule", { courseId, submoduleId });
@@ -319,14 +798,93 @@ function App() {
     }
   }
 
+  function randomHomeTitleSegmentClass(current: string) {
+    const pick = (classes: string[]) => classes[Math.floor(Math.random() * classes.length)];
+    let next = "";
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      next = [
+        pick(HOME_TITLE_FONT_CLASSES),
+        pick(HOME_TITLE_WEIGHT_CLASSES),
+        pick(HOME_TITLE_SLANT_CLASSES),
+      ].join(" ");
+      if (next !== current) break;
+    }
+    return next;
+  }
+
+  function randomizeHomeTitleFont() {
+    setHomeTitleTextStyles((current) => ({
+      main: randomHomeTitleSegmentClass(current.main),
+      almost: randomHomeTitleSegmentClass(current.almost),
+    }));
+  }
+
+  async function startCourseSuggestion() {
+    randomizeHomeTitleFont();
+    if (courseSuggestion.status === "running" || courseSuggestionRunningRef.current) return;
+    const backend =
+      agentAvail?.codex ? "codex" : agentAvail?.claude ? "claude" : null;
+    const language = initialCourseLanguage();
+    courseSuggestionRequestedRef.current = true;
+    courseSuggestionRunningRef.current = true;
+    setCourseSuggestion({ status: "running" });
+    try {
+      await invoke("start_course_suggestion", { backend, language });
+    } catch (e) {
+      courseSuggestionRequestedRef.current = false;
+      courseSuggestionRunningRef.current = false;
+      setCourseSuggestion({ status: "error", error: String(e) });
+    }
+  }
+
+  async function studySuggestedCourse() {
+    if (courseSuggestion.status !== "ready") return;
+    const idea = courseSuggestion.idea;
+    const agent =
+      agentAvail?.[idea.agent] !== false
+        ? idea.agent
+        : agentAvail?.claude
+          ? "claude"
+          : agentAvail?.codex
+            ? "codex"
+            : idea.agent;
+    try {
+      const id = await invoke<string>("create_course", {
+        topic: idea.topic,
+        language: idea.language,
+        agent,
+      });
+      setCourseSuggestion({ status: "idle" });
+      await refresh();
+      openCourse(id);
+      await startJob(id, "wizard_questions");
+    } catch (e) {
+      setCourseSuggestion({ status: "error", error: String(e) });
+    }
+  }
+
+  const isHome = view.kind === "empty";
   const menuHidden = view.kind !== "empty";
+  const appBrand = t("brand");
+  const appAlmost = "(Almost)";
+  const appAlmostIndex = appBrand.indexOf(appAlmost);
   return (
     <AudioPlayerProvider>
-    <div className={`app${menuHidden ? " menu-hidden" : ""}`}>
+    <div className={`app${menuHidden ? " menu-hidden" : ""}${isHome ? " home-view" : ""}`}>
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-dot" />
-          <span className="brand-name">{t("brand")}</span>
+          <img className="brand-mark" src={appMark} alt="" aria-hidden="true" />
+          <span className="brand-name">
+            {appAlmostIndex >= 0 ? (
+              <>
+                {appBrand.slice(0, appAlmostIndex)}
+                <span className="brand-soft">{appAlmost}</span>
+                {appBrand.slice(appAlmostIndex + appAlmost.length)}
+              </>
+            ) : (
+              appBrand
+            )}
+          </span>
           <button
             className="brand-settings"
             onClick={() => setSettingsOpen(true)}
@@ -339,8 +897,32 @@ function App() {
         <button className="new-course" onClick={() => setView({ kind: "creating" })}>
           {t("newCourse")}
         </button>
+        {courses.length > 0 && sidebarLanguageOptions.length > 1 && (
+          <div className="sidebar-language-filter" aria-label={t("homeLanguageFilterLabel")}>
+            <button
+              className={sidebarLanguageFilter === "all" ? "active" : ""}
+              onClick={() => setSidebarLanguageFilter("all")}
+              aria-pressed={sidebarLanguageFilter === "all"}
+            >
+              {t("sidebarLanguageAll")}
+              <span>{courses.length}</span>
+            </button>
+            {sidebarLanguageOptions.map((option) => (
+              <button
+                key={option.code}
+                className={sidebarLanguageFilter === option.code ? "active" : ""}
+                onClick={() => setSidebarLanguageFilter(option.code)}
+                aria-pressed={sidebarLanguageFilter === option.code}
+                title={courseLanguageLabel(option.code, uiLang)}
+              >
+                {option.code.toUpperCase()}
+                <span>{option.count}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <ul className="course-list">
-          {courses.map((c) => {
+          {sidebarCourses.map((c) => {
             const hasRunning = ["wizard_questions", "build_structure"].some(
               (k) => jobs.get(jobKey(c.id, k as JobKind))?.status === "running"
             );
@@ -348,24 +930,27 @@ function App() {
               <li
                 key={c.id}
                 className={view.kind === "course" && view.id === c.id ? "active" : ""}
-                onClick={() => setView({ kind: "course", id: c.id })}
+                onClick={() => openCourse(c.id)}
               >
                 <div className="course-topic">
-                  {c.topic}
+                  {courseTitle(c, t("courseTitlePending"))}
                   {hasRunning && <span className="spinner" title={t("generatingTitle")} />}
                 </div>
                 <div className="course-meta">
-                  {c.language} · {c.status}
+                  {c.language} · {courseLifecycleStatusLabel(c.status, t)}
                 </div>
               </li>
             );
           })}
           {courses.length === 0 && <li className="empty-hint">{t("noCourses")}</li>}
+          {courses.length > 0 && sidebarCourses.length === 0 && (
+            <li className="empty-hint">{t("homeNoOtherCourses")}</li>
+          )}
         </ul>
       </aside>
 
       <main className="main">
-        <div className="main-inner">
+        <div className={`main-inner ${view.kind === "empty" ? "home-main" : ""}`}>
         <CapabilityBanners
           agentAvail={agentAvail}
           braveConfigured={braveConfigured}
@@ -381,23 +966,45 @@ function App() {
                 <span className="crumb-sep">›</span>
                 <button
                   className="crumb"
-                  onClick={() => setView({ kind: "course", id: view.courseId })}
+                  onClick={() => openCourse(view.courseId)}
                 >
-                  {courses.find((c) => c.id === view.courseId)?.topic ?? "…"}
+                  {(() => {
+                    const course = courses.find((c) => c.id === view.courseId);
+                    return course ? courseTitle(course, t("courseTitlePending")) : "…";
+                  })()}
                 </button>
               </>
             )}
           </nav>
         )}
         {view.kind === "empty" && (
-          <div className="placeholder">{t("selectOrCreate")}</div>
+          <CourseDashboard
+            courses={courses}
+            jobs={jobs}
+            agentAvail={agentAvail}
+            braveConfigured={braveConfigured}
+            geminiConfigured={geminiConfigured}
+            modelSettings={modelSettings}
+            recentCourseIds={recentCourseIds}
+            wizardQuestionsById={wizardQuestionsById}
+            courseSuggestion={courseSuggestion}
+            homeTitleTextStyles={homeTitleTextStyles}
+            onNewCourse={() => setView({ kind: "creating" })}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onHomeTitleTap={startCourseSuggestion}
+            onStudySuggestion={studySuggestedCourse}
+            onOpenCourse={openCourse}
+            onStartJob={startJob}
+            onOpenSub={openSubmodule}
+            onStartSubGen={startSubmoduleGen}
+          />
         )}
         {view.kind === "creating" && (
           <CreateCourse
             agentAvail={agentAvail}
             onCreated={async (id) => {
               await refresh();
-              setView({ kind: "course", id });
+              openCourse(id);
             }}
             onCancel={() => setView({ kind: "empty" })}
           />
@@ -406,11 +1013,12 @@ function App() {
           <CourseView
             course={courses.find((c) => c.id === view.id)}
             jobs={jobs}
+            savedWizardQuestions={wizardQuestionsById.get(view.id) ?? []}
             structureTranscript={transcripts.get(view.id) ?? null}
             onStartJob={(kind) => startJob(view.id, kind)}
             onChanged={refresh}
             onOpenSub={(moduleId, submoduleId) =>
-              setView({ kind: "submodule", courseId: view.id, moduleId, submoduleId })
+              openSubmodule(view.id, moduleId, submoduleId)
             }
             onStartSubGen={(submoduleId) => startSubmoduleGen(view.id, submoduleId)}
             onDeleted={async () => {
@@ -480,6 +1088,654 @@ function CapabilityBanners({
   return null;
 }
 
+function CourseDashboard({
+  courses,
+  jobs,
+  agentAvail,
+  braveConfigured,
+  geminiConfigured,
+  modelSettings,
+  recentCourseIds,
+  wizardQuestionsById,
+  courseSuggestion,
+  homeTitleTextStyles,
+  onNewCourse,
+  onOpenSettings,
+  onHomeTitleTap,
+  onStudySuggestion,
+  onOpenCourse,
+  onStartJob,
+  onOpenSub,
+  onStartSubGen,
+}: {
+  courses: Course[];
+  jobs: Map<string, JobState>;
+  agentAvail: AgentAvailability | null;
+  braveConfigured: boolean | null;
+  geminiConfigured: boolean | null;
+  modelSettings: ModelConfig | null;
+  recentCourseIds: string[];
+  wizardQuestionsById: Map<string, Question[]>;
+  courseSuggestion: CourseSuggestionState;
+  homeTitleTextStyles: HomeTitleTextStyles;
+  onNewCourse: () => void;
+  onOpenSettings: () => void;
+  onHomeTitleTap: () => void;
+  onStudySuggestion: () => void;
+  onOpenCourse: (courseId: string) => void;
+  onStartJob: (courseId: string, kind: JobKind) => void;
+  onOpenSub: (courseId: string, moduleId: string, submoduleId: string) => void;
+  onStartSubGen: (courseId: string, submoduleId: string) => void | Promise<void>;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [progressById, setProgressById] = useState<Map<string, CourseProgress>>(new Map());
+  const [languageFilter, setLanguageFilter] = useState("all");
+  const languageOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const course of courses) {
+      const code = (course.language || "").trim().toLowerCase() || "unknown";
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort(([a], [b]) => {
+        const rankA = COURSE_LANGUAGES.findIndex((item) => item.code === a);
+        const rankB = COURSE_LANGUAGES.findIndex((item) => item.code === b);
+        const safeA = rankA === -1 ? Number.MAX_SAFE_INTEGER : rankA;
+        const safeB = rankB === -1 ? Number.MAX_SAFE_INTEGER : rankB;
+        return safeA - safeB || a.localeCompare(b);
+      })
+      .map(([code, count]) => ({ code, count }));
+  }, [courses]);
+  useEffect(() => {
+    if (
+      languageFilter !== "all" &&
+      !languageOptions.some((option) => option.code === languageFilter)
+    ) {
+      setLanguageFilter("all");
+    }
+  }, [languageFilter, languageOptions]);
+  const filteredCourses = useMemo(
+    () =>
+      languageFilter === "all"
+        ? courses
+        : courses.filter(
+            (course) => (course.language || "").trim().toLowerCase() === languageFilter
+          ),
+    [courses, languageFilter]
+  );
+  const progressKey = filteredCourses.map((c) => `${c.id}:${c.status}:${c.updated_at}`).join("|");
+
+  useEffect(() => {
+    let cancelled = false;
+    const readyCourses = filteredCourses.filter((course) => course.status === "ready");
+    if (readyCourses.length === 0) {
+      setProgressById(new Map());
+      return;
+    }
+    Promise.all(
+      readyCourses.map(async (course) => {
+        try {
+          const tree = await invoke<StructureFile>("get_structure", { courseId: course.id });
+          return [course.id, summarizeStructure(tree)] as const;
+        } catch {
+          return [course.id, emptyProgress()] as const;
+        }
+      })
+    ).then((entries) => {
+      if (cancelled) return;
+      setProgressById(new Map(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progressKey]);
+
+  const totals = filteredCourses.reduce(
+    (acc, course) => {
+      const progress = progressById.get(course.id);
+      acc.courses += 1;
+      if (progress) {
+        acc.verified += progress.verified;
+        acc.verifiedAt.push(...progress.verifiedAt);
+        if (progress.nextReady) acc.readyToContinue += 1;
+      }
+      return acc;
+    },
+    { courses: 0, verified: 0, verifiedAt: [] as number[], readyToContinue: 0 }
+  );
+
+  const summaries = filteredCourses.map((course) => {
+    const progress = progressById.get(course.id);
+    const wizardJob = jobs.get(jobKey(course.id, "wizard_questions"));
+    const structureJob = jobs.get(jobKey(course.id, "build_structure"));
+    const verifiedPercent =
+      progress && progress.total > 0 ? Math.round((progress.verified / progress.total) * 100) : 0;
+
+    let actionLabel = t("courseActionOpen");
+    let actionDisabled = false;
+    let action = () => onOpenCourse(course.id);
+    let statusText = t("courseStatusOpen");
+    let needsAction = false;
+
+    if (course.status === "wizard") {
+      const savedQuestions = wizardQuestionsById.get(course.id) ?? [];
+      if (wizardJob?.status === "running") {
+        actionLabel = t("courseActionWorking");
+        actionDisabled = true;
+        statusText = t("courseStatusWorking");
+      } else if (wizardJob?.status === "error") {
+        actionLabel = t("courseActionRetry");
+        action = () => onStartJob(course.id, "wizard_questions");
+        statusText = t("courseStatusNeedsQuestions");
+        needsAction = true;
+      } else if ((wizardJob?.result as { questions?: Question[] } | undefined)?.questions?.length) {
+        actionLabel = t("courseActionAnswerQuestions");
+        statusText = t("courseStatusNeedsAnswers");
+        needsAction = true;
+      } else if (savedQuestions.length > 0) {
+        actionLabel = t("courseActionAnswerQuestions");
+        statusText = t("courseStatusNeedsAnswers");
+        needsAction = true;
+      } else {
+        actionLabel = t("courseActionStartQuestions");
+        action = () => onStartJob(course.id, "wizard_questions");
+        statusText = t("courseStatusNeedsQuestions");
+        needsAction = true;
+      }
+    } else if (course.status === "structuring") {
+      if (structureJob?.status === "running") {
+        actionLabel = t("courseActionWorking");
+        actionDisabled = true;
+        statusText = t("courseStatusWorking");
+      } else {
+        actionLabel = structureJob?.status === "error" ? t("courseActionRetry") : t("courseActionBuildPlan");
+        action = () => onStartJob(course.id, "build_structure");
+        statusText = t("courseStatusNeedsStructure");
+        needsAction = true;
+      }
+    } else if (course.status === "ready") {
+      if (!progress) {
+        actionLabel = t("courseActionOpen");
+        statusText = t("courseStatusLoading");
+      } else if (progress.generating > 0) {
+        actionLabel = t("courseActionWorking");
+        actionDisabled = true;
+        statusText = t("courseStatusWorking");
+      } else if (progress.nextReady) {
+        const next = progress.nextReady;
+        actionLabel = t("courseActionContinue");
+        action = () => onOpenSub(course.id, next.moduleId, next.submoduleId);
+        statusText = t("courseStatusReady");
+      } else if (progress.nextPending) {
+        const next = progress.nextPending;
+        actionLabel = t("courseActionGenerateNext");
+        action = () => {
+          onStartSubGen(course.id, next.submoduleId);
+          onOpenSub(course.id, next.moduleId, next.submoduleId);
+        };
+        statusText = t("courseStatusNeedsGeneration");
+        needsAction = true;
+      } else if (progress.failed > 0) {
+        actionLabel = t("courseActionOpen");
+        statusText = t("courseStatusHasIssues", { count: progress.failed });
+        needsAction = true;
+      } else if (progress.total > 0) {
+        actionLabel = t("courseActionComplete");
+        statusText = t("courseStatusComplete");
+      }
+    }
+
+    return {
+      course,
+      progress,
+      verifiedPercent,
+      actionLabel,
+      actionDisabled,
+      action,
+      statusText,
+      needsAction,
+    };
+  });
+  const attention = summaries.filter((s) => s.needsAction);
+  const summariesById = new Map(summaries.map((summary) => [summary.course.id, summary]));
+  const featured: typeof summaries = [];
+  const addFeatured = (summary: (typeof summaries)[number] | undefined) => {
+    if (!summary || featured.some((item) => item.course.id === summary.course.id)) return;
+    if (featured.length < 2) featured.push(summary);
+  };
+  attention.forEach(addFeatured);
+  recentCourseIds.forEach((courseId) => addFeatured(summariesById.get(courseId)));
+  summaries.filter((summary) => summary.progress?.nextReady).forEach(addFeatured);
+  summaries.forEach(addFeatured);
+  const featuredIds = new Set(featured.map((summary) => summary.course.id));
+  const courseListSummaries = summaries.filter((summary) => !featuredIds.has(summary.course.id));
+  const brand = t("brand");
+  const almost = "(Almost)";
+  const almostIndex = brand.indexOf(almost);
+  const suggestedIdea = courseSuggestion.status === "ready" ? courseSuggestion.idea : null;
+  const homeHeading = suggestedIdea?.topic || brand;
+  const heroAction = onHomeTitleTap;
+  const heroTitle = t("homeTitleTapHint");
+  const momentumItems = homeMomentumItems(totals.verifiedAt, totals.verified, 0, uiLang, t);
+
+  return (
+    <div className="home-dashboard home-editorial">
+      <div className="home-header">
+        <div className="home-title-block">
+          <div className="home-brand-lockup">
+            <img className="home-brand-logo" src={appMark} alt="" aria-hidden="true" />
+            <div>
+              <div className="home-brand-eyebrow">{t("homeTitle")}</div>
+              <div className="home-title-row">
+                <h1>
+                  <button
+                    type="button"
+                    className="home-title-button"
+                    onClick={heroAction}
+                    title={heroTitle}
+                    aria-label={heroTitle}
+                  >
+                    {suggestedIdea ? (
+                      <span className={homeTitleTextStyles.main}>{homeHeading}</span>
+                    ) : almostIndex >= 0 ? (
+                      <>
+                        <span className={homeTitleTextStyles.main}>
+                          {brand.slice(0, almostIndex)}
+                        </span>
+                        <span className={`home-brand-soft ${homeTitleTextStyles.almost}`}>
+                          {almost}
+                        </span>
+                        <span className={homeTitleTextStyles.main}>
+                          {brand.slice(almostIndex + almost.length)}
+                        </span>
+                      </>
+                    ) : (
+                      <span className={homeTitleTextStyles.main}>{brand}</span>
+                    )}
+                  </button>
+                </h1>
+                {courseSuggestion.status === "running" && (
+                  <span className="spinner home-suggestion-spinner" title={t("homeSuggestionWorking")} />
+                )}
+                {courseSuggestion.status === "error" && (
+                  <span className="home-suggestion-error" title={courseSuggestion.error}>
+                    {t("homeSuggestionFailed")}
+                  </span>
+                )}
+                {suggestedIdea && (
+                  <button className="home-study-suggestion" onClick={onStudySuggestion}>
+                    {t("studySuggestion")}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+          <HomeTagline />
+        </div>
+        <div className="home-header-actions">
+          <button
+            className="home-settings-action"
+            onClick={onOpenSettings}
+            title={t("settings")}
+            aria-label={t("settings")}
+          >
+            <SettingsIcon />
+            <span>{t("settings")}</span>
+          </button>
+          <button className="home-primary" onClick={onNewCourse}>
+            {t("newCourse")}
+          </button>
+        </div>
+      </div>
+
+      {courses.length > 0 && (
+        <div className="home-momentum" aria-label={t("homeMomentumLabel")}>
+          {momentumItems.map((item) => (
+            <span className="home-momentum-item" key={item}>
+              {item}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {courses.length > 0 && languageOptions.length > 1 && (
+        <div className="home-language-filter" aria-label={t("homeLanguageFilterLabel")}>
+          <span className="home-language-label">{t("homeLanguageFilterLabel")}</span>
+          <div className="home-language-options">
+            <button
+              className={languageFilter === "all" ? "active" : ""}
+              onClick={() => setLanguageFilter("all")}
+              aria-pressed={languageFilter === "all"}
+            >
+              {t("homeLanguageAll")}
+              <span>{courses.length}</span>
+            </button>
+            {languageOptions.map((option) => (
+              <button
+                key={option.code}
+                className={languageFilter === option.code ? "active" : ""}
+                onClick={() => setLanguageFilter(option.code)}
+                aria-pressed={languageFilter === option.code}
+              >
+                {courseLanguageLabel(option.code, uiLang)}
+                <span>{option.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {courses.length === 0 ? (
+        <div className="home-empty">
+          <h2>{t("homeEmptyTitle")}</h2>
+          <p>{t("homeEmptyBody")}</p>
+          <button onClick={onNewCourse}>{t("newCourse")}</button>
+        </div>
+      ) : (
+        <div className="home-paper-grid">
+          <section className="home-featured">
+            <div className="home-section-kicker">{t("homeFocusTitle")}</div>
+            <div className="home-feature-list">
+              {featured.map((summary) => (
+                <article className="home-feature-card" key={summary.course.id}>
+                  <button
+                    className="home-feature-title"
+                    onClick={summary.action}
+                    disabled={summary.actionDisabled}
+                  >
+                    {courseTitle(summary.course, t("courseTitlePending"))}
+                  </button>
+                  <p className="home-card-progress-line">
+                    {courseCardProgressLine(summary, uiLang, t)}
+                  </p>
+                  <div className="home-hairline-progress" aria-hidden="true">
+                    <span style={{ width: `${summary.verifiedPercent}%` }} />
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="home-index">
+            <div className="home-section-kicker">{t("homeCoursesTitle")}</div>
+            <ol className="home-course-list">
+              {courseListSummaries.map((summary) => (
+                <li key={summary.course.id}>
+                  <button onClick={() => onOpenCourse(summary.course.id)}>
+                    {courseTitle(summary.course, t("courseTitlePending"))}
+                  </button>
+                  <span className="home-course-progress">{coursePositionLine(summary, t)}</span>
+                  <span>{courseUnderstandingLine(summary, uiLang, t)}</span>
+                  {courseGenerationLine(summary, t) && (
+                    <span className="home-course-generation">
+                      {courseGenerationLine(summary, t)}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+            {courseListSummaries.length === 0 && (
+              <p className="home-index-empty">{t("homeNoOtherCourses")}</p>
+            )}
+          </section>
+        </div>
+      )}
+
+      <HomeSystemStatus
+        agentAvail={agentAvail}
+        braveConfigured={braveConfigured}
+        geminiConfigured={geminiConfigured}
+        modelSettings={modelSettings}
+        onOpenSettings={onOpenSettings}
+      />
+    </div>
+  );
+}
+
+function HomeTagline() {
+  const [lang] = useLang();
+  const [index, setIndex] = useState(() => {
+    const day = Math.floor(Date.now() / 86_400_000);
+    return day % HOME_TAGLINES.length;
+  });
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setIndex((value) => (value + 1) % HOME_TAGLINES.length);
+    }, 18_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <p className="home-tagline" key={`${lang}-${index}`}>
+      {HOME_TAGLINES[index][lang]}
+    </p>
+  );
+}
+
+function HomeSystemStatus({
+  agentAvail,
+  braveConfigured,
+  geminiConfigured,
+  modelSettings,
+  onOpenSettings,
+}: {
+  agentAvail: AgentAvailability | null;
+  braveConfigured: boolean | null;
+  geminiConfigured: boolean | null;
+  modelSettings: ModelConfig | null;
+  onOpenSettings: () => void;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const hasAgent = Boolean(agentAvail?.claude || agentAvail?.codex);
+  const coreReady = Boolean(hasAgent && braveConfigured === true && modelSettings);
+
+  return (
+    <footer className={`home-system-footer ${expanded ? "expanded" : ""}`}>
+      <button
+        type="button"
+        className="home-system-toggle"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <span className={`home-status-dot ${coreReady ? "ok" : "warn"}`} />
+        <span className="home-system-compact">
+          <b>{coreReady ? t("homeSetupReady") : t("homeSetupNeedsAttention")}</b>
+          <span>
+            Claude {agentStatusText(agentAvail?.claude, t)} · Codex{" "}
+            {agentStatusText(agentAvail?.codex, t)}
+          </span>
+          <span>
+            {t("homeSearchService")} {configStatusText(braveConfigured, t)} ·{" "}
+            {t("homeGeminiService")} {configStatusText(geminiConfigured, t)}
+          </span>
+        </span>
+        <span className="home-system-chevron" aria-hidden="true">
+          {expanded ? "−" : "+"}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="home-system-details">
+          <div className="home-model-table" aria-label={t("homeSystemTitle")}>
+            {(["claude", "codex"] as const).map((backend) => (
+              <div
+                className={`home-model-row ${agentAvail?.[backend] === false ? "disabled" : ""}`}
+                key={backend}
+              >
+                <div className="home-model-backend">
+                  <span>{backend === "claude" ? "Claude" : "Codex"}</span>
+                  <span className={`home-status-dot ${agentAvail?.[backend] ? "ok" : "warn"}`} />
+                </div>
+                <div className="home-model-cells">
+                  <span>{agentStatusText(agentAvail?.[backend], t)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button className="home-text-action muted" onClick={onOpenSettings}>
+            {t("openSettings")}
+          </button>
+        </div>
+      )}
+    </footer>
+  );
+}
+
+function agentStatusText(available: boolean | undefined, t: ReturnType<typeof useT>) {
+  if (available === undefined) return t("homeChecking");
+  return available ? t("agentAvailable") : t("agentUnavailable");
+}
+
+function configStatusText(configured: boolean | null, t: ReturnType<typeof useT>) {
+  if (configured === null) return t("homeChecking");
+  return configured ? t("homeConfigured") : t("homeNeedsSetup");
+}
+
+function courseLifecycleStatusLabel(status: string, t: ReturnType<typeof useT>) {
+  if (status === "wizard") return t("statusWizard");
+  if (status === "structuring") return t("statusStructuring");
+  if (status === "ready") return t("statusReady");
+  return status;
+}
+
+function coursePositionLine(
+  summary: {
+    progress?: CourseProgress;
+    statusText: string;
+  },
+  t: ReturnType<typeof useT>
+) {
+  if (!summary.progress) return summary.statusText;
+  if (summary.progress.total === 0) return summary.statusText;
+  const pointer = summary.progress.nextReady ?? summary.progress.nextPending;
+  return t("courseProgressPosition", {
+    current: pointer?.index ?? summary.progress.total,
+    total: summary.progress.total,
+  });
+}
+
+function courseUnderstandingLine(
+  summary: {
+    progress?: CourseProgress;
+    statusText: string;
+  },
+  lang: Lang,
+  t: ReturnType<typeof useT>
+) {
+  if (!summary.progress) return summary.statusText;
+  return `${t("courseProgressVerified", {
+    topics: topicCount(summary.progress.verified, lang),
+  })} · ${t("courseProgressReview", { count: summary.progress.reviewDue })}`;
+}
+
+function courseCardProgressLine(
+  summary: {
+    progress?: CourseProgress;
+    statusText: string;
+  },
+  lang: Lang,
+  t: ReturnType<typeof useT>
+) {
+  if (!summary.progress || summary.progress.total === 0) return summary.statusText;
+  return [
+    coursePositionLine(summary, t),
+    courseUnderstandingLine(summary, lang, t),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function courseGenerationLine(
+  summary: { progress?: CourseProgress },
+  t: ReturnType<typeof useT>
+) {
+  const progress = summary.progress;
+  if (!progress || progress.total === 0) return null;
+  if (progress.generating > 0) {
+    return t("courseGenerationWorking", { count: progress.generating });
+  }
+  if (progress.failed > 0) {
+    return t("courseGenerationFailed", { count: progress.failed });
+  }
+  if (progress.pending > 0) {
+    return t("courseGenerationPending", { count: progress.pending });
+  }
+  return null;
+}
+
+function homeMomentumItems(
+  verifiedAt: number[],
+  verified: number,
+  reviewDue: number,
+  lang: Lang,
+  t: ReturnType<typeof useT>
+) {
+  const undatedVerified = Math.max(0, verified - verifiedAt.length);
+  const streak = Math.max(studyStreakDays(verifiedAt), undatedVerified > 0 ? 1 : 0);
+  const weekChecks = checksThisWeek(verifiedAt) + undatedVerified;
+  return [
+    streak > 0 ? t("homeMomentumStreak", { count: streak }) : t("homeMomentumStartStreak"),
+    weekChecks > 0
+      ? t("homeMomentumWeekChecks", { tests: testCount(weekChecks, lang) })
+      : t("homeMomentumFirstWeekCheck"),
+    verified > 0
+      ? t("homeMomentumVerified", { topics: topicCount(verified, lang) })
+      : t("homeMomentumFirstVerified"),
+    reviewDue > 0 ? t("homeMomentumReview", { count: reviewDue }) : t("homeMomentumReviewClear"),
+  ];
+}
+
+function checksThisWeek(timestamps: number[]) {
+  const start = new Date();
+  const mondayOffset = (start.getDay() + 6) % 7;
+  start.setDate(start.getDate() - mondayOffset);
+  start.setHours(0, 0, 0, 0);
+  const startMs = start.getTime();
+  return timestamps.filter((ts) => ts * 1000 >= startMs).length;
+}
+
+function studyStreakDays(timestamps: number[]) {
+  if (timestamps.length === 0) return 0;
+  const days = new Set(timestamps.map((ts) => startOfLocalDay(ts * 1000)));
+  const dayMs = 86_400_000;
+  let cursor = startOfLocalDay(Date.now());
+  if (!days.has(cursor)) cursor -= dayMs;
+  let count = 0;
+  while (days.has(cursor)) {
+    count += 1;
+    cursor -= dayMs;
+  }
+  return count;
+}
+
+function startOfLocalDay(ms: number) {
+  const date = new Date(ms);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function topicCount(count: number, lang: Lang) {
+  if (lang === "ru") return `${count} ${ruPlural(count, "тема", "темы", "тем")}`;
+  return `${count} ${count === 1 ? "topic" : "topics"}`;
+}
+
+function testCount(count: number, lang: Lang) {
+  if (lang === "ru") return `${count} ${ruPlural(count, "тест", "теста", "тестов")}`;
+  return `${count} ${count === 1 ? "test" : "tests"}`;
+}
+
+function ruPlural(count: number, one: string, few: string, many: string) {
+  const mod10 = Math.abs(count) % 10;
+  const mod100 = Math.abs(count) % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
 function SettingsIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -494,6 +1750,16 @@ const GEMINI_IMAGE_MODELS: { id: string; ru: string; en: string }[] = [
   { id: "gemini-2.5-flash-image", ru: "Flash (быстрее, дешевле)", en: "Flash (faster, cheaper)" },
   { id: "gemini-2.5-flash-image-preview", ru: "Flash Preview", en: "Flash Preview" },
 ];
+
+function readRecentCourseIds() {
+  try {
+    const raw = localStorage.getItem(RECENT_COURSES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
 const GEMINI_TTS_MODELS: { id: string; ru: string; en: string }[] = [
   { id: "gemini-2.5-flash-preview-tts", ru: "Flash TTS (дешевле)", en: "Flash TTS (cheaper)" },
   { id: "gemini-2.5-pro-preview-tts", ru: "Pro TTS (выше качество)", en: "Pro TTS (higher quality)" },
@@ -524,6 +1790,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [ttsVoice, setTtsVoice] = useState("Kore");
   const [geminiImageModel, setGeminiImageModel] = useState("gemini-2.5-flash-image");
   const [geminiTtsModel, setGeminiTtsModel] = useState("gemini-2.5-flash-preview-tts");
+  const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
   const [imageModelList, setImageModelList] = useState<{ id: string; label: string }[]>([]);
   const [ttsModelList, setTtsModelList] = useState<{ id: string; label: string }[]>([]);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -550,23 +1817,19 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       .catch(() => setModelList((p) => ({ ...p, [modelBackend]: [] })));
   }, [modelBackend, modelList]);
 
+  function applySettingsStatus(s: SettingsStatus) {
+    setBraveConfigured(s.brave_configured);
+    setGeminiConfigured(s.gemini_configured);
+    setMcpServers(s.mcp_servers ?? []);
+    setTtsEngine(s.tts_engine === "gemini" ? "gemini" : "system");
+    if (s.tts_voice) setTtsVoice(s.tts_voice);
+    if (s.gemini_image_model) setGeminiImageModel(s.gemini_image_model);
+    if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
+  }
+
   useEffect(() => {
-    invoke<{
-      brave_configured: boolean;
-      gemini_configured: boolean;
-      tts_engine: string;
-      tts_voice: string;
-      gemini_image_model: string;
-      gemini_tts_model: string;
-    }>("get_settings_status")
-      .then((s) => {
-        setBraveConfigured(s.brave_configured);
-        setGeminiConfigured(s.gemini_configured);
-        setTtsEngine(s.tts_engine === "gemini" ? "gemini" : "system");
-        if (s.tts_voice) setTtsVoice(s.tts_voice);
-        if (s.gemini_image_model) setGeminiImageModel(s.gemini_image_model);
-        if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
-      })
+    invoke<SettingsStatus>("get_settings_status")
+      .then(applySettingsStatus)
       .catch(() => {});
     invoke<ModelConfig>("get_model_settings")
       .then(setModels)
@@ -619,8 +1882,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   async function saveBrave(key: string | null) {
     setSavingBrave(true);
     try {
-      const s = await invoke<{ brave_configured: boolean }>("set_brave_key", { key });
-      setBraveConfigured(s.brave_configured);
+      const s = await invoke<SettingsStatus>("set_brave_key", { key });
+      applySettingsStatus(s);
       setBraveKey("");
     } finally {
       setSavingBrave(false);
@@ -630,8 +1893,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   async function saveGemini(key: string | null) {
     setSavingGemini(true);
     try {
-      const s = await invoke<{ gemini_configured: boolean }>("set_gemini_key", { key });
-      setGeminiConfigured(s.gemini_configured);
+      const s = await invoke<SettingsStatus>("set_gemini_key", { key });
+      applySettingsStatus(s);
       setGeminiKey("");
     } finally {
       setSavingGemini(false);
@@ -824,6 +2087,34 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             <div className="setting-note success-note">✓ {t("braveConfigured")}</div>
           )}
           <div className="setting-note">{t("braveNote")}</div>
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("mcpTitle")}</div>
+          {mcpServers.length > 0 ? (
+            <div className="mcp-list">
+              {mcpServers.map((server) => (
+                <div className="mcp-row" key={server.id}>
+                  <div className="mcp-main">
+                    <div className="mcp-name">{server.name}</div>
+                    <div className="mcp-meta">
+                      {server.enabled_for.join(" + ")} · {server.source}
+                    </div>
+                  </div>
+                  <div className="mcp-tools">
+                    {server.tools.map((tool) => (
+                      <span className="mcp-tool" key={tool}>
+                        {tool}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="setting-note">{t("mcpEmpty")}</div>
+          )}
+          <div className="setting-note">{t("mcpNote")}</div>
         </div>
 
         <div className="setting-group">
@@ -1083,8 +2374,10 @@ function CreateCourse({
   onCancel: () => void;
 }) {
   const t = useT();
+  const [uiLang] = useLang();
   const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
   const [topic, setTopic] = useState("");
+  const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
 
@@ -1110,7 +2403,7 @@ function CreateCourse({
     e.preventDefault();
     if (!topic.trim() || busy || !selectedAvail || noAgents) return;
     setBusy(true);
-    const language = navigator.language.slice(0, 2) || "en";
+    localStorage.setItem(COURSE_LANGUAGE_STORAGE_KEY, language);
     const id = await invoke<string>("create_course", {
       topic: topic.trim(),
       language,
@@ -1130,6 +2423,21 @@ function CreateCourse({
           onChange={(e) => setTopic(e.target.value)}
           placeholder={t("topicPlaceholder")}
         />
+      </label>
+      <label>
+        {t("courseLanguageLabel")}
+        <select
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+        >
+          {COURSE_LANGUAGES.map((item) => (
+            <option key={item.code} value={item.code}>
+              {uiLang === "ru" ? item.nameRu : item.nameEn} · {item.nativeName} ·{" "}
+              {item.code.toUpperCase()}
+            </option>
+          ))}
+        </select>
+        <span className="field-note">{t("courseLanguageNote")}</span>
       </label>
       <label>
         {t("agentLabel")}
@@ -1208,6 +2516,7 @@ function AgentAvailBadge({ available }: { available: boolean }) {
 function CourseView({
   course,
   jobs,
+  savedWizardQuestions,
   structureTranscript,
   onStartJob,
   onChanged,
@@ -1217,6 +2526,7 @@ function CourseView({
 }: {
   course?: Course;
   jobs: Map<string, JobState>;
+  savedWizardQuestions: Question[];
   structureTranscript: Bubble[] | null;
   onStartJob: (kind: JobKind) => void;
   onChanged: () => void | Promise<void>;
@@ -1227,14 +2537,9 @@ function CourseView({
   const t = useT();
   const [confirmDelete, setConfirmDelete] = useState(false);
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
-  const statusLabel: Record<string, string> = {
-    wizard: t("statusWizard"),
-    structuring: t("statusStructuring"),
-    ready: t("statusReady"),
-  };
   return (
     <div className="course-view">
-      <h2>{course.topic}</h2>
+      <h2>{courseTitle(course, t("courseTitlePending"))}</h2>
       <div className="course-meta-full">
         <span className="lang-pill">{course.language}</span>
         <select
@@ -1250,13 +2555,14 @@ function CourseView({
           <option value="codex">codex</option>
         </select>
         <span className={`status-pill status-${course.status}`}>
-          {statusLabel[course.status] ?? course.status}
+          {courseLifecycleStatusLabel(course.status, t)}
         </span>
       </div>
       {course.status === "wizard" && (
         <Wizard
           course={course}
           job={jobs.get(jobKey(course.id, "wizard_questions"))}
+          savedQuestions={savedWizardQuestions}
           transcript={structureTranscript}
           onStart={() => onStartJob("wizard_questions")}
           onSaved={onChanged}
@@ -1325,7 +2631,7 @@ function DeleteCourseModal({
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()} role="alertdialog" aria-modal="true">
-        <h2>{t("deleteCourseTitle", { topic: course.topic })}</h2>
+        <h2>{t("deleteCourseTitle", { topic: courseTitle(course, t("courseTitlePending")) })}</h2>
         <p className="setting-note">{t("deleteCourseWarning")}</p>
         {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
         <div className="modal-actions">
@@ -1344,18 +2650,23 @@ function DeleteCourseModal({
 function Wizard({
   course,
   job,
+  savedQuestions,
   transcript,
   onStart,
   onSaved,
 }: {
   course: Course;
   job?: JobState;
+  savedQuestions: Question[];
   transcript: Bubble[] | null;
   onStart: () => void;
   onSaved: () => void | Promise<void>;
 }) {
   const t = useT();
   if (!job || (job.status === "done" && !job.result)) {
+    if (savedQuestions.length > 0) {
+      return <AnsweringForm course={course} questions={savedQuestions} onSaved={onSaved} />;
+    }
     return (
       <div className="wizard">
         <p>{t("wizardIntro")}</p>
@@ -1810,6 +3121,7 @@ function StructureTree({
   onOpenSub?: (moduleId: string, submoduleId: string) => void;
   onStartSubGen?: (submoduleId: string) => void;
 }) {
+  const t = useT();
   return (
     <ol className="modules">
       {tree.modules.map((m, i) => (
@@ -1833,7 +3145,7 @@ function StructureTree({
                       </span>
                       {s.title}
                       {s.test_passed ? (
-                        <span className="learned-dot" title="изучено">
+                        <span className="learned-dot" title={t("subLearned")}>
                           ✓
                         </span>
                       ) : (
@@ -1937,8 +3249,18 @@ type SubmoduleContent = {
   review_notes: string;
 };
 
+type WidgetImageItem = {
+  placeholder?: boolean;
+  description?: string;
+  alt?: string;
+  url?: string;
+  source?: string;
+  generated?: boolean;
+};
+
 type WidgetData =
-  | { type: "image"; placeholder?: boolean; description?: string; alt?: string; url?: string; source?: string }
+  | ({ type: "image" } & WidgetImageItem)
+  | { type: "gallery"; caption?: string; items?: WidgetImageItem[] }
   | { type: "diagram"; source: string; caption?: string; error?: string }
   | { type: "video"; url: string; title?: string; recommended_by?: string; why?: string }
   | {
@@ -2659,14 +3981,237 @@ function fmtTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+type StickyDock = "full" | "left" | "right";
+type StickyDrag = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  dx: number;
+  dy: number;
+  dragging: boolean;
+  originDock: StickyDock;
+};
+
+const STICKY_DRAG_START_PX = 6;
+const STICKY_COLLAPSE_PX = 84;
+const STICKY_RESTORE_BOTTOM_PX = 190;
+const STICKY_RESTORE_CENTER_PX = 120;
+
+function mobileStickyGestureEnabled() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 720px)").matches;
+}
+
 function StickyPlayer() {
   const t = useT();
   const p = useAudioPlayer();
   const s = p.state;
+  const [dock, setDock] = useState<StickyDock>("full");
+  const [drag, setDrag] = useState<StickyDrag | null>(null);
+  const suppressDockClickRef = useRef(false);
   const hasScrubber = s.engine === "gemini" && s.duration > 0;
   const pct = hasScrubber ? Math.min(100, (s.currentTime / s.duration) * 100) : 0;
+
+  const isDocked = dock !== "full";
+  const stickyClass = [
+    "audio-sticky",
+    isDocked ? "audio-sticky--docked" : "",
+    dock === "left" ? "audio-sticky--docked-left" : "",
+    dock === "right" ? "audio-sticky--docked-right" : "",
+    drag?.dragging ? "audio-sticky--dragging" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const dragStyle = drag
+    ? ({
+        "--audio-drag-x": `${drag.dx}px`,
+        "--audio-drag-y": `${drag.dy}px`,
+      } as CSSProperties)
+    : undefined;
+
+  const startGesture = useCallback((clientX: number, clientY: number, originDock: StickyDock, pointerId = -1) => {
+    setDrag({
+      pointerId,
+      startX: clientX,
+      startY: clientY,
+      dx: 0,
+      dy: 0,
+      dragging: false,
+      originDock,
+    });
+  }, []);
+
+  const updateGesture = useCallback((clientX: number, clientY: number, pointerId?: number) => {
+    setDrag((cur) => {
+      if (!cur || (pointerId !== undefined && cur.pointerId !== pointerId)) return cur;
+      const dx = clientX - cur.startX;
+      const dy = clientY - cur.startY;
+      return {
+        ...cur,
+        dx,
+        dy,
+        dragging: cur.dragging || Math.hypot(dx, dy) > STICKY_DRAG_START_PX,
+      };
+    });
+  }, []);
+
+  const finishGestureAt = useCallback((clientX: number, clientY: number, pointerId?: number) => {
+    setDrag((cur) => {
+      if (!cur || (pointerId !== undefined && cur.pointerId !== pointerId)) return cur;
+      const nearBottom = clientY > window.innerHeight - STICKY_RESTORE_BOTTOM_PX;
+      const nearCenter =
+        Math.abs(clientX - window.innerWidth / 2) < STICKY_RESTORE_CENTER_PX;
+      const shouldRestore = cur.originDock !== "full" && nearBottom && nearCenter;
+
+      if (cur.dragging || shouldRestore) {
+        suppressDockClickRef.current = true;
+        window.setTimeout(() => {
+          suppressDockClickRef.current = false;
+        }, 80);
+      }
+
+      if (cur.originDock === "full") {
+        const mostlyHorizontal = Math.abs(cur.dx) > Math.abs(cur.dy) * 1.1;
+        if (cur.dragging && mostlyHorizontal && Math.abs(cur.dx) > STICKY_COLLAPSE_PX) {
+          setDock(cur.dx < 0 ? "left" : "right");
+        }
+      } else if (shouldRestore) {
+        setDock("full");
+      } else if (cur.dragging && Math.abs(cur.dx) > STICKY_COLLAPSE_PX) {
+        setDock(clientX < window.innerWidth / 2 ? "left" : "right");
+      }
+
+      return null;
+    });
+  }, []);
+
+  const handlePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLElement>) => {
+      if (!mobileStickyGestureEnabled() || e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (dock === "full" && target.closest("button,input")) return;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {}
+      startGesture(e.clientX, e.clientY, dock, e.pointerId);
+    },
+    [dock, startGesture]
+  );
+
+  const handlePointerMove = useCallback((e: ReactPointerEvent<HTMLElement>) => {
+    updateGesture(e.clientX, e.clientY, e.pointerId);
+  }, [updateGesture]);
+
+  const finishPointerGesture = useCallback((e: ReactPointerEvent<HTMLElement>) => {
+    finishGestureAt(e.clientX, e.clientY, e.pointerId);
+  }, [finishGestureAt]);
+
+  const handleMouseDown = useCallback(
+    (e: ReactMouseEvent<HTMLElement>) => {
+      if (!mobileStickyGestureEnabled() || e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (dock === "full" && target.closest("button,input")) return;
+      startGesture(e.clientX, e.clientY, dock);
+      const handleWindowMouseMove = (event: MouseEvent) => {
+        updateGesture(event.clientX, event.clientY);
+      };
+      const handleWindowMouseUp = (event: MouseEvent) => {
+        window.removeEventListener("mousemove", handleWindowMouseMove);
+        finishGestureAt(event.clientX, event.clientY);
+      };
+      window.addEventListener("mousemove", handleWindowMouseMove);
+      window.addEventListener("mouseup", handleWindowMouseUp, { once: true });
+    },
+    [dock, finishGestureAt, startGesture, updateGesture]
+  );
+
+  const handleDockPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      handlePointerDown(e);
+    },
+    [handlePointerDown]
+  );
+
+  const handleDockPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      handlePointerMove(e);
+    },
+    [handlePointerMove]
+  );
+
+  const finishDockPointerGesture = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      finishPointerGesture(e);
+    },
+    [finishPointerGesture]
+  );
+
+  const handleDockMouseDown = useCallback(
+    (e: ReactMouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      handleMouseDown(e);
+    },
+    [handleMouseDown]
+  );
+
+  const handleDockButtonClick = useCallback(
+    (e: ReactMouseEvent<HTMLButtonElement>) => {
+      if (suppressDockClickRef.current) {
+        e.preventDefault();
+        return;
+      }
+      if (s.preparing) return;
+      if (s.mode === "paused") p.resume();
+      else p.pause();
+    },
+    [p, s.mode, s.preparing]
+  );
+
+  if (isDocked) {
+    const dockLabel = s.preparing
+      ? t("lecturePreparing")
+      : s.mode === "paused"
+        ? t("lectureResume")
+        : t("lecturePause");
+    return (
+      <div
+        className={stickyClass}
+        style={dragStyle}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishPointerGesture}
+        onPointerCancel={finishPointerGesture}
+        onMouseDown={handleMouseDown}
+      >
+        <button
+          className="audio-dock-button"
+          onPointerDown={handleDockPointerDown}
+          onPointerMove={handleDockPointerMove}
+          onPointerUp={finishDockPointerGesture}
+          onPointerCancel={finishDockPointerGesture}
+          onMouseDown={handleDockMouseDown}
+          onClick={handleDockButtonClick}
+          aria-label={dockLabel}
+          title={dockLabel}
+        >
+          {s.preparing ? <span className="spinner" /> : s.mode === "paused" ? "▶" : "⏸"}
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="audio-sticky">
+    <div
+      className={stickyClass}
+      style={dragStyle}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishPointerGesture}
+      onPointerCancel={finishPointerGesture}
+      onMouseDown={handleMouseDown}
+    >
       <div className="audio-sticky-row">
         <div className="audio-sticky-meta">
           <span className="audio-sticky-engine">{s.engine === "gemini" ? "🎙" : "🔊"}</span>
@@ -2751,7 +4296,7 @@ function StickyPlayer() {
             step={0.1}
             value={Math.min(s.currentTime, s.duration)}
             onChange={(e) => p.seekTo(Number(e.target.value))}
-            aria-label="seek"
+            aria-label={t("audioSeek")}
           />
         </div>
       )}
@@ -2798,7 +4343,7 @@ function ExpandedPlayer() {
                 step={0.1}
                 value={Math.min(s.currentTime, s.duration)}
                 onChange={(e) => p.seekTo(Number(e.target.value))}
-                aria-label="seek"
+                aria-label={t("audioSeek")}
               />
             </div>
             <span className="audio-seektime">{fmtTime(s.duration)}</span>
@@ -3379,6 +4924,7 @@ function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
     );
   }
   if (widget.type === "image") return <ImagePlaceholder id={id} widget={widget as any} />;
+  if (widget.type === "gallery") return <GalleryWidget id={id} widget={widget as any} />;
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
   if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
   if (widget.type === "interactive") return <InteractiveWidget id={id} widget={widget as any} />;
@@ -3387,6 +4933,35 @@ function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
       {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
     </div>
   );
+}
+
+const WIKIMEDIA_THUMB_STEPS = [20, 40, 60, 120, 250, 330, 500, 960, 1280, 1920, 3840];
+
+function isBlockedWikimediaThumbnail(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "upload.wikimedia.org") return false;
+    if (!parsed.pathname.includes("/thumb/")) return false;
+    const file = parsed.pathname.split("/").pop() ?? "";
+    const match = file.match(/^(\d+)px-/);
+    if (!match) return false;
+    return !WIKIMEDIA_THUMB_STEPS.includes(Number(match[1]));
+  } catch {
+    return false;
+  }
+}
+
+function resolveWidgetImage(url?: string, source?: string) {
+  const hasUrl = typeof url === "string" && url.length > 0;
+  const isLocal = hasUrl && (url!.startsWith("/") || url!.startsWith("file://"));
+  const blockedRemote = hasUrl && !isLocal && isBlockedWikimediaThumbnail(url!);
+  const imgSrc = !hasUrl || blockedRemote
+    ? ""
+    : isLocal
+      ? convertFileSrc(url!.replace(/^file:\/\//, ""))
+      : url!;
+  const linkHref = source || (isLocal ? imgSrc : url);
+  return { hasUrl, imgSrc, linkHref };
 }
 
 function videoEmbedUrl(url: string): string | null {
@@ -3693,6 +5268,91 @@ ${css}
 </style></head><body>${html}<script>${js}</script></body></html>`;
 }
 
+function GalleryWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { caption?: string; items?: WidgetImageItem[] };
+}) {
+  const t = useT();
+  const items = Array.isArray(widget.items) ? widget.items : [];
+  const [failed, setFailed] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    setFailed(new Set());
+  }, [widget.items]);
+
+  if (items.length === 0) {
+    return (
+      <figure className="widget widget-gallery">
+        <div className="widget-image-box">
+          <span className="widget-label">{t("widgetGallery")}</span>
+          <span className="widget-id">#{id}</span>
+        </div>
+      </figure>
+    );
+  }
+
+  return (
+    <figure className="widget widget-gallery">
+      <div className="widget-gallery-grid">
+        {items.map((item, index) => {
+          const { hasUrl, imgSrc, linkHref } = resolveWidgetImage(item.url, item.source);
+          const unavailable = hasUrl && (!imgSrc || failed.has(index));
+          return (
+            <div className="widget-gallery-item" key={`${id}-${index}`}>
+              {hasUrl && imgSrc && !failed.has(index) ? (
+                <a
+                  href={linkHref}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="widget-image-link"
+                >
+                  <img
+                    src={imgSrc}
+                    alt={item.alt || ""}
+                    className="widget-image-real"
+                    onError={() =>
+                      setFailed((prev) => {
+                        const next = new Set(prev);
+                        next.add(index);
+                        return next;
+                      })
+                    }
+                  />
+                </a>
+              ) : (
+                <div className={`widget-image-box ${unavailable ? "widget-image-error" : ""}`}>
+                  <span className="widget-label">
+                    {unavailable ? t("widgetImageUnavailable") : t("widgetImage")}
+                  </span>
+                  <span className="widget-id">#{id}.{index + 1}</span>
+                </div>
+              )}
+              {(item.description || item.alt || item.generated) && (
+                <figcaption className="widget-gallery-caption">
+                  {item.description}
+                  {item.alt && (
+                    <span className="widget-alt">
+                      {" "}
+                      · {t("widgetImageAlt")} {item.alt}
+                    </span>
+                  )}
+                  {item.generated && (
+                    <span className="widget-generated"> · {t("imgGenerated")}</span>
+                  )}
+                </figcaption>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {widget.caption && <figcaption>{widget.caption}</figcaption>}
+    </figure>
+  );
+}
+
 function ImagePlaceholder({
   id,
   widget,
@@ -3707,31 +5367,32 @@ function ImagePlaceholder({
   };
 }) {
   const t = useT();
-  const hasUrl = typeof widget.url === "string" && widget.url.length > 0;
-  // Local files (absolute paths or file://) need the tauri asset protocol.
-  // Anything else (https://...) is rendered as-is.
-  const isLocal =
-    hasUrl && (widget.url!.startsWith("/") || widget.url!.startsWith("file://"));
-  const imgSrc = !hasUrl
-    ? ""
-    : isLocal
-      ? convertFileSrc(widget.url!.replace(/^file:\/\//, ""))
-      : widget.url!;
-  const linkHref = widget.source || (isLocal ? imgSrc : widget.url);
+  const [imageFailed, setImageFailed] = useState(false);
+  const { hasUrl, imgSrc, linkHref } = resolveWidgetImage(widget.url, widget.source);
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imgSrc]);
   return (
     <figure className="widget widget-image">
-      {hasUrl ? (
+      {hasUrl && imgSrc && !imageFailed ? (
         <a
           href={linkHref}
           target="_blank"
           rel="noreferrer"
           className="widget-image-link"
         >
-          <img src={imgSrc} alt={widget.alt || ""} className="widget-image-real" />
+          <img
+            src={imgSrc}
+            alt={widget.alt || ""}
+            className="widget-image-real"
+            onError={() => setImageFailed(true)}
+          />
         </a>
       ) : (
-        <div className="widget-image-box">
-          <span className="widget-label">{t("widgetImage")}</span>
+        <div className={`widget-image-box ${hasUrl ? "widget-image-error" : ""}`}>
+          <span className="widget-label">
+            {hasUrl ? t("widgetImageUnavailable") : t("widgetImage")}
+          </span>
           <span className="widget-id">#{id}</span>
         </div>
       )}
@@ -3882,7 +5543,7 @@ function DiagramWidget({
             <button onClick={() => setScale((s) => Math.min(6, +(s + 0.25).toFixed(2)))}>
               +
             </button>
-            <button onClick={() => setZoomed(false)} aria-label="close">
+            <button onClick={() => setZoomed(false)} aria-label={t("close")}>
               ✕
             </button>
           </div>
@@ -3910,14 +5571,14 @@ function SubmoduleStateIcon({ state }: { state: GenState }) {
   }
   if (state === "ready") {
     return (
-      <span className="state-icon ready" title="ready" aria-label="ready">
+      <span className="state-icon ready" title={t("stateReady")} aria-label={t("stateReady")}>
         ✓
       </span>
     );
   }
   if (state === "failed") {
     return (
-      <span className="state-icon failed" title="failed" aria-label="failed">
+      <span className="state-icon failed" title={t("stateFailed")} aria-label={t("stateFailed")}>
         !
       </span>
     );

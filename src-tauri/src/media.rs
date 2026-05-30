@@ -1,9 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use image::{GenericImageView, ImageReader};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -35,6 +38,7 @@ pub struct BraveImageHit {
 
 const IMAGE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/images/search";
 const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn brave_image_search(
     api_key: &str,
@@ -102,6 +106,365 @@ pub fn brave_image_search(
         })
         .collect();
     Ok(out)
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedImage {
+    url: String,
+    score: i32,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// Expand a search result into concrete image candidates. Brave sometimes
+/// returns blocked, downscaled, or hotlink-hostile direct URLs while the source
+/// page contains better `og:image`, `srcset`, JSON-LD, or Wikimedia/IIIF image
+/// URLs. This only reads public HTML and never bypasses auth, paywalls, or DRM.
+pub fn expanded_image_candidates(hit: &BraveImageHit, limit: usize) -> Vec<BraveImageHit> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::<String>::new();
+
+    if is_usable_remote_image_url(&hit.url) {
+        seen.insert(hit.url.clone());
+        out.push(hit.clone());
+    }
+
+    if !hit.source.trim().is_empty() && out.len() < limit {
+        match extract_images_from_page(&hit.source) {
+            Ok(mut extracted) => {
+                extracted.sort_by(|a, b| {
+                    b.score
+                        .cmp(&a.score)
+                        .then_with(|| image_area(b).cmp(&image_area(a)))
+                });
+                for img in extracted {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    if seen.insert(img.url.clone()) {
+                        out.push(BraveImageHit {
+                            title: hit.title.clone(),
+                            source: hit.source.clone(),
+                            url: img.url,
+                            thumbnail: hit.thumbnail.clone(),
+                            width: img.width.or(hit.width),
+                            height: img.height.or(hit.height),
+                        });
+                    }
+                }
+            }
+            Err(e) => eprintln!("[media] extract images from '{}': {e}", hit.source),
+        }
+    }
+
+    out.truncate(limit);
+    out
+}
+
+fn image_area(img: &ExtractedImage) -> u64 {
+    img.width.unwrap_or(0) as u64 * img.height.unwrap_or(0) as u64
+}
+
+fn extract_images_from_page(page_url: &str) -> Result<Vec<ExtractedImage>, MediaError> {
+    let base = Url::parse(page_url).map_err(|e| MediaError::Download(e.to_string()))?;
+    let html = fetch_public_html(page_url)?;
+    let mut out = Vec::<ExtractedImage>::new();
+
+    for tag in html_tags(&html, "meta") {
+        let attrs = parse_attrs(&tag);
+        let key = attrs
+            .get("property")
+            .or_else(|| attrs.get("name"))
+            .or_else(|| attrs.get("itemprop"))
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(
+            key.as_str(),
+            "og:image"
+                | "og:image:url"
+                | "og:image:secure_url"
+                | "twitter:image"
+                | "twitter:image:src"
+                | "thumbnailurl"
+                | "image"
+        ) {
+            if let Some(url) = attrs.get("content").and_then(|v| absolutize(&base, v)) {
+                push_candidate(&mut out, url, 100, None, None);
+            }
+        }
+    }
+
+    for tag in html_tags(&html, "link") {
+        let attrs = parse_attrs(&tag);
+        let rel = attrs.get("rel").map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let as_attr = attrs.get("as").map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        if rel.contains("image_src") || (rel.contains("preload") && as_attr == "image") {
+            if let Some(url) = attrs.get("href").and_then(|v| absolutize(&base, v)) {
+                push_candidate(&mut out, url, 90, None, None);
+            }
+        }
+    }
+
+    for tag in html_tags(&html, "source").into_iter().chain(html_tags(&html, "img")) {
+        let attrs = parse_attrs(&tag);
+        let width = attrs.get("width").and_then(|v| parse_dimension(v));
+        let height = attrs.get("height").and_then(|v| parse_dimension(v));
+        if looks_like_tracking_pixel(width, height) {
+            continue;
+        }
+        if let Some(srcset) = attrs
+            .get("srcset")
+            .or_else(|| attrs.get("data-srcset"))
+            .or_else(|| attrs.get("data-lazy-srcset"))
+        {
+            if let Some(raw) = best_srcset_url(srcset) {
+                if let Some(url) = absolutize(&base, &raw) {
+                    push_candidate(&mut out, url, 70, width, height);
+                }
+            }
+        }
+        for key in ["src", "data-src", "data-original", "data-lazy-src", "data-full-url"] {
+            if let Some(url) = attrs.get(key).and_then(|v| absolutize(&base, v)) {
+                push_candidate(&mut out, url, 55, width, height);
+            }
+        }
+    }
+
+    for json_text in json_ld_blocks(&html) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json_text) {
+            collect_json_images(&value, &base, &mut out);
+        }
+    }
+
+    out.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| image_area(b).cmp(&image_area(a)))
+    });
+    let mut seen = HashSet::new();
+    out.retain(|img| seen.insert(img.url.clone()));
+    Ok(out)
+}
+
+fn fetch_public_html(page_url: &str) -> Result<String, MediaError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(12))
+        .redirects(5)
+        .build();
+    let resp = agent
+        .get(page_url)
+        .set("Accept", "text/html,application/xhtml+xml")
+        .set("Accept-Encoding", "identity")
+        .set("User-Agent", "Mozilla/5.0 (Learn-Almost-Anything)")
+        .call()
+        .map_err(|e| MediaError::Download(e.to_string()))?;
+    let content_type = resp
+        .header("content-type")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.is_empty()
+        && !content_type.contains("text/html")
+        && !content_type.contains("application/xhtml")
+    {
+        return Err(MediaError::Download(format!("not html: {content_type}")));
+    }
+    let mut bytes = Vec::new();
+    resp.into_reader()
+        .take((MAX_HTML_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| MediaError::Download(e.to_string()))?;
+    if bytes.len() > MAX_HTML_BYTES {
+        return Err(MediaError::Download(format!(
+            "html larger than {}MB cap",
+            MAX_HTML_BYTES / 1024 / 1024
+        )));
+    }
+    String::from_utf8(bytes).map_err(|e| MediaError::Decode(e.to_string()))
+}
+
+fn html_tags(html: &str, tag: &str) -> Vec<String> {
+    let pattern = format!(r#"(?is)<{}\b[^>]*>"#, regex::escape(tag));
+    Regex::new(&pattern)
+        .ok()
+        .map(|re| re.find_iter(html).map(|m| m.as_str().to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn parse_attrs(tag: &str) -> HashMap<String, String> {
+    let Ok(re) = Regex::new(
+        r#"(?is)([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#,
+    ) else {
+        return HashMap::new();
+    };
+    re.captures_iter(tag)
+        .filter_map(|cap| {
+            let key = cap.get(1)?.as_str().to_ascii_lowercase();
+            let raw = cap
+                .get(2)
+                .or_else(|| cap.get(3))
+                .or_else(|| cap.get(4))?
+                .as_str();
+            Some((key, html_unescape_attr(raw.trim())))
+        })
+        .collect()
+}
+
+fn html_unescape_attr(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn absolutize(base: &Url, raw: &str) -> Option<String> {
+    let value = html_unescape_attr(raw.trim());
+    if value.is_empty()
+        || value.starts_with("data:")
+        || value.starts_with("blob:")
+        || value.starts_with("javascript:")
+    {
+        return None;
+    }
+    let url = base.join(&value).ok()?;
+    let s = url.to_string();
+    if is_usable_remote_image_url(&s) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+fn is_usable_remote_image_url(url: &str) -> bool {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    !lower.starts_with("data:")
+        && !lower.contains(".svg")
+        && !lower.contains("sprite")
+        && !lower.contains("logo")
+        && !lower.contains("favicon")
+}
+
+fn parse_dimension(value: &str) -> Option<u32> {
+    value
+        .trim()
+        .trim_end_matches("px")
+        .parse::<f32>()
+        .ok()
+        .map(|v| v.round() as u32)
+}
+
+fn looks_like_tracking_pixel(width: Option<u32>, height: Option<u32>) -> bool {
+    matches!((width, height), (Some(w), Some(h)) if w < 80 || h < 80)
+}
+
+fn best_srcset_url(srcset: &str) -> Option<String> {
+    srcset
+        .split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.split_whitespace();
+            let url = parts.next()?.trim();
+            let descriptor = parts.next().unwrap_or("");
+            let score = descriptor
+                .trim_end_matches('w')
+                .trim_end_matches('x')
+                .parse::<f32>()
+                .unwrap_or(1.0);
+            Some((url.to_string(), (score * 1000.0) as i32))
+        })
+        .max_by_key(|(_, score)| *score)
+        .map(|(url, _)| url)
+}
+
+fn json_ld_blocks(html: &str) -> Vec<String> {
+    let Ok(re) = Regex::new(
+        r#"(?is)<script\b[^>]*type\s*=\s*["'][^"']*ld\+json[^"']*["'][^>]*>(.*?)</script>"#,
+    ) else {
+        return Vec::new();
+    };
+    re.captures_iter(html)
+        .filter_map(|cap| cap.get(1).map(|m| html_unescape_attr(m.as_str().trim())))
+        .collect()
+}
+
+fn collect_json_images(value: &serde_json::Value, base: &Url, out: &mut Vec<ExtractedImage>) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_json_images(item, base, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let type_text = map
+                .get("@type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            for key in ["image", "thumbnailUrl", "contentUrl"] {
+                if let Some(v) = map.get(key) {
+                    collect_json_image_value(v, base, out, 95);
+                }
+            }
+            if type_text.contains("imageobject") {
+                if let Some(v) = map.get("url") {
+                    collect_json_image_value(v, base, out, 95);
+                }
+            }
+            for child in map.values() {
+                collect_json_images(child, base, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_json_image_value(
+    value: &serde_json::Value,
+    base: &Url,
+    out: &mut Vec<ExtractedImage>,
+    score: i32,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(url) = absolutize(base, s) {
+                push_candidate(out, url, score, None, None);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_json_image_value(item, base, out, score);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["url", "contentUrl", "thumbnailUrl"] {
+                if let Some(v) = map.get(key) {
+                    collect_json_image_value(v, base, out, score);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_candidate(
+    out: &mut Vec<ExtractedImage>,
+    url: String,
+    score: i32,
+    width: Option<u32>,
+    height: Option<u32>,
+) {
+    if !is_usable_remote_image_url(&url) || looks_like_tracking_pixel(width, height) {
+        return;
+    }
+    out.push(ExtractedImage {
+        url,
+        score,
+        width,
+        height,
+    });
 }
 
 /// Download, decode any common format, resize so the longer side is at most

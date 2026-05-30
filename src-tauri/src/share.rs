@@ -257,6 +257,10 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             )?;
             Ok(Value::Null)
         }
+        "get_wizard_questions" => to_val(crate::get_wizard_questions(
+            app.state(),
+            req("courseId")?,
+        )?),
         "save_structure" => to_val(crate::save_structure(
             app.state(),
             app.state(),
@@ -296,7 +300,19 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
                 app.state(),
                 app.state(),
                 app.state(),
+                app.state(),
                 req("courseId")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "start_course_suggestion" => {
+            crate::start_course_suggestion(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                s("backend"),
+                req("language")?,
             )?;
             Ok(Value::Null)
         }

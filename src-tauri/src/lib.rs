@@ -1,9 +1,10 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -30,6 +31,33 @@ const ENRICH_EVENT: &str = "agent_enrich";
 /// Fired when the homework assignment chain finishes generating in the
 /// background, so the reader can load assignments.
 const ASSIGNMENTS_EVENT: &str = "agent_assignments";
+const COURSE_SUGGESTION_EVENT: &str = "course_suggestion";
+static COURSE_SUGGESTION_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn now_unix_secs() -> Result<i64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())
+        .map(|d| d.as_secs() as i64)
+}
+
+fn generated_course_title(value: &Value) -> Option<String> {
+    value
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(80).collect::<String>())
+}
+
+fn fast_model_config(settings: &SettingsState, backend: &str) -> Value {
+    let mut model_config = settings.stage_model(backend, "planning");
+    let reasoning = "low";
+    if let Value::Object(map) = &mut model_config {
+        map.insert("reasoning".to_string(), json!(reasoning));
+    }
+    model_config
+}
 
 #[tauri::command]
 fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String> {
@@ -49,10 +77,7 @@ fn create_course(
         return Err(format!("unknown agent: {agent}"));
     }
     let id = Uuid::new_v4().to_string();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs() as i64;
+    let now = now_unix_secs()?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::insert_course(&conn, &id, &topic, &language, &agent, now).map_err(|e| e.to_string())?;
     Ok(id)
@@ -67,10 +92,7 @@ fn set_course_agent(
     if agent != "claude" && agent != "codex" {
         return Err(format!("unknown agent: {agent}"));
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs() as i64;
+    let now = now_unix_secs()?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::set_course_agent(&conn, &course_id, &agent, now).map_err(|e| e.to_string())
 }
@@ -86,6 +108,120 @@ fn sidecar_call(
         .map_err(|e| e.to_string())
 }
 
+fn pick_course_suggestion_backend(requested: Option<String>) -> Result<String, String> {
+    let requested = requested
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = requested {
+        if name != "claude" && name != "codex" {
+            return Err(format!("unknown agent: {name}"));
+        }
+        if cli_present(name) {
+            return Ok(name.to_string());
+        }
+    }
+    if cli_present("codex") {
+        Ok("codex".to_string())
+    } else if cli_present("claude") {
+        Ok("claude".to_string())
+    } else {
+        Err("no agent available".to_string())
+    }
+}
+
+#[tauri::command]
+fn start_course_suggestion(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    backend: Option<String>,
+    language: String,
+) -> Result<(), String> {
+    let backend = pick_course_suggestion_backend(backend)?;
+    let language = language
+        .trim()
+        .split('-')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("en")
+        .to_string();
+    let courses = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::list_courses(&conn).map_err(|e| e.to_string())?
+    };
+    let course_briefs: Vec<Value> = courses
+        .into_iter()
+        .take(50)
+        .map(|course| {
+            json!({
+                "topic": course.topic,
+                "title": course.title,
+                "language": course.language,
+                "status": course.status,
+                "agent": course.agent,
+            })
+        })
+        .collect();
+    let sidecar = sidecar_state.inner().clone();
+    let model_config = fast_model_config(settings_state.inner().as_ref(), &backend);
+    let app2 = app.clone();
+    if COURSE_SUGGESTION_RUNNING.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+
+    thread::spawn(move || {
+        let params = json!({
+            "backend": backend.clone(),
+            "language": language.clone(),
+            "courses": course_briefs,
+            "modelConfig": model_config,
+        });
+        let payload = match sidecar.call("suggest_course_idea", params, Duration::from_secs(240)) {
+            Ok(value) => {
+                let topic = value
+                    .get("topic")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.chars().take(160).collect::<String>());
+                match topic {
+                    Some(topic) => {
+                        let title = value
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.chars().take(120).collect::<String>())
+                            .unwrap_or_else(|| topic.clone());
+                        let reason = value
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.chars().take(240).collect::<String>())
+                            .unwrap_or_default();
+                        json!({
+                            "ok": true,
+                            "topic": topic,
+                            "title": title,
+                            "reason": reason,
+                            "agent": backend,
+                            "language": language,
+                        })
+                    }
+                    None => json!({ "ok": false, "error": "suggestion missing topic" }),
+                }
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+        emit_course_suggestion_event(&app2, payload);
+        COURSE_SUGGESTION_RUNNING.store(false, Ordering::Release);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn save_wizard_answers(
     db_state: tauri::State<'_, Arc<Db>>,
@@ -95,6 +231,14 @@ fn save_wizard_answers(
 ) -> Result<(), String> {
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
     courses::save_wizard_answers(&conn, &paths, &course_id, &answers).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_wizard_questions(
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+) -> Result<serde_json::Value, String> {
+    courses::read_wizard_questions(&paths, &course_id).map_err(|e| e.to_string())
 }
 
 fn emit_stage_event(app: &AppHandle, course_id: &str, submodule_id: &str, stage: &str) {
@@ -190,6 +334,11 @@ fn emit_assignments_event(app: &AppHandle, course_id: &str, submodule_id: &str) 
     event_hub().publish(ASSIGNMENTS_EVENT, payload);
 }
 
+fn emit_course_suggestion_event(app: &AppHandle, payload: serde_json::Value) {
+    let _ = app.emit(COURSE_SUGGESTION_EVENT, payload.clone());
+    event_hub().publish(COURSE_SUGGESTION_EVENT, payload);
+}
+
 /// Log a finished stage's wall-clock time to stderr and surface it in the UI
 /// transcript, so the real per-stage cost is observable.
 fn log_timing(
@@ -215,6 +364,7 @@ fn log_timing(
 fn start_wizard_questions(
     app: AppHandle,
     db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
     sidecar_state: tauri::State<'_, Arc<Sidecar>>,
     settings_state: tauri::State<'_, Arc<SettingsState>>,
     course_id: String,
@@ -226,6 +376,8 @@ fn start_wizard_questions(
             .ok_or_else(|| format!("course not found: {course_id}"))?
     };
     let sidecar = sidecar_state.inner().clone();
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
     let model_config = settings_state.stage_model(&course.agent, "planning");
     let app2 = app.clone();
     let cid = course_id.clone();
@@ -250,7 +402,20 @@ fn start_wizard_questions(
             Duration::from_secs(3000),
             cb,
         ) {
-            Ok(v) => json!({ "ok": true, "result": v }),
+            Ok(v) => {
+                if let Some(title) = generated_course_title(&v) {
+                    if let Ok(conn) = db.0.lock() {
+                        if let Ok(now) = now_unix_secs() {
+                            let _ = db::set_course_title(&conn, &cid, &title, now);
+                        }
+                    }
+                }
+                let questions = v.get("questions").cloned().unwrap_or_else(|| json!([]));
+                if let Err(e) = courses::write_wizard_questions(&paths, &cid, &questions) {
+                    eprintln!("[wizard_questions] failed to save questions: {e}");
+                }
+                json!({ "ok": true, "result": v })
+            }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         };
         emit_job_event(&app2, &cid, "wizard_questions", payload);
@@ -487,6 +652,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
             summary: m.summary.unwrap_or_default(),
             generation_state: "pending".to_string(),
             test_passed: false,
+            test_passed_at: None,
             submodules: m
                 .submodules
                 .into_iter()
@@ -496,6 +662,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
                     summary: s.summary.unwrap_or_default(),
                     generation_state: "pending".to_string(),
                     test_passed: false,
+                    test_passed_at: None,
                     submodules: vec![],
                 })
                 .collect(),
@@ -516,11 +683,15 @@ fn spawn_generate_submodule(
     writing_model: serde_json::Value,
     tests_model: serde_json::Value,
     gemini_image_model: String,
-) -> Result<(), String> {
-    // Set state to 'generating' before spawning so UI can reflect it on the
-    // very next refresh.
+    course_serial: bool,
+) -> Result<bool, String> {
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if course_serial
+            && db::has_generating_submodule(&conn, &course.id).map_err(|e| e.to_string())?
+        {
+            return Ok(false);
+        }
         db::set_module_generation_state(&conn, &submodule_id, "generating")
             .map_err(|e| e.to_string())?;
     }
@@ -861,9 +1032,11 @@ fn spawn_generate_submodule(
         };
 
         // Stage 4 — illustrate. Per image widget: generate (Gemini/Codex) when
-        // the agent flagged "generate", else search Brave. Soft on every error.
-        let can_illustrate =
-            brave_api_key.is_some() || gemini_key.is_some() || course.agent == "codex";
+        // flagged, search via Brave when configured, or ask the selected agent
+        // to find public source pages when Brave is not.
+        let can_illustrate = brave_api_key.is_some()
+            || gemini_key.is_some()
+            || matches!(course.agent.as_str(), "claude" | "codex");
         let widgets = if can_illustrate {
             emit_stage_event(&app2, &cid, &sid, "illustrate");
             let illustrate_started = Instant::now();
@@ -908,7 +1081,7 @@ fn spawn_generate_submodule(
         // Assignments are independent — signal the reader to load them.
         emit_assignments_event(&app2, &cid, &sid);
     });
-    Ok(())
+    Ok(true)
 }
 
 // Generate one illustration as JPEG bytes. Prefers Gemini (reliable); falls
@@ -983,7 +1156,8 @@ fn illustrate_widgets(
     gemini_image_model: &str,
 ) -> serde_json::Value {
     let can_generate = gemini_key.is_some() || course.agent == "codex";
-    if brave_key.is_none() && !can_generate {
+    let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
+    if brave_key.is_none() && !can_generate && !can_agent_search {
         return widgets;
     }
     let mut widgets_map = match widgets.as_object() {
@@ -994,17 +1168,38 @@ fn illustrate_widgets(
     let images_dir =
         media::submodule_images_dir(&paths.course_dir(&course.id), mod_id, sub_id);
 
-    // Collect the image widgets that still need an image (no real url yet).
-    // (wid, description, alt, mode)
-    let jobs: Vec<(String, String, String, String)> = widgets_map
-        .iter()
-        .filter_map(|(wid, w)| {
-            if w.get("type").and_then(|v| v.as_str()) != Some("image") {
-                return None;
-            }
-            // Skip if the agent already supplied a real URL.
-            if w.get("url").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
-                return None;
+    // Collect image-like widget entries that need a local image. Gallery items
+    // are treated as separate image jobs but written back into their parent
+    // gallery. External URLs from the agent are localized; direct hotlinks can
+    // go stale or be rejected by the origin.
+    // (widget_id, gallery_index, image_key, description, alt, mode, existing_url, source)
+    type ImageJob = (
+        String,
+        Option<usize>,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let mut jobs: Vec<ImageJob> = Vec::new();
+    {
+        let mut push_image_job = |widget_id: &str,
+                                  gallery_index: Option<usize>,
+                                  image_key: String,
+                                  w: &serde_json::Value| {
+            let existing_url = w
+                .get("url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if existing_url
+                .as_deref()
+                .map(is_local_widget_url)
+                .unwrap_or(false)
+            {
+                return;
             }
             let description = w
                 .get("description")
@@ -1013,13 +1208,41 @@ fn illustrate_widgets(
                 .trim()
                 .to_string();
             if description.is_empty() {
-                return None;
+                return;
             }
             let alt = w.get("alt").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mode = w.get("mode").and_then(|v| v.as_str()).unwrap_or("search").to_string();
-            Some((wid.clone(), description, alt, mode))
-        })
-        .collect();
+            let source = w
+                .get("source")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            jobs.push((
+                widget_id.to_string(),
+                gallery_index,
+                image_key,
+                description,
+                alt,
+                mode,
+                existing_url,
+                source,
+            ));
+        };
+
+        for (wid, w) in widgets_map.iter() {
+            match w.get("type").and_then(|v| v.as_str()) {
+                Some("image") => push_image_job(wid, None, wid.clone(), w),
+                Some("gallery") => {
+                    if let Some(items) = w.get("items").and_then(|v| v.as_array()) {
+                        for (idx, item) in items.iter().enumerate() {
+                            push_image_job(wid, Some(idx), format!("{wid}-{idx}"), item);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     if jobs.is_empty() {
         return widgets;
     }
@@ -1028,14 +1251,16 @@ fn illustrate_widgets(
     // generation). Bounded so we don't blow past Brave's rate limit.
     let concurrency = jobs.len().min(3);
     let queue = std::sync::Mutex::new(std::collections::VecDeque::from(jobs));
-    let fills: std::sync::Mutex<std::collections::HashMap<String, WidgetFill>> =
+    let fills: std::sync::Mutex<
+        std::collections::HashMap<String, (String, Option<usize>, WidgetFill)>,
+    > =
         std::sync::Mutex::new(std::collections::HashMap::new());
 
     std::thread::scope(|s| {
         for _ in 0..concurrency {
             s.spawn(|| loop {
                 let job = { queue.lock().unwrap().pop_front() };
-                let Some((wid, description, alt, mode)) = job else {
+                let Some((widget_id, gallery_index, image_key, description, alt, mode, existing_url, source)) = job else {
                     break;
                 };
                 if let Some(fill) = illustrate_one_widget(
@@ -1044,33 +1269,58 @@ fn illustrate_widgets(
                     sub_id,
                     sidecar,
                     &images_dir,
-                    &wid,
+                    &image_key,
                     &description,
                     &alt,
                     &mode,
+                    existing_url.as_deref(),
+                    source.as_deref(),
                     brave_key,
                     gemini_key,
                     model_config,
                     gemini_image_model,
                 ) {
-                    fills.lock().unwrap().insert(wid, fill);
+                    fills
+                        .lock()
+                        .unwrap()
+                        .insert(image_key, (widget_id, gallery_index, fill));
                 }
             });
         }
     });
 
-    for (wid, fill) in fills.into_inner().unwrap() {
+    for (_image_key, (wid, gallery_index, fill)) in fills.into_inner().unwrap() {
         if let Some(w) = widgets_map.get_mut(&wid) {
-            w["url"] = json!(fill.url);
-            w["placeholder"] = json!(false);
-            if fill.generated {
-                w["generated"] = json!(true);
-            }
-            if let Some(src) = fill.source.filter(|s| !s.is_empty()) {
-                w["source"] = json!(src);
-            }
-            if let Some(orig) = fill.original_url {
-                w["original_url"] = json!(orig);
+            if let Some(idx) = gallery_index {
+                if let Some(item) = w
+                    .get_mut("items")
+                    .and_then(|v| v.as_array_mut())
+                    .and_then(|items| items.get_mut(idx))
+                {
+                    item["url"] = json!(fill.url);
+                    item["placeholder"] = json!(false);
+                    if fill.generated {
+                        item["generated"] = json!(true);
+                    }
+                    if let Some(src) = fill.source.filter(|s| !s.is_empty()) {
+                        item["source"] = json!(src);
+                    }
+                    if let Some(orig) = fill.original_url {
+                        item["original_url"] = json!(orig);
+                    }
+                }
+            } else {
+                w["url"] = json!(fill.url);
+                w["placeholder"] = json!(false);
+                if fill.generated {
+                    w["generated"] = json!(true);
+                }
+                if let Some(src) = fill.source.filter(|s| !s.is_empty()) {
+                    w["source"] = json!(src);
+                }
+                if let Some(orig) = fill.original_url {
+                    w["original_url"] = json!(orig);
+                }
             }
         }
     }
@@ -1081,6 +1331,37 @@ fn illustrate_widgets(
     serde_json::Value::Object(widgets_map)
 }
 
+const WIKIMEDIA_THUMB_STEPS: &[u32] =
+    &[20, 40, 60, 120, 250, 330, 500, 960, 1280, 1920, 3840];
+
+fn is_local_widget_url(url: &str) -> bool {
+    url.starts_with('/') || url.starts_with("file://")
+}
+
+fn normalize_wikimedia_thumbnail_url(url: &str) -> String {
+    if !url.starts_with("https://upload.wikimedia.org/") || !url.contains("/thumb/") {
+        return url.to_string();
+    }
+    let Some((prefix, file)) = url.rsplit_once('/') else {
+        return url.to_string();
+    };
+    let Some((width, rest)) = file.split_once("px-") else {
+        return url.to_string();
+    };
+    let Ok(width) = width.parse::<u32>() else {
+        return url.to_string();
+    };
+    if WIKIMEDIA_THUMB_STEPS.contains(&width) {
+        return url.to_string();
+    }
+    let step = WIKIMEDIA_THUMB_STEPS
+        .iter()
+        .copied()
+        .find(|s| *s >= width)
+        .unwrap_or_else(|| *WIKIMEDIA_THUMB_STEPS.last().unwrap());
+    format!("{prefix}/{step}px-{rest}")
+}
+
 /// Resolved image for one widget: the on-disk url plus provenance.
 struct WidgetFill {
     url: String,
@@ -1089,9 +1370,119 @@ struct WidgetFill {
     generated: bool,
 }
 
+fn expand_image_hits(
+    hits: Vec<media::BraveImageHit>,
+    tried_urls: &mut std::collections::HashSet<String>,
+) -> Vec<media::BraveImageHit> {
+    let mut candidates = Vec::new();
+    for hit in hits.into_iter().take(6) {
+        for candidate in media::expanded_image_candidates(&hit, 4) {
+            if candidate.url.is_empty() || tried_urls.contains(&candidate.url) {
+                continue;
+            }
+            tried_urls.insert(candidate.url.clone());
+            candidates.push(candidate);
+            if candidates.len() >= 5 {
+                return candidates;
+            }
+        }
+    }
+    candidates
+}
+
+fn agent_image_search(
+    app: &AppHandle,
+    course: &db::Course,
+    sub_id: &str,
+    sidecar: &Arc<Sidecar>,
+    description: &str,
+    alt: &str,
+    query: &str,
+    model_config: &serde_json::Value,
+) -> (Vec<media::BraveImageHit>, String) {
+    let params = json!({
+        "backend": course.agent,
+        "language": course.language,
+        "description": description,
+        "alt": alt,
+        "topic": course.topic,
+        "query": query,
+        "modelConfig": model_config,
+    });
+    let value = match sidecar.call_with_progress(
+        "search_image_candidates",
+        params,
+        Duration::from_secs(300),
+        |p| {
+            emit_progress_event(
+                app,
+                &course.id,
+                sub_id,
+                "illustrate",
+                &p.label,
+                p.detail.as_deref(),
+            )
+        },
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[illustrate] agent image search: {e}");
+            return (Vec::new(), String::new());
+        }
+    };
+    let refined = value
+        .get("refinedQuery")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let hits = value
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|candidate| {
+                    let url = candidate
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let source_raw = candidate
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if url.is_empty() && source_raw.is_empty() {
+                        return None;
+                    }
+                    let source = if source_raw.is_empty() {
+                        url.clone()
+                    } else {
+                        source_raw
+                    };
+                    Some(media::BraveImageHit {
+                        title: candidate
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        source,
+                        url,
+                        thumbnail: String::new(),
+                        width: None,
+                        height: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (hits, refined)
+}
+
 /// Resolve a single image widget: generate (Gemini/Codex) when flagged, else
-/// search Brave across up to 3 refined rounds. Returns None to leave a
-/// placeholder. Safe to call from multiple threads concurrently.
+/// search Brave or the selected agent across up to 3 refined rounds. Returns
+/// None to leave a placeholder. Safe to call from multiple threads concurrently.
 fn illustrate_one_widget(
     app: &AppHandle,
     course: &db::Course,
@@ -1102,11 +1493,34 @@ fn illustrate_one_widget(
     description: &str,
     alt: &str,
     mode: &str,
+    existing_url: Option<&str>,
+    existing_source: Option<&str>,
     brave_key: &Option<String>,
     gemini_key: &Option<String>,
     model_config: &serde_json::Value,
     gemini_image_model: &str,
 ) -> Option<WidgetFill> {
+    if let Some(url) = existing_url.filter(|u| u.starts_with("https://")) {
+        let normalized_url = normalize_wikimedia_thumbnail_url(url);
+        match media::download_resize_jpeg(&normalized_url, 2000) {
+            Ok(jpeg) => {
+                let final_path = images_dir.join(format!("{wid}.jpg"));
+                match media::save_bytes(&jpeg, &final_path) {
+                    Ok(()) => {
+                        return Some(WidgetFill {
+                            url: final_path.to_string_lossy().to_string(),
+                            source: existing_source.map(|s| s.to_string()),
+                            original_url: Some(url.to_string()),
+                            generated: false,
+                        });
+                    }
+                    Err(e) => eprintln!("[illustrate] save external '{wid}': {e}"),
+                }
+            }
+            Err(e) => eprintln!("[illustrate] external image '{wid}': {e}"),
+        }
+    }
+
     // Generation path: custom illustration the agent flagged as "generate".
     // On success return it; on failure fall through to search below.
     if mode == "generate" {
@@ -1128,8 +1542,8 @@ fn illustrate_one_widget(
         }
     }
 
-    // Search path — requires a Brave key. Without one, leave a placeholder.
-    let key = brave_key.clone()?;
+    // Search path. Brave is preferred when configured; otherwise ask the
+    // selected agent to find public source pages, then extract images locally.
     let mut query = format!("{} {}", description, course.topic);
     let mut tried_urls = std::collections::HashSet::<String>::new();
 
@@ -1142,23 +1556,36 @@ fn illustrate_one_widget(
             "searching",
             Some(&format!("{} (round {}/3)", query, round + 1)),
         );
-        let hits = match media::brave_image_search(&key, &query, 8) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
-                break;
+        let mut next_query = String::new();
+        let hits = if let Some(key) = brave_key.as_deref() {
+            match media::brave_image_search(key, &query, 8) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
+                    break;
+                }
             }
+        } else {
+            let (hits, refined) = agent_image_search(
+                app,
+                course,
+                sub_id,
+                sidecar,
+                description,
+                alt,
+                &query,
+                model_config,
+            );
+            next_query = refined;
+            hits
         };
-        let candidates: Vec<media::BraveImageHit> = hits
-            .into_iter()
-            .filter(|h| !tried_urls.contains(&h.url))
-            .take(3)
-            .collect();
+        let candidates = expand_image_hits(hits, &mut tried_urls);
         if candidates.is_empty() {
+            if !next_query.is_empty() && next_query != query {
+                query = next_query;
+                continue;
+            }
             break;
-        }
-        for c in &candidates {
-            tried_urls.insert(c.url.clone());
         }
 
         let round_dir = images_dir.join("_candidates").join(wid).join(format!("r{round}"));
@@ -1272,16 +1699,64 @@ fn illustrate_one_widget(
 struct SettingsStatus {
     brave_configured: bool,
     gemini_configured: bool,
+    mcp_servers: Vec<McpServerStatus>,
     tts_engine: String,
     tts_voice: String,
     gemini_image_model: String,
     gemini_tts_model: String,
 }
 
+#[derive(serde::Serialize)]
+struct McpServerStatus {
+    id: String,
+    name: String,
+    enabled_for: Vec<String>,
+    tools: Vec<String>,
+    source: String,
+}
+
 fn settings_status(state: &SettingsState) -> SettingsStatus {
+    let brave_configured = state.brave_api_key().is_some();
+    let mut mcp_servers = vec![
+        McpServerStatus {
+            id: "context7".to_string(),
+            name: "Context7".to_string(),
+            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            tools: vec![
+                "resolve-library-id".to_string(),
+                "query-docs".to_string(),
+            ],
+            source: "bundled".to_string(),
+        },
+        McpServerStatus {
+            id: "mediawiki".to_string(),
+            name: "Wikimedia / MediaWiki".to_string(),
+            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            tools: vec![
+                "search-page".to_string(),
+                "get-page".to_string(),
+                "get-file".to_string(),
+                "list-wikis".to_string(),
+            ],
+            source: "read-only config".to_string(),
+        },
+    ];
+    if brave_configured {
+        mcp_servers.push(McpServerStatus {
+            id: "brave".to_string(),
+            name: "Brave Search".to_string(),
+            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            tools: vec![
+                "brave_web_search".to_string(),
+                "brave_image_search".to_string(),
+            ],
+            source: "settings.json".to_string(),
+        });
+    }
     SettingsStatus {
-        brave_configured: state.brave_api_key().is_some(),
+        brave_configured,
         gemini_configured: state.gemini_api_key().is_some(),
+        mcp_servers,
         tts_engine: state.tts_engine(),
         tts_voice: state.tts_voice(),
         gemini_image_model: state.gemini_image_model(),
@@ -1907,7 +2382,9 @@ fn start_generate_submodule(
         writing_model,
         tests_model,
         settings_state.gemini_image_model(),
+        false,
     )
+    .map(|_| ())
 }
 
 #[tauri::command]
@@ -1932,7 +2409,7 @@ fn start_first_pending_submodule(
     };
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
-    spawn_generate_submodule(
+    let started = spawn_generate_submodule(
         &app,
         db_state.inner().clone(),
         paths_state.inner().clone(),
@@ -1944,8 +2421,13 @@ fn start_first_pending_submodule(
         writing_model,
         tests_model,
         settings_state.gemini_image_model(),
+        true,
     )?;
-    Ok(Some(sub_id))
+    if started {
+        Ok(Some(sub_id))
+    } else {
+        Ok(None)
+    }
 }
 
 #[tauri::command]
@@ -2057,6 +2539,8 @@ pub fn run() {
             create_course,
             set_course_agent,
             sidecar_call,
+            start_course_suggestion,
+            get_wizard_questions,
             save_wizard_answers,
             start_wizard_questions,
             start_build_structure,

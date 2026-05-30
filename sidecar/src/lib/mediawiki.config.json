@@ -1,0 +1,27 @@
+{
+  "defaultWiki": "commons.wikimedia.org",
+  "allowWikiManagement": false,
+  "wikis": {
+    "commons.wikimedia.org": {
+      "sitename": "Wikimedia Commons",
+      "server": "https://commons.wikimedia.org",
+      "articlepath": "/wiki",
+      "scriptpath": "/w",
+      "readOnly": true
+    },
+    "en.wikipedia.org": {
+      "sitename": "Wikipedia",
+      "server": "https://en.wikipedia.org",
+      "articlepath": "/wiki",
+      "scriptpath": "/w",
+      "readOnly": true
+    },
+    "ru.wikipedia.org": {
+      "sitename": "Википедия",
+      "server": "https://ru.wikipedia.org",
+      "articlepath": "/wiki",
+      "scriptpath": "/w",
+      "readOnly": true
+    }
+  }
+}

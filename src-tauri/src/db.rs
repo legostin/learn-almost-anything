@@ -32,6 +32,7 @@ pub fn open(path: &Path) -> Result<Db, DbError> {
 pub struct Course {
     pub id: String,
     pub topic: String,
+    pub title: Option<String>,
     pub language: String,
     pub status: String,
     pub agent: String,
@@ -39,17 +40,18 @@ pub struct Course {
     pub updated_at: i64,
 }
 
-const COURSE_COLS: &str = "id, topic, language, status, agent, created_at, updated_at";
+const COURSE_COLS: &str = "id, topic, title, language, status, agent, created_at, updated_at";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
         id: r.get(0)?,
         topic: r.get(1)?,
-        language: r.get(2)?,
-        status: r.get(3)?,
-        agent: r.get(4)?,
-        created_at: r.get(5)?,
-        updated_at: r.get(6)?,
+        title: r.get(2)?,
+        language: r.get(3)?,
+        status: r.get(4)?,
+        agent: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
     })
 }
 
@@ -108,6 +110,19 @@ pub fn set_course_agent(
     conn.execute(
         "UPDATE courses SET agent = ?2, updated_at = ?3 WHERE id = ?1",
         rusqlite::params![id, agent, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_course_title(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, title, now],
     )?;
     Ok(())
 }
@@ -245,16 +260,18 @@ pub fn set_test_passed(conn: &Connection, module_id: &str, now: i64) -> Result<(
     Ok(())
 }
 
-pub fn passed_submodule_ids(
+pub fn passed_submodules(
     conn: &Connection,
     course_id: &str,
-) -> Result<std::collections::HashSet<String>, rusqlite::Error> {
+) -> Result<std::collections::HashMap<String, i64>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT p.module_id FROM progress p \
+        "SELECT p.module_id, p.test_passed_at FROM progress p \
          JOIN modules m ON m.id = p.module_id \
          WHERE m.course_id = ?1 AND p.test_passed_at IS NOT NULL",
     )?;
-    let rows = stmt.query_map([course_id], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map([course_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
     rows.collect()
 }
 
@@ -281,4 +298,21 @@ pub fn first_pending_submodule(
         rusqlite::Error::QueryReturnedNoRows => Ok(None),
         other => Err(other),
     })
+}
+
+pub fn has_generating_submodule(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS( \
+             SELECT 1 FROM modules \
+             WHERE course_id = ?1 \
+               AND parent_id IS NOT NULL \
+               AND generation_state = 'generating' \
+         )",
+        [course_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
 }

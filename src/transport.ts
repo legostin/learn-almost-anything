@@ -32,7 +32,10 @@ export async function invoke<T>(
     headers: HTTP_HEADERS,
     body: JSON.stringify(args ?? {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(body || `Command ${cmd} failed with HTTP ${res.status}`);
+  }
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }

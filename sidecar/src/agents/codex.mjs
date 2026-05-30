@@ -18,25 +18,46 @@ import {
   rendererAvailable,
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
+import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
 // long-lived state. Without a key, falls back to a shared instance.
-function makeCodex(braveApiKey) {
-  if (!braveApiKey) return defaultCodex;
-  return new Codex({
-    config: {
-      mcp_servers: {
-        brave: braveStdioServer(braveApiKey),
-      },
-    },
-  });
+function makeCodex(braveApiKey, opts = {}) {
+  const config = {};
+  if (opts.referenceMcp !== false) {
+    config.mcp_servers = {
+      context7: context7StdioServer(),
+      mediawiki: mediawikiStdioServer(),
+    };
+  }
+  if (braveApiKey) {
+    config.mcp_servers = {
+      ...(config.mcp_servers || {}),
+      brave: braveStdioServer(braveApiKey),
+    };
+  }
+  if (opts.imageGenerationEnabled === false) {
+    config.features = { image_generation: false };
+  }
+  if (Object.keys(config).length === 0) return defaultCodex;
+  return new Codex({ config });
 }
 
 const defaultCodex = new Codex();
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
+}
+
+function normalizeCourseTitle(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .trim()
+    .replace(/^["'«“”]+|["'»“”]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 80)
+    .trim();
 }
 
 const baseThreadOptions = {
@@ -53,7 +74,8 @@ const baseThreadOptions = {
 };
 
 // Maps a { model, reasoning } config (from settings) onto Codex ThreadOptions.
-// Codex has no "off" — the closest is "minimal"; Claude-only "max" → "high".
+// Some Codex models do not support "minimal"; use "low" for off-like settings.
+// Claude-only "max" → "high".
 function modelThreadOptions(modelConfig) {
   const out = {};
   const model = modelConfig?.model;
@@ -61,10 +83,10 @@ function modelThreadOptions(modelConfig) {
   const reasoning = modelConfig?.reasoning;
   if (typeof reasoning === "string" && reasoning.trim()) {
     const map = {
-      off: "minimal",
-      none: "minimal",
-      disabled: "minimal",
-      minimal: "minimal",
+      off: "low",
+      none: "low",
+      disabled: "low",
+      minimal: "low",
       low: "low",
       medium: "medium",
       high: "high",
@@ -78,18 +100,25 @@ function modelThreadOptions(modelConfig) {
 }
 
 function threadOptions(opts) {
-  return { ...baseThreadOptions, ...modelThreadOptions(opts?.modelConfig) };
+  const overrides = {};
+  if (typeof opts?.networkAccessEnabled === "boolean") {
+    overrides.networkAccessEnabled = opts.networkAccessEnabled;
+  }
+  if (typeof opts?.webSearchEnabled === "boolean") {
+    overrides.webSearchEnabled = opts.webSearchEnabled;
+  }
+  return { ...baseThreadOptions, ...overrides, ...modelThreadOptions(opts?.modelConfig) };
 }
 
 async function runOnce(prompt, outputSchema, opts) {
-  const thread = makeCodex(opts?.braveApiKey).startThread(threadOptions(opts));
+  const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
   const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
   return turn.finalResponse;
 }
 
 async function runStreamed(prompt, outputSchema, onProgress, opts) {
   if (!onProgress) return await runOnce(prompt, outputSchema, opts);
-  const thread = makeCodex(opts?.braveApiKey).startThread(threadOptions(opts));
+  const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
   const stream = await thread.runStreamed(
     prompt,
     outputSchema ? { outputSchema } : undefined
@@ -235,6 +264,10 @@ curriculum. Each question must have 3-5 short, mutually-distinct, concrete,
 topic-specific answer options the learner can pick from. The user will also
 have a free-text fallback so do NOT add an "other" option.
 
+Also generate a short display title for the whole course. It must NOT copy the
+learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
+written in language "${lang}", with no quotes and no "course about/on" wrapper.
+
 For EACH question, set "multi": true by default — most questions about
 preferences, scopes, materials, goals, formats naturally accept several
 answers (e.g. "Какие жанры интересны?" — портрет AND пейзаж; "Какими
@@ -252,6 +285,7 @@ ${terminologyGuide(lang)}`;
     type: "object",
     additionalProperties: false,
     properties: {
+      title: { type: "string" },
       questions: {
         type: "array",
         minItems: 5,
@@ -273,7 +307,7 @@ ${terminologyGuide(lang)}`;
         },
       },
     },
-    required: ["questions"],
+    required: ["title", "questions"],
   };
 
   const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
@@ -297,7 +331,61 @@ ${terminologyGuide(lang)}`;
     })
     .filter(Boolean);
   if (questions.length === 0) throw new Error("Codex returned zero valid questions");
-  return { questions };
+  return { title: normalizeCourseTitle(parsed?.title), questions };
+}
+
+export async function suggestCourseIdea({ courses, language, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const courseList = Array.isArray(courses) ? courses.slice(0, 50) : [];
+  const prompt = `You are helping choose the next useful course for a learner.
+The app already has these local courses:
+${JSON.stringify(courseList, null, 2)}
+
+Suggest exactly ONE NEW standalone course idea. It should be adjacent to,
+deeper than, or usefully complementary to the existing courses, but it must be
+a separate course topic, not a continuation of an existing course.
+
+Hard rules:
+- Do not duplicate or lightly rename any existing course topic/title.
+- Do not suggest the next lesson, module, submodule, unit, homework, or visit
+  inside an existing course.
+- Do not use action wording like "continue", "resume", "lesson 1", "unit 2",
+  "next module", or "part 2".
+- Do not return the current focus course with a narrower lesson title.
+- The "topic" must be suitable as the raw topic for creating a brand-new course.
+- If the list is empty, suggest a strong first course for a curious learner.
+- Avoid generic productivity/self-help suggestions.
+
+Keep this fast: do not research the web. Use only the course list above and
+general judgment. Write the topic and title in language code "${lang}".
+
+${terminologyGuide(lang)}`;
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      topic: { type: "string" },
+      title: { type: "string" },
+      reason: { type: "string" },
+    },
+    required: ["topic", "title", "reason"],
+  };
+
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, schema, ctx?.progress, {
+    modelConfig,
+    imageGenerationEnabled: false,
+    webSearchEnabled: false,
+  });
+  const parsed = JSON.parse(text);
+  const topic = normalizeCourseTitle(parsed?.topic);
+  if (!topic) throw new Error("Codex response missing topic");
+  return {
+    topic,
+    title: normalizeCourseTitle(parsed?.title) || topic,
+    reason: typeof parsed?.reason === "string" ? parsed.reason.trim().slice(0, 240) : "",
+  };
 }
 
 function prevArticlesBlock(previousArticles, lang) {
@@ -600,6 +688,92 @@ Output ONLY a single-line JSON object:
   };
 }
 
+const imageCandidateSearchSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    candidates: {
+      type: "array",
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          source: { type: "string" },
+          url: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["title", "source", "url", "reason"],
+      },
+    },
+    refinedQuery: { type: "string" },
+  },
+  required: ["candidates", "refinedQuery"],
+};
+
+/**
+ * Search the public web for image candidates when Brave image search is not
+ * configured. The Rust layer will fetch source pages and extract og:image,
+ * srcset, JSON-LD, and large img assets; this stage finds credible pages.
+ * @param {{language:string, description:string, alt?:string, topic:string, query:string, modelConfig?:object}} params
+ * @returns {Promise<{candidates:{title:string,source:string,url:string,reason:string}[], refinedQuery:string}>}
+ */
+export async function searchImageCandidates(params, ctx) {
+  const { language, description, alt, topic, query: searchQuery, modelConfig } = params;
+  const lang = (language || "en").trim();
+  const prompt = `Find public image candidates for a course article on "${topic}".
+
+The image slot needs, in language "${lang}":
+  description: "${description}"
+${alt ? `  alt text: "${alt}"\n` : ""}
+Current search query: "${searchQuery || description}"
+
+Use built-in web search and, when useful, fetch/read public source pages. Return
+pages likely to contain the real image; the app can extract og:image,
+twitter:image, srcset, JSON-LD ImageObject, and large <img> assets from them.
+
+Rules:
+- Search only public pages. Do not use login-only, paywalled, private, or DRM
+  sources.
+- Prefer museum/official collection pages, Wikimedia/Wikipedia file pages,
+  archives, official documentation, and reputable publications.
+- For famous artworks, real people, real places, museum halls, maps/plans,
+  historical artifacts, technical diagrams, and software screenshots: find the
+  real source. Never invent or suggest generated substitutes.
+- For software screenshots, prefer official docs/product pages. Do not return
+  pseudo-screenshots.
+- It is OK if "url" is empty. Put a direct image URL there only when you are
+  confident it is a real image file/asset. Always put the public page in
+  "source" when available.
+- Return 0-8 candidates. If nothing credible is found, return [] and provide a
+  better refinedQuery.`;
+
+  ctx?.progress?.({ label: "searching images", detail: searchQuery || description });
+  const text = await runStreamed(
+    prompt,
+    imageCandidateSearchSchema,
+    ctx?.progress,
+    { modelConfig }
+  );
+  const parsed = JSON.parse(text);
+  const candidates = Array.isArray(parsed?.candidates)
+    ? parsed.candidates
+        .filter((c) => c && (typeof c.source === "string" || typeof c.url === "string"))
+        .slice(0, 8)
+        .map((c) => ({
+          title: String(c.title || "").slice(0, 200),
+          source: String(c.source || ""),
+          url: String(c.url || ""),
+          reason: String(c.reason || "").slice(0, 400),
+        }))
+    : [];
+  return {
+    candidates,
+    refinedQuery: typeof parsed?.refinedQuery === "string" ? parsed.refinedQuery : "",
+  };
+}
+
 /** Stage 1 — draft a fresh article + initial widgets (images + diagrams). */
 export async function submoduleDraft(params, ctx) {
   return await draftArticleInternal(params, ctx?.progress);
@@ -625,6 +799,35 @@ const draftSchema = {
           source: { type: "string" },
         },
         required: ["id", "mode", "description", "alt", "url", "source"],
+      },
+    },
+    galleryWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          caption: { type: "string" },
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 6,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                mode: { type: "string", enum: ["search", "generate"] },
+                description: { type: "string" },
+                alt: { type: "string" },
+                url: { type: "string" },
+                source: { type: "string" },
+              },
+              required: ["mode", "description", "alt", "url", "source"],
+            },
+          },
+        },
+        required: ["id", "caption", "items"],
       },
     },
     diagramWidgets: {
@@ -689,6 +892,7 @@ const draftSchema = {
     "article",
     "notes",
     "imageWidgets",
+    "galleryWidgets",
     "diagramWidgets",
     "videoWidgets",
     "interactiveWidgets",
@@ -746,11 +950,16 @@ You may add visual-aid widgets where they meaningfully help. Mark insertion
 points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
+  ::widget{type="gallery" id="gal-1"}      (2-6 related images shown together)
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
-Use 0-4 widgets total — skip them if the topic is purely textual prose.
+Use 0-4 widgets total, counting one gallery as one widget. Skip widgets if the
+topic is purely textual prose. Do a silent paragraph-by-paragraph visual pass:
+for each paragraph, decide whether an image, gallery, diagram, video, or
+interactive widget would make the learner understand faster. Add visuals where
+they are genuinely useful; don't decorate every paragraph.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
@@ -777,18 +986,48 @@ Hard rules — your widget WILL BE REJECTED if it breaks any of these:
     setTimeout, Math.
   • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
 
-IMAGE WIDGETS — set "mode" per image:
+IMAGE AND GALLERY WIDGETS — set "mode" per image item:
   • "search" — a real, specific, existing thing to FIND not invent: a particular
-    famous artwork (e.g. a specific Leonardo da Vinci painting), a real photo of
-    a real place/person/object/event, a historical artifact, a real screenshot.
-    "description" = a precise search target.
-  • "generate" — a custom conceptual/explanatory illustration that won't exist
-    as a findable photo. "description" = a rich, detailed image-generation prompt
-    (subject, style, composition).
-  When unsure, prefer "search" — a real image beats an invented one for facts.
+    named artwork by a known artist, a real person/place/object/event, a
+    historical artifact, a museum hall, a map, a real diagram/plan, or a real
+    software screenshot. "description" = a precise search target.
+  • "generate" — a custom conceptual/explanatory illustration that probably
+    will not exist as a findable photo: an ideal artist workspace, what should
+    be on a table, a staged practice setup, a stylized scene, an abstract
+    concept made visual, or a detailed composition you describe.
+    "description" = a rich generation prompt (subject, style, composition,
+    lighting, important objects).
 
-Return widgets in four separate arrays:
+Hard visual sourcing rules:
+  • Famous artwork by a known artist -> ALWAYS "search", never "generate".
+    Prefer museum, Wikimedia, official collection, archive, or other credible
+    source pages. If the exact artwork cannot be found, skip the image rather
+    than invent it.
+  • Real people, real places, museum halls, historical artifacts, architecture,
+    maps, plans, technical diagrams, and software screenshots -> "search".
+    Never generate pseudo-photographs of real people/places, fake maps, fake
+    museum plans, fake historical documents, or pseudo-screenshots.
+  • Software/program UI -> search for a real screenshot or official docs image.
+    If none is confidently available, describe the UI in text or use a Mermaid
+    diagram; do NOT generate a fake screenshot.
+  • Real map/plan/schema (e.g. Hermitage floor plan) -> search for the real
+    image/source. If not found, do not hallucinate the plan. Use a textual
+    explanation or high-level Mermaid diagram only if it is clearly conceptual.
+  • Artist workspace, table setup, material layout, abstract workflow, or
+    custom teaching scene -> usually "generate", because a perfectly matching
+    real photo is unlikely.
+  • When unsure whether something exists, try search first. Use "generate" only
+    when the image is intentionally illustrative rather than evidentiary.
+
+Use a gallery instead of a single image when the paragraph benefits from
+comparison or several examples: 2-6 works by an artist, multiple views of a
+museum hall, a sequence of historical photos, several portraits of one person
+from a period, before/after examples, or multiple UI states. Keep each gallery
+coherent: one reason to look at all images together, not a random dump.
+
+Return widgets in five separate arrays:
 - imageWidgets: [{id, mode ("search"|"generate"), description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
+- galleryWidgets: [{id, caption (in ${lang}), items: [{mode ("search"|"generate"), description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
@@ -807,16 +1046,27 @@ ${
   community-recommended videos. Try queries like "best youtube videos
   to learn X reddit", "<topic> recommended video tutorials
   site:reddit.com", "<topic> video recommendations forum".
-- mcp__brave__brave_image_search — for REAL image URLs.
+- mcp__brave__brave_image_search — for REAL image URLs for image and
+  gallery widgets.
 
 Codex's built-in web search is also available — use whichever fits.
 `
     : `Use Codex's built-in web search where useful to verify facts and
-find concrete examples + community-recommended videos. For image widgets,
-leave url/source as "" unless you have a confidently-correct direct
-image URL.
+find concrete examples + community-recommended videos. For image and gallery
+widgets, use web search to find credible public source pages when the exact
+real image matters. Put the page URL in "source"; put "url" only if you are
+confident it is a direct real image URL. Source-only is useful: the app will
+extract og:image, srcset, JSON-LD, and large image assets from the page later.
 `
 }
+You also have built-in read-only reference MCP tools:
+- Context7 MCP (resolve-library-id, query-docs) for current library/framework/
+  API/CLI/cloud-service documentation. Use it for programming and tool-specific
+  course material instead of relying on stale memory.
+- Wikimedia/MediaWiki MCP (search-page, get-page, get-file, list-wikis) for
+  Wikimedia Commons, English Wikipedia, and Russian Wikipedia. Use it for
+  artworks, museum objects, public-domain media, encyclopedia pages, real maps,
+  file metadata, and Commons image URLs before falling back to general search.
 
 SOURCES: at the end, return a "sources" array listing every URL you
 ACTUALLY consulted while writing this submodule. Be honest — do not
@@ -848,6 +1098,7 @@ ${terminologyGuide(lang)}`;
     notes: typeof parsed.notes === "string" ? parsed.notes.trim() : "",
     widgets: mergeWidgets(
       parsed.imageWidgets,
+      parsed.galleryWidgets,
       parsed.diagramWidgets,
       parsed.videoWidgets,
       parsed.interactiveWidgets
@@ -856,7 +1107,13 @@ ${terminologyGuide(lang)}`;
   };
 }
 
-function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets, interactiveWidgets) {
+function mergeWidgets(
+  imageWidgets,
+  galleryWidgets,
+  diagramWidgets,
+  videoWidgets,
+  interactiveWidgets
+) {
   const out = {};
   if (Array.isArray(imageWidgets)) {
     for (const w of imageWidgets) {
@@ -872,6 +1129,38 @@ function mergeWidgets(imageWidgets, diagramWidgets, videoWidgets, interactiveWid
           ...(typeof w.source === "string" && w.source.trim()
             ? { source: w.source.trim() }
             : {}),
+        };
+      }
+    }
+  }
+  if (Array.isArray(galleryWidgets)) {
+    for (const w of galleryWidgets) {
+      if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
+      const items = Array.isArray(w.items)
+        ? w.items
+            .map((item) => {
+              if (!item) return null;
+              const url = typeof item.url === "string" ? item.url.trim() : "";
+              return {
+                type: "image",
+                mode: item.mode === "generate" ? "generate" : "search",
+                description:
+                  typeof item.description === "string" ? item.description.trim() : "",
+                alt: typeof item.alt === "string" ? item.alt.trim() : "",
+                ...(url ? { url } : {}),
+                ...(typeof item.source === "string" && item.source.trim()
+                  ? { source: item.source.trim() }
+                  : {}),
+                placeholder: !url,
+              };
+            })
+            .filter((item) => item && (item.description || item.url))
+        : [];
+      if (items.length > 0) {
+        out[w.id.trim()] = {
+          type: "gallery",
+          caption: typeof w.caption === "string" ? w.caption.trim() : "",
+          items: items.slice(0, 6),
         };
       }
     }
@@ -1360,13 +1649,20 @@ Below is the course brief — a markdown file with the wizard Q&A.
 ${courseMd}
 </course-md>
 
-Design a curriculum: a list of top-level modules, each with a few submodules.
+First generate a short display title for the whole course. It must NOT copy the
+learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
+written in language "${lang}", with no quotes and no "course about/on" wrapper.
+
+Then design a curriculum: a list of top-level modules, each with a few submodules.
 
 Research first. Before sketching anything, web-search how this subject is
 taught in serious places: university programs (especially the best ones —
 top art academies, top engineering schools, etc. as relevant), well-regarded
 online courses, established certifications, and the canonical reading paths
 practitioners recommend. Use the convergence of those programs as your skeleton.
+Use Context7 when the subject depends on current library/framework/API docs.
+Use Wikimedia/MediaWiki for art/history/museum/public-domain media topics when
+that gives a more authoritative source than general search.
 If multiple traditions exist (e.g. русская академическая vs European atelier),
 acknowledge them and pick the one that best fits the learner's goals from the
 brief. Never improvise a structure from intuition when established programs
@@ -1394,6 +1690,7 @@ ${terminologyGuide(lang)}`;
     type: "object",
     additionalProperties: false,
     properties: {
+      title: { type: "string" },
       modules: {
         type: "array",
         minItems: 4,
@@ -1415,7 +1712,7 @@ ${terminologyGuide(lang)}`;
         },
       },
     },
-    required: ["modules"],
+    required: ["title", "modules"],
   };
 
   const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
@@ -1439,5 +1736,5 @@ ${terminologyGuide(lang)}`;
         })),
     };
   });
-  return { modules };
+  return { title: normalizeCourseTitle(parsed?.title), modules };
 }
