@@ -23,6 +23,14 @@ function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
 
+function naturalLanguageGuide(lang) {
+  return `Write in natural, human-sounding language in "${lang}". Avoid AI-like filler, generic motivational phrases, formulaic transitions, over-polished symmetry, and repeated sentence patterns. Prefer concrete wording, varied sentence length, and the tone of a knowledgeable human tutor writing for one learner.`;
+}
+
+function languageStyleGuide(lang) {
+  return `${terminologyGuide(lang)}\n\n${naturalLanguageGuide(lang)}`;
+}
+
 function normalizeCourseFormat(value) {
   return ["academic_course", "mini_module", "podcast_series"].includes(value)
     ? value
@@ -526,7 +534,7 @@ editor + fact-checker. Do this silently; return only the polished result:
 5. Flow — light polish only; do NOT restructure or change the voice.
 Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
 {"article":"<markdown with widget markers>","widgets":[<widget objects>],"sources":[<source objects>],"notes":"<editor log>"}
@@ -797,7 +805,7 @@ ${prevArticlesBlock(previousArticles, lang)}Article to review:
 ${article}
 </article>
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line:
 {"article":"<full revised article markdown>","notes":"<1-3 sentences describing what you fixed; empty string if nothing>"}`;
@@ -1112,7 +1120,7 @@ Output ONLY JSON on a single line, no prose, no markdown fence:
 All titles and summaries in language "${lang}". When proposing, return the
 FULL tree, not a diff. The tree size must follow the chosen generation format.
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
 }
 
 function normalizeRefineResponse(parsed) {
@@ -1206,7 +1214,7 @@ Constraints:
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
@@ -1283,7 +1291,7 @@ CRITICAL — make options indistinguishable except by their meaning:
 - Vary which option is correct from question to question; do not default to the
   first option.
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
 {"questions":[{"text":"...","options":["...","..."],"correct":0,"explanation":"..."}]}`;
@@ -1419,7 +1427,7 @@ reviewer grades against (this drives an iterative review-and-revise loop).
 Tasks must be concrete and achievable from the article; no busywork.
 All text in language "${lang}".
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
 {"assignments":[{"title":"...","prompt":"...","type":"image|text|document|archive|github","criteria":"..."}]}`;
@@ -1475,6 +1483,8 @@ Judge the submission against the task and criteria. Produce:
   them if passed). Encouraging but honest.
 Reference what you actually see. Don't pass weak work; don't nitpick endlessly —
 minor remarks alone don't block passing.
+
+${naturalLanguageGuide(lang)}
 
 Output ONLY a single-line JSON object:
 {"remarks":[{"text":"...","criticality":"major"}],"verdict":"revise","summary":"..."}`;
@@ -1686,7 +1696,7 @@ written in language "${lang}", with no quotes and no "course about/on" wrapper.
 
 Write everything in language "${lang}".
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape: {"title":"...","questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
@@ -1739,7 +1749,7 @@ Hard rules:
 Keep this fast: do not research the web. Use only the course list above and
 general judgment. Write the topic and title in language code "${lang}".
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape: {"topic":"...","title":"...","reason":"..."}`;

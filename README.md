@@ -10,7 +10,7 @@
 
 > ⚠️ **Free — uses *your* existing subscriptions.** Courses and assignment review are written by Claude Code or the Codex CLI through your **Claude Pro/Max** or **ChatGPT Plus/Pro** subscription — no per-token API spend. Brave Search (free tier) and Gemini API (paid — for image generation and premium TTS) are optional.
 
-<!-- TODO: hero GIF — overview of the feed, opening a submodule, audio -->
+<!-- Generated from docs/demo/hero.tape with VHS. -->
 <p align="center"><img src="docs/media/hero.gif" alt="overview" width="720"></p>
 
 ## What it does

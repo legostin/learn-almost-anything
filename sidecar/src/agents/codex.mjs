@@ -50,6 +50,14 @@ function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
 
+function naturalLanguageGuide(lang) {
+  return `Write in natural, human-sounding language in "${lang}". Avoid AI-like filler, generic motivational phrases, formulaic transitions, over-polished symmetry, and repeated sentence patterns. Prefer concrete wording, varied sentence length, and the tone of a knowledgeable human tutor writing for one learner.`;
+}
+
+function languageStyleGuide(lang) {
+  return `${terminologyGuide(lang)}\n\n${naturalLanguageGuide(lang)}`;
+}
+
 function normalizeCourseFormat(value) {
   return ["academic_course", "mini_module", "podcast_series"].includes(value)
     ? value
@@ -381,7 +389,7 @@ several apply frustrates the learner.
 
 Write everything in language "${lang}".
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
 
   const schema = {
     type: "object",
@@ -465,7 +473,7 @@ Hard rules:
 Keep this fast: do not research the web. Use only the course list above and
 general judgment. Write the topic and title in language code "${lang}".
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
 
   const schema = {
     type: "object",
@@ -560,7 +568,7 @@ article — not trivia or verbatim recall. Each question has 3-5 plausible
 options, exactly ONE correct ("correct" = 0-based index), and a one-sentence
 "explanation". All in language "${lang}".
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
   ctx?.progress?.({ label: "thinking" });
   const text = await runStreamed(prompt, testSchema, ctx?.progress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
@@ -700,7 +708,7 @@ For each write clear "criteria" — concrete checkable things a reviewer grades
 against (drives an iterative review-and-revise loop). Concrete, achievable from
 the article; no busywork. All text in language "${lang}".
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
   ctx?.progress?.({ label: "thinking" });
   const text = await runStreamed(prompt, assignmentSchema, ctx?.progress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
@@ -747,6 +755,8 @@ Judge the submission against the task and criteria. Produce:
   genuinely satisfies the assignment; otherwise "revise".
 - "summary": 1-3 sentences on what to fix next (or congratulations if passed).
 Reference what you actually see; don't pass weak work, don't nitpick endlessly.
+
+${naturalLanguageGuide(lang)}
 
 Output ONLY a single-line JSON object:
 {"remarks":[{"text":"...","criticality":"major"}],"verdict":"revise","summary":"..."}`;
@@ -1223,7 +1233,7 @@ editor + fact-checker. Do this silently; return only the polished result:
 5. Flow — light polish only; do NOT restructure or change the voice.
 Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
   onProgress?.({ label: "thinking" });
   const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
@@ -1530,7 +1540,7 @@ ${prevArticlesBlock(previousArticles, lang)}Article to review:
 ${article}
 </article>
 
-${terminologyGuide(lang)}
+${languageStyleGuide(lang)}
 
 Return the full revised article in "article" and a brief log of fixes in
 "notes" (empty string if nothing changed materially).`;
@@ -1823,7 +1833,7 @@ B) If unclear or you'd like to negotiate — ask one specific clarifying questio
 All titles and summaries in language "${lang}". When proposing, return the
 FULL tree, not a diff. The tree size must follow the chosen generation format.
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
 }
 
 function normalizeRefineResponse(parsed) {
@@ -1944,7 +1954,7 @@ Constraints:
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
 
-${terminologyGuide(lang)}`;
+${languageStyleGuide(lang)}`;
 
   const submoduleSchema = {
     type: "object",
