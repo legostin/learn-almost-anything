@@ -1,0 +1,149 @@
+name: Notary Canary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    name: submit minimal signed app
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      DIAG_DIR: notary-canary-diagnostics
+
+    steps:
+      - name: Check Apple secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required secret: ${name}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAG_DIR"
+
+          cert_path="$RUNNER_TEMP/apple-certificate.p12"
+          keychain_path="$RUNNER_TEMP/notary-canary.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert_path" 2>/dev/null; then
+            printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$cert_path"
+          fi
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$cert_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -p codesigning -v "$keychain_path" > "$DIAG_DIR/signing-identities.txt"
+
+      - name: Build and sign minimal app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          app_path="$RUNNER_TEMP/Notary Canary.app"
+          mkdir -p "$app_path/Contents/MacOS"
+
+          cat > "$RUNNER_TEMP/notary-canary.c" <<'EOF'
+          #include <stdio.h>
+
+          int main(void) {
+            puts("notary canary");
+            return 0;
+          }
+          EOF
+
+          clang -Os "$RUNNER_TEMP/notary-canary.c" -o "$app_path/Contents/MacOS/NotaryCanary"
+
+          cat > "$app_path/Contents/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>NotaryCanary</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.legostin.notary-canary</string>
+            <key>CFBundleName</key>
+            <string>Notary Canary</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.13</string>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path/Contents/MacOS/NotaryCanary"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_path"
+
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+          codesign --verify --deep --strict --verbose=4 "$app_path" > "$DIAG_DIR/codesign-verify-app.txt" 2>&1
+          codesign -dvvv --entitlements :- "$app_path" > "$DIAG_DIR/codesign-details-app.txt" 2>&1 || true
+          du -sh "$app_path" > "$DIAG_DIR/app-size.txt"
+          find "$app_path" | wc -l | tr -d ' ' > "$DIAG_DIR/app-file-count.txt"
+
+      - name: Zip app for notarytool
+        run: |
+          set -euo pipefail
+          zip_path="$RUNNER_TEMP/notary-canary.app.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$zip_path"
+          shasum -a 256 "$zip_path" > "$DIAG_DIR/app-zip.sha256"
+          echo "ZIP_PATH=$zip_path" >> "$GITHUB_ENV"
+
+      - name: Submit with notarytool
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -u
+          set +e
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --output-format json \
+            > "$DIAG_DIR/notary-submit.json" \
+            2> "$DIAG_DIR/notary-submit.stderr"
+          submit_status=$?
+          set -e
+
+          printf '%s\n' "$submit_status" > "$DIAG_DIR/notary-submit-exit-code.txt"
+          cat "$DIAG_DIR/notary-submit.json" || true
+          cat "$DIAG_DIR/notary-submit.stderr" || true
+          exit "$submit_status"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notary-canary-diagnostics-${{ github.run_number }}
+          path: ${{ env.DIAG_DIR }}/
+          if-no-files-found: warn
