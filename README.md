@@ -1,85 +1,103 @@
 # Learn (Almost) Anything
 
-> Local **AI course generator and personal tutor**: designs personalized courses on any topic, then walks you through them with articles, interactive widgets, comprehension tests, homework with agent review, and TTS lectures. Desktop app for **macOS / Windows**, built on Tauri.
+> A local desktop app that turns a topic into a personalized course, then helps you study it with lessons, images, interactives, tests, homework review, and lecture audio.
 
 [![Release](https://img.shields.io/github/v/release/legostin/learn-almost-anything?include_prereleases&label=release)](https://github.com/legostin/learn-almost-anything/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/legostin/learn-almost-anything/release.yml?label=build)](https://github.com/legostin/learn-almost-anything/actions/workflows/release.yml)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://github.com/legostin/learn-almost-anything/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
-[![Claude Agent SDK](https://img.shields.io/badge/agents-Claude%20%7C%20Codex-7c3aed)](https://docs.claude.com/en/api/agent-sdk/overview)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-7c3aed)](#agents-and-billing)
 
-> ⚠️ **Free — uses *your* existing subscriptions.** Courses and assignment review are written by Claude Code or the Codex CLI through your **Claude Pro/Max** or **ChatGPT Plus/Pro** subscription — no per-token API spend. Brave Search (free tier) and Gemini API (paid — for image generation and premium TTS) are optional.
+<p align="center"><img src="screens/2.png" alt="A generated lesson with sourced images and a multilingual course sidebar" width="900"></p>
 
-<!-- Generated from docs/demo/hero.tape with VHS. -->
-<p align="center"><img src="docs/media/hero.gif" alt="overview" width="720"></p>
+## What It Does
 
-## What it does
+Learn (Almost) Anything is not a hosted course platform. It is a local app that uses agent CLIs already installed on your machine:
 
-- **Courses tailored to you.** A wizard captures goals and background, then an agent designs the curriculum grounded in real syllabi from universities and reputable programs (with live web search — no improvisation from memory).
-- **Course formats.** Generate a full academic course, a compact mini-module, or a podcast-style series; the format changes the outline, checks, and article style.
-- **Submodules with interactives.** Article + Mermaid diagrams + images + sandboxed JS widgets (e.g. "a cube in two-point perspective"). A vision pass renders each interactive in headless Chrome and flags broken layouts — they get auto-repaired.
-- **"Article first."** Images and the comprehension test backfill in the background; the article becomes readable as soon as the draft is done.
-- **Tests and homework.** Every submodule has a comprehension test and a short chain of practical assignments (drawing, written answer, document, .zip with code, GitHub link) with iterative agent review — remarks with criticality, you fix and resubmit until it passes.
-- **Lecture audio.** A "Listen" button with a global sticky-footer player and a fullscreen expanded view, ±10s, scrubber. Free engine: built-in OS TTS. Premium: Gemini TTS (pick the model and the voice). WAV chunks are disk-cached so each chunk is paid for at most once.
-- **Sharing.** Open a course to a friend over ngrok straight from the app.
-- **Public catalog.** Browse ready-made `.laacourse` packages, download them into the app, publish your own ready courses with an upload token, and pull catalog updates later.
+- **Claude Code** through your Claude Pro / Max account.
+- **Codex CLI** through your ChatGPT / Codex account.
 
-## Latest release
+You choose a topic, language, format, and agent. The app asks clarifying questions, drafts a course plan, generates lesson material, and keeps the resulting course on your machine.
 
-**v0.1.4** stops production agent checks from launching `claude --version` / `codex --version`, so macOS Gatekeeper prompts do not appear just from opening the app or Settings. The app still finds user-installed CLIs and launches the selected agent only when generation needs it.
+## Course Generation
 
-**v0.1.3** fixes production agent discovery: the app now finds user-installed `claude` / `codex` CLIs from normal shell and npm locations, passes those exact executables to the SDKs, and no longer bundles the SDKs' native agent CLI binaries into the app.
+- **Formats:** full academic course, compact mini-course, or podcast-style series.
+- **Languages:** course language is separate from app UI language. One library can contain English, Russian, Chinese, or other-language courses side by side, with language filters on the dashboard.
+- **Lessons:** articles, diagrams, sourced images, galleries, and sandboxed interactive widgets.
+- **Study flow:** comprehension tests, practical assignments, iterative agent review, and retry-until-passed progress.
+- **Audio:** built-in OS TTS is free; optional Gemini TTS can produce higher-quality lecture audio.
+- **Catalog:** browse public `.laacourse` packages, install them locally, publish your own courses with an upload token, and pull catalog updates later.
+- **Sharing:** open a local course to someone else through ngrok when you explicitly start sharing.
 
-**v0.1.2** added in-app update checks with signed updater bundles. Install v0.1.2 or newer manually once; future releases can be installed from Settings with **Update and restart**.
+The app writes the selected course language into prompts for wizard questions, plans, lesson text, tests, assignments, and review. Mixed-language libraries are expected, not an edge case.
 
-**v0.1.1** added the public catalog, course format selection, richer visual prompts for generated lessons, and macOS release signing/notarization fixes.
+## Agents And Billing
 
-<!-- TODO: four GIFs for the main flows -->
-<table>
-<tr>
-<td><img src="docs/media/structure.gif" alt="structure" width="360"><br><sub>Course structure + curriculum-design chat</sub></td>
-<td><img src="docs/media/submodule.gif" alt="submodule" width="360"><br><sub>Submodule: article + interactives + test</sub></td>
-</tr>
-<tr>
-<td><img src="docs/media/assignments.gif" alt="assignments" width="360"><br><sub>Homework with agent review</sub></td>
-<td><img src="docs/media/audio.gif" alt="audio" width="360"><br><sub>Audio player: ±10s, scrubber, fullscreen</sub></td>
-</tr>
-</table>
+The app itself is free and does not run a paid backend for generation. Costs and limits come from the external accounts you connect.
+
+| Feature | What pays for it | Notes |
+|---|---|---|
+| Course planning, lesson writing, tests, homework review | Claude Code or Codex CLI | Uses your local authenticated CLI. Provider usage limits still apply. |
+| Claude Code | Claude Pro / Max, or Claude API credits if you opt into API usage | Claude Code usage shares limits with Claude. If `ANTHROPIC_API_KEY` or API-credit flow is active, usage can be billed separately at API rates. |
+| Codex CLI | ChatGPT / Codex plan credits and limits, or OpenAI API key usage | Codex has plan limits and token/credit accounting. Extra credits or API-key usage can incur separate charges. |
+| Web and image search via Brave | Your Brave Search API plan/quota | Optional. Used for grounding and image/source discovery when configured. |
+| Custom generated illustrations | Gemini API | Optional. Image-generation models may require paid Gemini API usage. |
+| Premium lecture audio | Gemini API | Optional. Audio is generated in chunks and cached on disk so the same chunk is not paid for repeatedly. |
+| Built-in lecture audio | Operating system TTS | Free, local OS voice quality. |
+| Catalog browsing/downloading | None from the app | Publishing needs only a catalog upload token. |
+
+Pricing changes often. Check the current provider pages before relying on a budget:
+
+- [Claude Code with Pro / Max](https://support.claude.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan)
+- [Codex pricing](https://chatgpt.com/codex/pricing/)
+- [Codex rate card](https://help.openai.com/en/articles/20001106-codex-rate-card)
+- [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)
+- [Brave Search API](https://brave.com/search/api/)
+
+For predictable spend, start with mini-courses, use the built-in OS TTS, leave Gemini disabled, and watch `/status` or the provider dashboards for the selected agent.
 
 ## Install
 
-Grab a prebuilt binary from the [Releases](https://github.com/legostin/learn-almost-anything/releases) page:
+Download the latest build from [Releases](https://github.com/legostin/learn-almost-anything/releases).
 
-- **macOS** — pick the DMG for your chip: `…_aarch64.dmg` for **Apple Silicon (M1/M2/M3/M4)**, `…_x64.dmg` for **Intel**. Signed with a Developer ID certificate and notarized by Apple — opens with a double-click, no Gatekeeper bypass needed.
-- **Windows** — `.msi` / `.exe` for x64. Unsigned: SmartScreen will warn — click "More info" → "Run anyway".
+- **macOS:** choose `..._aarch64.dmg` for Apple Silicon or `..._x64.dmg` for Intel. Builds are signed with Developer ID and notarized by Apple.
+- **Windows:** choose the x64 `.msi` or `.exe`. Windows builds are currently unsigned, so SmartScreen may warn.
 
-The UI starts in English; switch to Russian in Settings if you prefer.
+The UI starts in English. Russian UI is available in Settings. Course content can be generated in the course language you select.
+
+## Requirements
+
+1. **Node.js 20+** — the sidecar runs the agent SDKs through Node.
+2. **At least one local agent CLI:**
+
+   | Agent | Typical account | Install |
+   |---|---|---|
+   | Claude Code CLI | Claude Pro / Max | `npm i -g @anthropic-ai/claude-code` then `claude login` |
+   | Codex CLI | ChatGPT / Codex plan | `npm i -g @openai/codex` then `codex login` |
+
+You can install both and choose the backend per course. The desktop app uses the CLI executable already installed on your machine instead of bundling a private copy. After installing or moving a CLI, restart the app so PATH detection refreshes.
 
 ## Updates
 
-Starting with **v0.1.2**, the app can check GitHub Releases from Settings, download a signed updater bundle, install it, and restart. Update signing uses a Tauri updater key stored in GitHub Actions secrets; the app verifies every update before installing it.
+Starting with `v0.1.2`, installed desktop builds can check GitHub Releases from Settings, download a signed updater bundle, install it, and restart. Update signing uses a Tauri updater key stored in GitHub Actions secrets, and the app verifies the update before installing it.
 
-## What else you need
+## Latest Release
 
-1. **Node.js** (≥ 20) — the sidecar runs the agents via Node.
-2. **One agent** (with an active subscription):
+`v0.1.4` stops production agent checks from launching `claude --version` or `codex --version`, so macOS Gatekeeper prompts do not appear just from opening the app or Settings. The selected CLI is launched only when generation needs it.
 
-   | Agent | Subscription | Install |
-   |---|---|---|
-   | **Claude Code CLI** | Claude Pro / Max | `npm i -g @anthropic-ai/claude-code` → `claude login` |
-   | **Codex CLI** | ChatGPT Plus / Pro | `npm i -g @openai/codex` → `codex login` |
+`v0.1.3` fixed production agent discovery and stopped bundling native agent CLI binaries into the app.
 
-   You can install both and pick the backend per course.
+`v0.1.2` added signed in-app updates.
 
-   The desktop app uses your installed CLI executable rather than a bundled copy, so your existing `claude login` / `codex login` subscription session is reused. After installing or moving a CLI, restart the app so it can refresh PATH detection.
+`v0.1.1` added the public catalog, course format selection, richer lesson visuals, and macOS signing/notarization fixes.
 
-3. **Optional** (set in app Settings, stored locally):
+## Local Data And Privacy
 
-   - **Brave Search API key** — free tier ~2 000 req/month. Powers image and web search for illustrations. <https://brave.com/search/api>
-   - **Gemini API key** — **paid** per Google's pricing. Enables: (a) custom illustration generation (Nano Banana / Nano Banana Pro), (b) premium TTS for the lecture player with model + voice selection. <https://aistudio.google.com/apikey>
-   - **Catalog upload token** — only needed to publish courses to the public catalog. Browsing and downloading catalog courses works without it.
-
-It still works without optional API keys: courses and assignment review go through your subscription, web grounding through the agent's built-in `WebSearch`, audio through the OS TTS voice, and catalog browsing/downloading does not require a token.
+- Course data is stored locally in the app data directory.
+- The app does not host your generated lessons on a Learn server.
+- Agent providers receive the prompts and course context needed for generation.
+- Optional Gemini and Brave integrations receive only the requests needed for the feature you enabled.
+- Public catalog publishing and ngrok sharing happen only when you explicitly start those actions.
 
 ## Develop
 
@@ -93,45 +111,45 @@ pnpm --dir sidecar install
 pnpm tauri dev
 ```
 
-Requires: **Rust** (stable), **pnpm**, **Node 20+**.
+Requires Rust stable, pnpm, and Node 20+.
 
-While dev'ing, if you want the share flow to reflect your latest UI changes:
+For local browser/share testing, keep the frontend build current:
 
 ```bash
-pnpm build:watch    # keeps dist/ in sync with the source for the embedded share HTTP server
+pnpm build:watch
 ```
 
-## Build locally
+## Build Locally
 
 ```bash
 pnpm tauri build
 ```
 
-Artifacts land in `src-tauri/target/release/bundle/`. Before bundling, `scripts/copy-sidecar.mjs` copies the sidecar (with its `node_modules`) into `src-tauri/sidecar/` so `bundle.resources` picks it up.
+Artifacts are written under `src-tauri/target/release/bundle/`. Before bundling, `scripts/copy-sidecar.mjs` stages the Node sidecar into `src-tauri/sidecar/` and prunes bundled native agent CLI binaries so production builds use the user's installed CLIs.
 
-For local Developer ID macOS builds, provide the Apple signing/notary environment expected by `.github/workflows/release.yml`. The release workflow signs nested sidecar native binaries before Tauri bundles and notarizes the DMGs.
+For Developer ID macOS builds, provide the Apple signing and notarization environment expected by `.github/workflows/release.yml`.
 
-## Catalog server
+## Catalog Server
 
-The optional public catalog service lives in `catalog-server/`:
+The optional catalog service lives in `catalog-server/`:
 
 ```bash
 cd catalog-server
 npm start
 ```
 
-It serves catalog metadata and `.laacourse` downloads. Set `CATALOG_UPLOAD_TOKEN` to allow publishing; `PORT`, `HOST`, `PUBLIC_ORIGIN`, and `CATALOG_DATA_DIR` are configurable.
+It serves catalog metadata and `.laacourse` downloads. Set `CATALOG_UPLOAD_TOKEN` to allow publishing. `PORT`, `HOST`, `PUBLIC_ORIGIN`, and `CATALOG_DATA_DIR` are configurable.
 
-## Architecture (brief)
+## Architecture
 
-- **Tauri 2** (Rust + system WebView) — shell, windows, IPC.
+- **Tauri 2** — desktop shell, windows, IPC, updater.
 - **React 19 + TypeScript + Vite** — frontend.
-- **Node sidecar** — every agent call goes through `@anthropic-ai/claude-agent-sdk` or `@openai/codex-sdk`. The sidecar runs isolated: `settingSources: []`, `permissionMode: "dontAsk"`, so the host's other MCPs don't leak in.
-- **SQLite (rusqlite)** — local store for courses and state. Content (articles, widgets, tests, homework, chats) lives as files under `app_data_dir`.
-- **Playwright-core + system Chrome** — renders interactive widgets for visual review (no Chromium download).
-- **MCP servers** — Brave Search included; launched locally to skip the per-call `npx` resolve.
-- **Catalog server** — small Node service for public course packages and downloads.
+- **Node sidecar** — calls `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk`.
+- **SQLite + files** — local course index and generated content.
+- **Playwright-core + system Chrome** — visual checks for interactive widgets.
+- **MCP servers** — bundled reference/search helpers for controlled agent tools.
+- **Catalog server** — small Node service for public course packages.
 
 ## License
 
-Not set (personal project). Source is open for reading and personal use; use at your own risk.
+Not set. Source is open for reading and personal use; use at your own risk.
