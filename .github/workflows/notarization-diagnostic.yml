@@ -25,6 +25,7 @@ jobs:
       DIAG_DIR: notarization-diagnostics
       TARGET: ${{ inputs.target }}
       COPY_SIDECAR_DEREFERENCE: "0"
+      SIGN_SIDECAR_NATIVE: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -208,6 +209,22 @@ jobs:
               > "$DIAG_DIR/notary-log.json" \
               2> "$DIAG_DIR/notary-log.stderr" || true
           fi
+
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          diag = pathlib.Path(os.environ["DIAG_DIR"])
+          out = diag / "notary-submit.json"
+          if out.exists() and out.stat().st_size:
+              status = json.loads(out.read_text()).get("status")
+              (diag / "notary-status.txt").write_text(f"{status}\n")
+              if status != "Accepted":
+                  print(f"Notary status was {status}, expected Accepted", file=sys.stderr)
+                  sys.exit(1)
+          PY
 
           exit "$submit_status"
 

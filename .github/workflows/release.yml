@@ -32,6 +32,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     env:
       COPY_SIDECAR_DEREFERENCE: ${{ startsWith(matrix.label, 'macos-') && '0' || '1' }}
+      SIGN_SIDECAR_NATIVE: ${{ startsWith(matrix.label, 'macos-') && '1' || '0' }}
 
     steps:
       - uses: actions/checkout@v4
