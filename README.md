@@ -16,11 +16,17 @@
 ## What it does
 
 - **Courses tailored to you.** A wizard captures goals and background, then an agent designs the curriculum grounded in real syllabi from universities and reputable programs (with live web search — no improvisation from memory).
+- **Course formats.** Generate a full academic course, a compact mini-module, or a podcast-style series; the format changes the outline, checks, and article style.
 - **Submodules with interactives.** Article + Mermaid diagrams + images + sandboxed JS widgets (e.g. "a cube in two-point perspective"). A vision pass renders each interactive in headless Chrome and flags broken layouts — they get auto-repaired.
 - **"Article first."** Images and the comprehension test backfill in the background; the article becomes readable as soon as the draft is done.
 - **Tests and homework.** Every submodule has a comprehension test and a short chain of practical assignments (drawing, written answer, document, .zip with code, GitHub link) with iterative agent review — remarks with criticality, you fix and resubmit until it passes.
 - **Lecture audio.** A "Listen" button with a global sticky-footer player and a fullscreen expanded view, ±10s, scrubber. Free engine: built-in OS TTS. Premium: Gemini TTS (pick the model and the voice). WAV chunks are disk-cached so each chunk is paid for at most once.
 - **Sharing.** Open a course to a friend over ngrok straight from the app.
+- **Public catalog.** Browse ready-made `.laacourse` packages, download them into the app, publish your own ready courses with an upload token, and pull catalog updates later.
+
+## Latest release
+
+**v0.1.1** adds the public catalog, course format selection, richer visual prompts for generated lessons, and macOS release signing/notarization fixes.
 
 <!-- TODO: four GIFs for the main flows -->
 <table>
@@ -59,8 +65,9 @@ The UI starts in English; switch to Russian in Settings if you prefer.
 
    - **Brave Search API key** — free tier ~2 000 req/month. Powers image and web search for illustrations. <https://brave.com/search/api>
    - **Gemini API key** — **paid** per Google's pricing. Enables: (a) custom illustration generation (Nano Banana / Nano Banana Pro), (b) premium TTS for the lecture player with model + voice selection. <https://aistudio.google.com/apikey>
+   - **Catalog upload token** — only needed to publish courses to the public catalog. Browsing and downloading catalog courses works without it.
 
-It still works without either: courses and assignment review go through your subscription, web grounding through the agent's built-in `WebSearch`, audio through the OS TTS voice.
+It still works without optional API keys: courses and assignment review go through your subscription, web grounding through the agent's built-in `WebSearch`, audio through the OS TTS voice, and catalog browsing/downloading does not require a token.
 
 ## Develop
 
@@ -90,6 +97,19 @@ pnpm tauri build
 
 Artifacts land in `src-tauri/target/release/bundle/`. Before bundling, `scripts/copy-sidecar.mjs` copies the sidecar (with its `node_modules`) into `src-tauri/sidecar/` so `bundle.resources` picks it up.
 
+For local Developer ID macOS builds, provide the Apple signing/notary environment expected by `.github/workflows/release.yml`. The release workflow signs nested sidecar native binaries before Tauri bundles and notarizes the DMGs.
+
+## Catalog server
+
+The optional public catalog service lives in `catalog-server/`:
+
+```bash
+cd catalog-server
+npm start
+```
+
+It serves catalog metadata and `.laacourse` downloads. Set `CATALOG_UPLOAD_TOKEN` to allow publishing; `PORT`, `HOST`, `PUBLIC_ORIGIN`, and `CATALOG_DATA_DIR` are configurable.
+
 ## Architecture (brief)
 
 - **Tauri 2** (Rust + system WebView) — shell, windows, IPC.
@@ -98,6 +118,7 @@ Artifacts land in `src-tauri/target/release/bundle/`. Before bundling, `scripts/
 - **SQLite (rusqlite)** — local store for courses and state. Content (articles, widgets, tests, homework, chats) lives as files under `app_data_dir`.
 - **Playwright-core + system Chrome** — renders interactive widgets for visual review (no Chromium download).
 - **MCP servers** — Brave Search included; launched locally to skip the per-call `npx` resolve.
+- **Catalog server** — small Node service for public course packages and downloads.
 
 ## License
 

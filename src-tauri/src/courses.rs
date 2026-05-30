@@ -51,6 +51,7 @@ fn render_course_md(course: &db::Course, answers: &[QnA]) -> String {
     }
     out.push_str(&format!("topic: {}\n", course.topic));
     out.push_str(&format!("language: {}\n", course.language));
+    out.push_str(&format!("course_format: {}\n", course.course_format));
     out.push_str(&format!("created_at: {}\n", course.created_at));
     out.push_str("---\n\n");
 
@@ -62,6 +63,10 @@ fn render_course_md(course: &db::Course, answers: &[QnA]) -> String {
 
     out.push_str("## Learning request\n");
     out.push_str(&course.topic);
+    out.push_str("\n\n");
+
+    out.push_str("## Generation format\n");
+    out.push_str(&course.course_format);
     out.push_str("\n\n");
 
     out.push_str("## Wizard Q&A\n\n");
@@ -170,7 +175,7 @@ pub struct ModuleNode {
     pub submodules: Vec<ModuleNode>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StructureFile {
     pub course_id: String,
     pub modules: Vec<ModuleNode>,

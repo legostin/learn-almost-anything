@@ -30,6 +30,9 @@ pub struct Settings {
     /// Gemini model used to synthesize TTS audio.
     #[serde(default)]
     pub gemini_tts_model: Option<String>,
+    /// Secret used to publish courses to the public catalog.
+    #[serde(default)]
+    pub catalog_upload_token: Option<String>,
 }
 
 /// Per-backend model + reasoning choices for each kind of task. Empty
@@ -247,6 +250,24 @@ impl SettingsState {
             let mut guard = self.inner.lock().expect("settings lock");
             guard.gemini_tts_model =
                 model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+        }
+        self.persist()
+    }
+
+    pub fn catalog_upload_token(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| s.catalog_upload_token.clone())
+            .filter(|k| !k.trim().is_empty())
+    }
+
+    pub fn set_catalog_upload_token(&self, token: Option<String>) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.catalog_upload_token = token
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty());
         }
         self.persist()
     }

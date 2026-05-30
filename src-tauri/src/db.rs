@@ -34,13 +34,27 @@ pub struct Course {
     pub topic: String,
     pub title: Option<String>,
     pub language: String,
+    pub course_format: String,
     pub status: String,
     pub agent: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub catalog_origin_id: Option<String>,
+    pub catalog_version: i64,
+    pub catalog_synced_at: Option<i64>,
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, status, agent, created_at, updated_at";
+pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
+
+pub fn normalize_course_format(value: Option<&str>) -> &'static str {
+    match value.map(str::trim) {
+        Some("mini_module") => "mini_module",
+        Some("podcast_series") => "podcast_series",
+        Some("academic_course") | _ => DEFAULT_COURSE_FORMAT,
+    }
+}
+
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -48,10 +62,14 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         topic: r.get(1)?,
         title: r.get(2)?,
         language: r.get(3)?,
-        status: r.get(4)?,
-        agent: r.get(5)?,
-        created_at: r.get(6)?,
-        updated_at: r.get(7)?,
+        course_format: r.get(4)?,
+        status: r.get(5)?,
+        agent: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+        catalog_origin_id: r.get(9)?,
+        catalog_version: r.get(10)?,
+        catalog_synced_at: r.get(11)?,
     })
 }
 
@@ -67,13 +85,70 @@ pub fn insert_course(
     id: &str,
     topic: &str,
     language: &str,
+    course_format: &str,
     agent: &str,
     now: i64,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO courses (id, topic, language, status, agent, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, 'wizard', ?4, ?5, ?5)",
-        rusqlite::params![id, topic, language, agent, now],
+        "INSERT INTO courses (id, topic, language, course_format, status, agent, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, 'wizard', ?5, ?6, ?6)",
+        rusqlite::params![
+            id,
+            topic,
+            language,
+            normalize_course_format(Some(course_format)),
+            agent,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_imported_course(
+    conn: &Connection,
+    id: &str,
+    topic: &str,
+    title: Option<&str>,
+    language: &str,
+    course_format: &str,
+    agent: &str,
+    status: &str,
+    created_at: i64,
+    updated_at: i64,
+    catalog_origin_id: &str,
+    catalog_version: i64,
+    catalog_synced_at: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO courses \
+         (id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+         ON CONFLICT(id) DO UPDATE SET \
+           topic = excluded.topic, \
+           title = excluded.title, \
+           language = excluded.language, \
+           course_format = excluded.course_format, \
+           status = excluded.status, \
+           agent = excluded.agent, \
+           updated_at = excluded.updated_at, \
+           catalog_origin_id = excluded.catalog_origin_id, \
+           catalog_version = excluded.catalog_version, \
+           catalog_synced_at = excluded.catalog_synced_at",
+        rusqlite::params![
+            id,
+            topic,
+            title,
+            language,
+            normalize_course_format(Some(course_format)),
+            status,
+            agent,
+            created_at,
+            updated_at,
+            catalog_origin_id,
+            catalog_version,
+            catalog_synced_at
+        ],
     )?;
     Ok(())
 }
@@ -81,6 +156,45 @@ pub fn insert_course(
 pub fn get_course(conn: &Connection, id: &str) -> Result<Option<Course>, rusqlite::Error> {
     let sql = format!("SELECT {COURSE_COLS} FROM courses WHERE id = ?1");
     conn.query_row(&sql, [id], row_to_course)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+pub fn get_course_by_catalog_origin(
+    conn: &Connection,
+    catalog_origin_id: &str,
+) -> Result<Option<Course>, rusqlite::Error> {
+    let sql = format!("SELECT {COURSE_COLS} FROM courses WHERE catalog_origin_id = ?1");
+    conn.query_row(&sql, [catalog_origin_id], row_to_course)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+pub fn find_catalog_duplicate_candidate(
+    conn: &Connection,
+    topic: &str,
+    title: Option<&str>,
+    language: &str,
+) -> Result<Option<Course>, rusqlite::Error> {
+    let Some(title) = title.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let sql = format!(
+        "SELECT {COURSE_COLS} FROM courses \
+         WHERE catalog_origin_id IS NULL \
+           AND topic = ?1 \
+           AND COALESCE(title, '') = ?2 \
+           AND language = ?3 \
+         ORDER BY updated_at DESC \
+         LIMIT 1"
+    );
+    conn.query_row(&sql, rusqlite::params![topic, title, language], row_to_course)
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -123,6 +237,30 @@ pub fn set_course_title(
     conn.execute(
         "UPDATE courses SET title = ?2, updated_at = ?3 WHERE id = ?1",
         rusqlite::params![id, title, now],
+    )?;
+    Ok(())
+}
+
+pub fn touch_course(conn: &Connection, id: &str, now: i64) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET updated_at = ?2 WHERE id = ?1",
+        rusqlite::params![id, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_course_catalog_sync(
+    conn: &Connection,
+    id: &str,
+    catalog_origin_id: &str,
+    catalog_version: i64,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses \
+         SET catalog_origin_id = ?2, catalog_version = ?3, catalog_synced_at = ?4 \
+         WHERE id = ?1",
+        rusqlite::params![id, catalog_origin_id, catalog_version, now],
     )?;
     Ok(())
 }

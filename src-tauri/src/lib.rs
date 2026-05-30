@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 mod courses;
+mod catalog;
 mod db;
 mod events;
 mod media;
@@ -70,16 +71,19 @@ fn create_course(
     state: tauri::State<'_, Arc<Db>>,
     topic: String,
     language: String,
+    course_format: Option<String>,
     agent: Option<String>,
 ) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| "claude".to_string());
     if agent != "claude" && agent != "codex" {
         return Err(format!("unknown agent: {agent}"));
     }
+    let course_format = db::normalize_course_format(course_format.as_deref());
     let id = Uuid::new_v4().to_string();
     let now = now_unix_secs()?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    db::insert_course(&conn, &id, &topic, &language, &agent, now).map_err(|e| e.to_string())?;
+    db::insert_course(&conn, &id, &topic, &language, course_format, &agent, now)
+        .map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -159,6 +163,7 @@ fn start_course_suggestion(
                 "topic": course.topic,
                 "title": course.title,
                 "language": course.language,
+                "course_format": course.course_format,
                 "status": course.status,
                 "agent": course.agent,
             })
@@ -360,6 +365,14 @@ fn log_timing(
     );
 }
 
+fn strip_widget_markers(article: &str) -> String {
+    article
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("::widget{"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[tauri::command]
 fn start_wizard_questions(
     app: AppHandle,
@@ -387,6 +400,7 @@ fn start_wizard_questions(
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
+            "courseFormat": course.course_format,
             "modelConfig": model_config,
         });
         let cb = {
@@ -452,6 +466,7 @@ fn start_build_structure(
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
+            "courseFormat": course.course_format,
             "courseMd": course_md,
             "modelConfig": model_config,
         });
@@ -587,6 +602,7 @@ fn start_structure_refine(
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
+            "courseFormat": course.course_format,
             "courseMd": course_md,
             "currentStructure": current_structure,
             "memoryFiles": memory_for_prompt,
@@ -683,6 +699,7 @@ fn spawn_generate_submodule(
     writing_model: serde_json::Value,
     tests_model: serde_json::Value,
     gemini_image_model: String,
+    catalog_upload_token: Option<String>,
     course_serial: bool,
 ) -> Result<bool, String> {
     {
@@ -723,11 +740,13 @@ fn spawn_generate_submodule(
     let sid = submodule_id.clone();
 
     thread::spawn(move || {
+        let is_podcast = course.course_format == "podcast_series";
         let total_started = Instant::now();
         let mut common = json!({
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
+            "courseFormat": course.course_format,
             "courseMd": course_md,
             "structure": structure_value,
             "memoryFiles": memory_for_prompt,
@@ -896,6 +915,12 @@ fn spawn_generate_submodule(
             }
         };
         let notes = std::mem::take(&mut combined_notes);
+        let final_article = if is_podcast {
+            strip_widget_markers(&final_article)
+        } else {
+            final_article
+        };
+        let widgets = if is_podcast { json!({}) } else { widgets };
         log_timing(&app2, &cid, &sid, "annotate", annotate_started);
 
         // The article is the primary artifact — persist it and mark the
@@ -922,19 +947,24 @@ fn spawn_generate_submodule(
         courses::clear_submodule_error(&paths, &cid, &mid, &sid);
         if let Ok(c) = db.0.lock() {
             let _ = db::set_module_generation_state(&c, &sid, "ready");
+            if let Ok(now) = now_unix_secs() {
+                let _ = db::touch_course(&c, &cid, now);
+            }
         }
         emit_job_event(
             &app2,
             &cid,
             "generate_submodule",
-            json!({ "ok": true, "submoduleId": sid, "enriching": true }),
+            json!({ "ok": true, "submoduleId": sid, "enriching": !is_podcast }),
         );
 
         // Stages 4 & 5 (background enrichment) are independent — illustration
         // works on the widgets, the test on the final article — so run them
         // concurrently. Test goes on its own thread; illustration runs here.
         // Both soft-fail; the submodule is already readable.
-        let test_handle = {
+        let test_handle = if is_podcast {
+            None
+        } else {
             let sidecar = sidecar.clone();
             let app3 = app2.clone();
             let cid3 = cid.clone();
@@ -943,11 +973,12 @@ fn spawn_generate_submodule(
                 "backend": course.agent,
                 "topic": course.topic,
                 "language": course.language,
+                "courseFormat": course.course_format,
                 "submodulePath": { "title": sub_title, "summary": sub_summary },
                 "article": final_article,
                 "modelConfig": tests_model,
             });
-            thread::spawn(move || {
+            Some(thread::spawn(move || {
                 let test_started = Instant::now();
                 emit_stage_event(&app3, &cid3, &sid3, "test");
                 let cb = {
@@ -979,11 +1010,13 @@ fn spawn_generate_submodule(
                 };
                 log_timing(&app3, &cid3, &sid3, "test", test_started);
                 out
-            })
+            }))
         };
 
         // Background — design the homework assignment chain for this submodule.
-        let assignments_handle = {
+        let assignments_handle = if is_podcast {
+            None
+        } else {
             let sidecar = sidecar.clone();
             let app3 = app2.clone();
             let cid3 = cid.clone();
@@ -992,11 +1025,12 @@ fn spawn_generate_submodule(
                 "backend": course.agent,
                 "topic": course.topic,
                 "language": course.language,
+                "courseFormat": course.course_format,
                 "submodulePath": { "title": sub_title, "summary": sub_summary },
                 "article": final_article,
                 "modelConfig": tests_model,
             });
-            thread::spawn(move || {
+            Some(thread::spawn(move || {
                 let started = Instant::now();
                 emit_stage_event(&app3, &cid3, &sid3, "assignments");
                 let cb = {
@@ -1028,15 +1062,16 @@ fn spawn_generate_submodule(
                 };
                 log_timing(&app3, &cid3, &sid3, "assignments", started);
                 out
-            })
+            }))
         };
 
         // Stage 4 — illustrate. Per image widget: generate (Gemini/Codex) when
         // flagged, search via Brave when configured, or ask the selected agent
         // to find public source pages when Brave is not.
-        let can_illustrate = brave_api_key.is_some()
-            || gemini_key.is_some()
-            || matches!(course.agent.as_str(), "claude" | "codex");
+        let can_illustrate = !is_podcast
+            && (brave_api_key.is_some()
+                || gemini_key.is_some()
+                || matches!(course.agent.as_str(), "claude" | "codex"));
         let widgets = if can_illustrate {
             emit_stage_event(&app2, &cid, &sid, "illustrate");
             let illustrate_started = Instant::now();
@@ -1076,8 +1111,12 @@ fn spawn_generate_submodule(
             widgets
         };
 
-        let test_questions = test_handle.join().unwrap_or_else(|_| json!([]));
-        let assignments = assignments_handle.join().unwrap_or_else(|_| json!([]));
+        let test_questions = test_handle
+            .map(|handle| handle.join().unwrap_or_else(|_| json!([])))
+            .unwrap_or_else(|| json!([]));
+        let assignments = assignments_handle
+            .map(|handle| handle.join().unwrap_or_else(|_| json!([])))
+            .unwrap_or_else(|| json!([]));
 
         // Persist enrichment over the placeholders. Non-fatal — the article is
         // already saved and readable.
@@ -1097,8 +1136,57 @@ fn spawn_generate_submodule(
         emit_enrich_event(&app2, &cid, &sid);
         // Assignments are independent — signal the reader to load them.
         emit_assignments_event(&app2, &cid, &sid);
+        maybe_publish_catalog_update(&db, &paths, &cid, catalog_upload_token);
     });
     Ok(true)
+}
+
+fn maybe_publish_catalog_update(
+    db: &Arc<Db>,
+    paths: &Arc<AppPaths>,
+    course_id: &str,
+    token: Option<String>,
+) {
+    let Some(token) = token.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let package = {
+        let Ok(conn) = db.0.lock() else {
+            return;
+        };
+        let Ok(Some(course)) = db::get_course(&conn, course_id) else {
+            return;
+        };
+        if course.catalog_origin_id.as_deref() != Some(&course.id) {
+            return;
+        }
+        if let Ok(now) = now_unix_secs() {
+            let _ = db::touch_course(&conn, course_id, now);
+        }
+        match catalog::build_package(&conn, paths, course_id) {
+            Ok(package) => package,
+            Err(e) => {
+                eprintln!("[catalog] auto-publish package failed: {e}");
+                return;
+            }
+        }
+    };
+    match catalog::publish_remote(catalog::DEFAULT_CATALOG_URL, &token, &package) {
+        Ok(result) => {
+            if let Ok(conn) = db.0.lock() {
+                if let Ok(now) = now_unix_secs() {
+                    let _ = db::set_course_catalog_sync(
+                        &conn,
+                        course_id,
+                        &result.id,
+                        result.version.max(package.course.catalog_version),
+                        now,
+                    );
+                }
+            }
+        }
+        Err(e) => eprintln!("[catalog] auto-publish failed: {e}"),
+    }
 }
 
 fn plan_illustrations(
@@ -1254,7 +1342,7 @@ fn illustrate_widgets(
     // are treated as separate image jobs but written back into their parent
     // gallery. External URLs from the agent are localized; direct hotlinks can
     // go stale or be rejected by the origin.
-    // (widget_id, gallery_index, image_key, description, alt, mode, existing_url, source)
+    // (widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source)
     type ImageJob = (
         String,
         Option<usize>,
@@ -1283,13 +1371,14 @@ fn illustrate_widgets(
             {
                 return;
             }
-            let description = w
-                .get("description")
+            let image_prompt = w
+                .get("prompt")
+                .or_else(|| w.get("description"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            if description.is_empty() {
+            if image_prompt.is_empty() {
                 return;
             }
             let alt = w.get("alt").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1303,7 +1392,7 @@ fn illustrate_widgets(
                 widget_id.to_string(),
                 gallery_index,
                 image_key,
-                description,
+                image_prompt,
                 alt,
                 mode,
                 existing_url,
@@ -1342,7 +1431,7 @@ fn illustrate_widgets(
         for _ in 0..concurrency {
             s.spawn(|| loop {
                 let job = { queue.lock().unwrap().pop_front() };
-                let Some((widget_id, gallery_index, image_key, description, alt, mode, existing_url, source)) = job else {
+                let Some((widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source)) = job else {
                     break;
                 };
                 if let Some(fill) = illustrate_one_widget(
@@ -1352,7 +1441,7 @@ fn illustrate_widgets(
                     sidecar,
                     &images_dir,
                     &image_key,
-                    &description,
+                    &image_prompt,
                     &alt,
                     &mode,
                     existing_url.as_deref(),
@@ -1781,6 +1870,7 @@ fn illustrate_one_widget(
 struct SettingsStatus {
     brave_configured: bool,
     gemini_configured: bool,
+    catalog_upload_token_configured: bool,
     mcp_servers: Vec<McpServerStatus>,
     tts_engine: String,
     tts_voice: String,
@@ -1838,6 +1928,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
     SettingsStatus {
         brave_configured,
         gemini_configured: state.gemini_api_key().is_some(),
+        catalog_upload_token_configured: state.catalog_upload_token().is_some(),
         mcp_servers,
         tts_engine: state.tts_engine(),
         tts_voice: state.tts_voice(),
@@ -1891,6 +1982,17 @@ fn set_gemini_key(
     key: Option<String>,
 ) -> Result<SettingsStatus, String> {
     state.set_gemini_api_key(key).map_err(|e| e.to_string())?;
+    Ok(settings_status(&state))
+}
+
+#[tauri::command]
+fn set_catalog_upload_token(
+    state: tauri::State<'_, Arc<SettingsState>>,
+    token: Option<String>,
+) -> Result<SettingsStatus, String> {
+    state
+        .set_catalog_upload_token(token)
+        .map_err(|e| e.to_string())?;
     Ok(settings_status(&state))
 }
 
@@ -2064,6 +2166,84 @@ fn set_share_domains(
         domains: settings.share_domains(),
         selected: settings.share_domain(),
     })
+}
+
+#[tauri::command]
+fn list_catalog_courses() -> Result<Vec<catalog::CatalogCourseSummary>, String> {
+    catalog::list_remote(catalog::DEFAULT_CATALOG_URL)
+}
+
+#[tauri::command]
+fn publish_course_to_catalog(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    settings: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<catalog::CatalogPublishResult, String> {
+    let package = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        catalog::build_package(&conn, &paths, &course_id)?
+    };
+    let token = settings
+        .catalog_upload_token()
+        .ok_or_else(|| "catalog upload token is not configured".to_string())?;
+    let result = catalog::publish_remote(catalog::DEFAULT_CATALOG_URL, &token, &package)?;
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::set_course_catalog_sync(
+            &conn,
+            &course_id,
+            &result.id,
+            result.version.max(package.course.catalog_version),
+            now_unix_secs()?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn download_catalog_course(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    catalog_id: String,
+) -> Result<String, String> {
+    let package = catalog::download_remote(catalog::DEFAULT_CATALOG_URL, &catalog_id)?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    catalog::install_package(&conn, &paths, package)
+}
+
+#[tauri::command]
+fn get_catalog_update(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+) -> Result<catalog::CatalogUpdateStatus, String> {
+    let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL)?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let course = db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("course not found: {course_id}"))?;
+    Ok(catalog::check_update(&conn, &course, &remote))
+}
+
+#[tauri::command]
+fn update_catalog_course(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+) -> Result<String, String> {
+    let catalog_id = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        course
+            .catalog_origin_id
+            .unwrap_or_else(|| course.id.clone())
+    };
+    let package = catalog::download_remote(catalog::DEFAULT_CATALOG_URL, &catalog_id)?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    catalog::update_installed_course(&conn, &paths, &course_id, package)
 }
 
 #[tauri::command]
@@ -2317,6 +2497,7 @@ fn submit_assignment(
         "backend": course.agent,
         "topic": course.topic,
         "language": course.language,
+        "courseFormat": course.course_format,
         "assignment": assignment,
         "submission": {
             "type": submission_type,
@@ -2371,6 +2552,9 @@ fn start_generate_assignments(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("course not found: {course_id}"))?
     };
+    if course.course_format == "podcast_series" {
+        return Ok(());
+    }
     let paths = paths_state.inner().clone();
     let content = courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
         .map_err(|_| "submodule not ready yet".to_string())?;
@@ -2399,6 +2583,7 @@ fn start_generate_assignments(
             "backend": course.agent,
             "topic": course.topic,
             "language": course.language,
+            "courseFormat": course.course_format,
             "submodulePath": { "title": sub_title, "summary": sub_summary },
             "article": article,
             "modelConfig": tests_model,
@@ -2444,6 +2629,9 @@ fn start_illustrate_submodule(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("course not found: {course_id}"))?
     };
+    if course.course_format == "podcast_series" {
+        return Ok(());
+    }
     let paths = paths_state.inner().clone();
     let content = courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
         .map_err(|_| "submodule not ready yet".to_string())?;
@@ -2539,6 +2727,7 @@ fn start_generate_submodule(
         writing_model,
         tests_model,
         settings_state.gemini_image_model(),
+        settings_state.catalog_upload_token(),
         false,
     )
     .map(|_| ())
@@ -2578,6 +2767,7 @@ fn start_first_pending_submodule(
         writing_model,
         tests_model,
         settings_state.gemini_image_model(),
+        settings_state.catalog_upload_token(),
         true,
     )?;
     if started {
@@ -2719,6 +2909,7 @@ pub fn run() {
             get_settings_status,
             set_brave_key,
             set_gemini_key,
+            set_catalog_upload_token,
             set_tts_engine,
             set_tts_voice,
             set_gemini_image_model,
@@ -2731,6 +2922,11 @@ pub fn run() {
             share_status,
             get_share_settings,
             set_share_domains,
+            list_catalog_courses,
+            publish_course_to_catalog,
+            download_catalog_course,
+            get_catalog_update,
+            update_catalog_course,
             get_model_settings,
             set_model_settings
         ])

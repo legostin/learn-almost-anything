@@ -1,0 +1,12 @@
+{
+  "name": "learn-almost-anything-catalog",
+  "private": true,
+  "version": "0.1.1",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

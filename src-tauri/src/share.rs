@@ -218,6 +218,7 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             app.state(),
             req("topic")?,
             req("language")?,
+            s("courseFormat").or_else(|| s("course_format")),
             s("agent"),
         )?),
         "set_course_agent" => {
@@ -228,6 +229,9 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
         "check_agent_availability" => to_val(crate::check_agent_availability()),
         "set_brave_key" => to_val(crate::set_brave_key(app.state(), s("key"))?),
         "set_gemini_key" => to_val(crate::set_gemini_key(app.state(), s("key"))?),
+        "set_catalog_upload_token" => {
+            to_val(crate::set_catalog_upload_token(app.state(), s("token"))?)
+        }
         "set_tts_engine" => to_val(crate::set_tts_engine(app.state(), s("engine"))?),
         "set_tts_voice" => to_val(crate::set_tts_voice(app.state(), s("voice"))?),
         "set_gemini_image_model" => {
@@ -245,6 +249,27 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
         "set_model_settings" => to_val(crate::set_model_settings(
             app.state(),
             from_arg(a, "models", json!({}))?,
+        )?),
+        "list_catalog_courses" => to_val(crate::list_catalog_courses()?),
+        "publish_course_to_catalog" => to_val(crate::publish_course_to_catalog(
+            app.state(),
+            app.state(),
+            app.state(),
+            req("courseId")?,
+        )?),
+        "download_catalog_course" => to_val(crate::download_catalog_course(
+            app.state(),
+            app.state(),
+            req("catalogId")?,
+        )?),
+        "get_catalog_update" => to_val(crate::get_catalog_update(
+            app.state(),
+            req("courseId")?,
+        )?),
+        "update_catalog_course" => to_val(crate::update_catalog_course(
+            app.state(),
+            app.state(),
+            req("courseId")?,
         )?),
         "get_structure" => to_val(crate::get_structure(app.state(), req("courseId")?)?),
         "list_chat" => to_val(crate::list_chat(app.state(), req("courseId")?)?),

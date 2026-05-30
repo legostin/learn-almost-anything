@@ -20,20 +20,81 @@ import "katex/dist/katex.min.css";
 import QRCode from "qrcode";
 import { convertFileSrc, invoke, listen, isTauri } from "./transport";
 import { useLang, useT, type Lang } from "./i18n";
+import appLoader from "./assets/app-loader.gif";
 import appMark from "./assets/app-mark.png";
 import "./App.css";
 
 type Agent = "claude" | "codex";
+type CourseFormat = "academic_course" | "mini_module" | "podcast_series";
+
+const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
+
+const COURSE_FORMATS = [
+  {
+    value: "academic_course",
+    titleKey: "courseFormatAcademicTitle",
+    descKey: "courseFormatAcademicDesc",
+  },
+  {
+    value: "mini_module",
+    titleKey: "courseFormatMiniTitle",
+    descKey: "courseFormatMiniDesc",
+  },
+  {
+    value: "podcast_series",
+    titleKey: "courseFormatPodcastTitle",
+    descKey: "courseFormatPodcastDesc",
+  },
+] as const satisfies ReadonlyArray<{
+  value: CourseFormat;
+  titleKey:
+    | "courseFormatAcademicTitle"
+    | "courseFormatMiniTitle"
+    | "courseFormatPodcastTitle";
+  descKey:
+    | "courseFormatAcademicDesc"
+    | "courseFormatMiniDesc"
+    | "courseFormatPodcastDesc";
+}>;
 
 type Course = {
   id: string;
   topic: string;
   title?: string | null;
   language: string;
+  course_format: CourseFormat;
   status: string;
   agent: Agent;
   created_at: number;
   updated_at: number;
+  catalog_origin_id?: string | null;
+  catalog_version?: number;
+  catalog_synced_at?: number | null;
+};
+
+type CatalogCourse = {
+  id: string;
+  origin_id?: string;
+  title: string;
+  topic: string;
+  language: string;
+  updated_at: number;
+  version?: number;
+  modules: number;
+  lessons: number;
+  generated_lessons: number;
+  view_url: string;
+  download_url: string;
+};
+
+type CatalogUpdateStatus = {
+  course_id: string;
+  catalog_id: string | null;
+  local_version: number;
+  remote_version: number | null;
+  local_generated_lessons: number;
+  remote_generated_lessons: number | null;
+  available: boolean;
 };
 
 function courseTitle(course: Course, fallback: string) {
@@ -112,6 +173,7 @@ type CourseSuggestionState =
 type View =
   | { kind: "empty" }
   | { kind: "creating" }
+  | { kind: "catalog" }
   | { kind: "course"; id: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
 
@@ -159,6 +221,7 @@ type McpServerStatus = {
 type SettingsStatus = {
   brave_configured: boolean;
   gemini_configured: boolean;
+  catalog_upload_token_configured?: boolean;
   mcp_servers?: McpServerStatus[];
   tts_engine: string;
   tts_voice: string;
@@ -783,7 +846,12 @@ function App() {
     if (kind === "build_structure" || kind === "wizard_questions") {
       setTranscripts((prev) => {
         const next = new Map(prev);
-        next.delete(courseId);
+        next.set(courseId, [
+          {
+            kind: "running",
+            text: kind === "build_structure" ? t("buildingStructure") : t("wizardThinking"),
+          },
+        ]);
         return next;
       });
     }
@@ -852,6 +920,7 @@ function App() {
       const id = await invoke<string>("create_course", {
         topic: idea.topic,
         language: idea.language,
+        courseFormat: DEFAULT_COURSE_FORMAT,
         agent,
       });
       setCourseSuggestion({ status: "idle" });
@@ -896,6 +965,12 @@ function App() {
         </div>
         <button className="new-course" onClick={() => setView({ kind: "creating" })}>
           {t("newCourse")}
+        </button>
+        <button
+          className={`catalog-nav ${view.kind === "catalog" ? "active" : ""}`}
+          onClick={() => setView({ kind: "catalog" })}
+        >
+          {t("catalogOpen")}
         </button>
         {courses.length > 0 && sidebarLanguageOptions.length > 1 && (
           <div className="sidebar-language-filter" aria-label={t("homeLanguageFilterLabel")}>
@@ -956,11 +1031,17 @@ function App() {
           braveConfigured={braveConfigured}
           onOpenSettings={() => setSettingsOpen(true)}
         />
-        {(view.kind === "course" || view.kind === "submodule") && (
+        {(view.kind === "catalog" || view.kind === "course" || view.kind === "submodule") && (
           <nav className="crumbs">
             <button className="crumb" onClick={() => setView({ kind: "empty" })}>
               {t("crumbCourses")}
             </button>
+            {view.kind === "catalog" && (
+              <>
+                <span className="crumb-sep">›</span>
+                <span className="crumb current">{t("catalogTitle")}</span>
+              </>
+            )}
             {view.kind === "submodule" && (
               <>
                 <span className="crumb-sep">›</span>
@@ -990,6 +1071,7 @@ function App() {
             courseSuggestion={courseSuggestion}
             homeTitleTextStyles={homeTitleTextStyles}
             onNewCourse={() => setView({ kind: "creating" })}
+            onOpenCatalog={() => setView({ kind: "catalog" })}
             onOpenSettings={() => setSettingsOpen(true)}
             onHomeTitleTap={startCourseSuggestion}
             onStudySuggestion={studySuggestedCourse}
@@ -1007,6 +1089,14 @@ function App() {
               openCourse(id);
             }}
             onCancel={() => setView({ kind: "empty" })}
+          />
+        )}
+        {view.kind === "catalog" && (
+          <CatalogView
+            onImported={async (courseId) => {
+              await refresh();
+              openCourse(courseId);
+            }}
           />
         )}
         {view.kind === "course" && (
@@ -1100,6 +1190,7 @@ function CourseDashboard({
   courseSuggestion,
   homeTitleTextStyles,
   onNewCourse,
+  onOpenCatalog,
   onOpenSettings,
   onHomeTitleTap,
   onStudySuggestion,
@@ -1119,6 +1210,7 @@ function CourseDashboard({
   courseSuggestion: CourseSuggestionState;
   homeTitleTextStyles: HomeTitleTextStyles;
   onNewCourse: () => void;
+  onOpenCatalog: () => void;
   onOpenSettings: () => void;
   onHomeTitleTap: () => void;
   onStudySuggestion: () => void;
@@ -1383,6 +1475,9 @@ function CourseDashboard({
           >
             <SettingsIcon />
             <span>{t("settings")}</span>
+          </button>
+          <button className="home-catalog-action" onClick={onOpenCatalog}>
+            {t("catalogOpen")}
           </button>
           <button className="home-primary" onClick={onNewCourse}>
             {t("newCourse")}
@@ -1786,6 +1881,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const [geminiKey, setGeminiKey] = useState("");
   const [geminiConfigured, setGeminiConfigured] = useState(false);
   const [savingGemini, setSavingGemini] = useState(false);
+  const [catalogToken, setCatalogToken] = useState("");
+  const [catalogTokenConfigured, setCatalogTokenConfigured] = useState(false);
+  const [savingCatalogToken, setSavingCatalogToken] = useState(false);
   const [ttsEngine, setTtsEngine] = useState<"system" | "gemini">("system");
   const [ttsVoice, setTtsVoice] = useState("Kore");
   const [geminiImageModel, setGeminiImageModel] = useState("gemini-2.5-flash-image");
@@ -1820,6 +1918,7 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   function applySettingsStatus(s: SettingsStatus) {
     setBraveConfigured(s.brave_configured);
     setGeminiConfigured(s.gemini_configured);
+    setCatalogTokenConfigured(Boolean(s.catalog_upload_token_configured));
     setMcpServers(s.mcp_servers ?? []);
     setTtsEngine(s.tts_engine === "gemini" ? "gemini" : "system");
     if (s.tts_voice) setTtsVoice(s.tts_voice);
@@ -1898,6 +1997,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
       setGeminiKey("");
     } finally {
       setSavingGemini(false);
+    }
+  }
+
+  async function saveCatalogToken(token: string | null) {
+    setSavingCatalogToken(true);
+    try {
+      const s = await invoke<SettingsStatus>("set_catalog_upload_token", { token });
+      applySettingsStatus(s);
+      setCatalogToken("");
+    } finally {
+      setSavingCatalogToken(false);
     }
   }
 
@@ -2087,6 +2197,39 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             <div className="setting-note success-note">✓ {t("braveConfigured")}</div>
           )}
           <div className="setting-note">{t("braveNote")}</div>
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("catalogSettingsTitle")}</div>
+          <div className="brave-row">
+            <input
+              type="password"
+              className="custom-answer"
+              value={catalogToken}
+              placeholder={catalogTokenConfigured ? "•••••••••" : t("catalogTokenPlaceholder")}
+              onChange={(e) => setCatalogToken(e.target.value)}
+              disabled={savingCatalogToken}
+            />
+            <button
+              onClick={() => saveCatalogToken(catalogToken)}
+              disabled={!catalogToken.trim() || savingCatalogToken}
+            >
+              {t("braveSave")}
+            </button>
+            {catalogTokenConfigured && (
+              <button
+                className="ghost"
+                onClick={() => saveCatalogToken(null)}
+                disabled={savingCatalogToken}
+              >
+                {t("braveClear")}
+              </button>
+            )}
+          </div>
+          {catalogTokenConfigured && !catalogToken && (
+            <div className="setting-note success-note">✓ {t("catalogTokenConfigured")}</div>
+          )}
+          <div className="setting-note">{t("catalogSettingsNote")}</div>
         </div>
 
         <div className="setting-group">
@@ -2377,6 +2520,7 @@ function CreateCourse({
   const [uiLang] = useLang();
   const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
   const [topic, setTopic] = useState("");
+  const [courseFormat, setCourseFormat] = useState<CourseFormat>(DEFAULT_COURSE_FORMAT);
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
@@ -2407,6 +2551,7 @@ function CreateCourse({
     const id = await invoke<string>("create_course", {
       topic: topic.trim(),
       language,
+      courseFormat,
       agent,
     });
     onCreated(id);
@@ -2423,6 +2568,30 @@ function CreateCourse({
           onChange={(e) => setTopic(e.target.value)}
           placeholder={t("topicPlaceholder")}
         />
+      </label>
+      <label>
+        {t("courseFormatLabel")}
+        <div className="format-picker">
+          {COURSE_FORMATS.map((item) => (
+            <label
+              key={item.value}
+              className={`format-option ${courseFormat === item.value ? "selected" : ""}`}
+            >
+              <input
+                type="radio"
+                name="course-format"
+                value={item.value}
+                checked={courseFormat === item.value}
+                onChange={() => setCourseFormat(item.value)}
+              />
+              <div className="format-meta">
+                <div className="format-title">{t(item.titleKey)}</div>
+                <div className="format-desc">{t(item.descKey)}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <span className="field-note">{t("courseFormatNote")}</span>
       </label>
       <label>
         {t("courseLanguageLabel")}
@@ -2513,6 +2682,90 @@ function AgentAvailBadge({ available }: { available: boolean }) {
   );
 }
 
+function CatalogView({ onImported }: { onImported: (courseId: string) => void | Promise<void> }) {
+  const t = useT();
+  const [items, setItems] = useState<CatalogCourse[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await invoke<CatalogCourse[]>("list_catalog_courses");
+      setItems(list);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function download(item: CatalogCourse) {
+    setDownloading(item.id);
+    setError(null);
+    try {
+      const courseId = await invoke<string>("download_catalog_course", {
+        catalogId: item.id,
+      });
+      await onImported(courseId);
+    } catch (e) {
+      setError(String(e));
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="catalog-view">
+      <div className="catalog-head">
+        <div>
+          <h2>{t("catalogTitle")}</h2>
+          <p>{t("catalogSubtitle")}</p>
+        </div>
+        <button className="ghost" onClick={load} disabled={loading}>
+          {loading ? t("catalogLoading") : t("catalogRefresh")}
+        </button>
+      </div>
+      {error && <div className="error-banner">{t("errorPrefix", { error })}</div>}
+      {loading && <div className="placeholder">{t("catalogLoading")}</div>}
+      {!loading && items.length === 0 && (
+        <div className="placeholder">{t("catalogEmpty")}</div>
+      )}
+      <div className="catalog-list">
+        {items.map((item) => (
+          <article className="catalog-card" key={item.id}>
+            <div className="catalog-card-main">
+              <div className="catalog-card-title">{item.title}</div>
+              <div className="catalog-card-topic">{item.topic}</div>
+              <div className="catalog-card-meta">
+                {item.language} · {t("catalogLessons", {
+                  count: item.generated_lessons || item.lessons,
+                })} · {t("catalogModules", { count: item.modules })}
+              </div>
+            </div>
+            <div className="catalog-card-actions">
+              <a href={item.view_url} target="_blank" rel="noreferrer">
+                {t("catalogViewWeb")}
+              </a>
+              <button
+                onClick={() => download(item)}
+                disabled={downloading === item.id}
+              >
+                {downloading === item.id ? t("catalogDownloading") : t("catalogDownload")}
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CourseView({
   course,
   jobs,
@@ -2536,7 +2789,73 @@ function CourseView({
 }) {
   const t = useT();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [publishUrl, setPublishUrl] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<CatalogUpdateStatus | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updatingCatalog, setUpdatingCatalog] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const loadCatalogUpdate = useCallback(async () => {
+    if (!course || course.status !== "ready") {
+      setUpdateStatus(null);
+      return;
+    }
+    setCheckingUpdate(true);
+    setUpdateError(null);
+    try {
+      const status = await invoke<CatalogUpdateStatus>("get_catalog_update", {
+        courseId: course.id,
+      });
+      setUpdateStatus(status);
+    } catch (e) {
+      setUpdateError(String(e));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }, [course]);
+
+  useEffect(() => {
+    loadCatalogUpdate();
+  }, [loadCatalogUpdate]);
+
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
+
+  async function publishCourse() {
+    if (!course || publishing) return;
+    setPublishing(true);
+    setPublishError(null);
+    setPublishUrl(null);
+    try {
+      const result = await invoke<{ id: string; url: string; version?: number }>("publish_course_to_catalog", {
+        courseId: course.id,
+      });
+      setPublishUrl(result.url);
+      await onChanged();
+      await loadCatalogUpdate();
+    } catch (e) {
+      setPublishError(String(e));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function updateFromCatalog() {
+    if (!course || updatingCatalog) return;
+    setUpdatingCatalog(true);
+    setUpdateError(null);
+    try {
+      await invoke<string>("update_catalog_course", { courseId: course.id });
+      await onChanged();
+      await loadCatalogUpdate();
+    } catch (e) {
+      setUpdateError(String(e));
+    } finally {
+      setUpdatingCatalog(false);
+    }
+  }
+
   return (
     <div className="course-view">
       <CourseHeaderTitle course={course} />
@@ -2558,6 +2877,41 @@ function CourseView({
           {courseLifecycleStatusLabel(course.status, t)}
         </span>
       </div>
+      {course.status === "ready" && (
+        <div className="catalog-publish-row">
+          <button className="ghost" onClick={publishCourse} disabled={publishing}>
+            {publishing ? t("catalogPublishing") : t("catalogPublish")}
+          </button>
+          {publishUrl && (
+            <a href={publishUrl} target="_blank" rel="noreferrer">
+              {t("catalogPublished")}
+            </a>
+          )}
+          {publishError && (
+            <span className="catalog-publish-error">
+              {t("errorPrefix", { error: publishError })}
+            </span>
+          )}
+          {checkingUpdate && <span>{t("catalogCheckingUpdate")}</span>}
+          {updateStatus?.available && (
+            <button className="ghost" onClick={updateFromCatalog} disabled={updatingCatalog}>
+              {updatingCatalog
+                ? t("catalogUpdating")
+                : t("catalogUpdateAvailable", {
+                    count: updateStatus.remote_generated_lessons ?? 0,
+                  })}
+            </button>
+          )}
+          {updateStatus?.catalog_id && !updateStatus.available && !checkingUpdate && (
+            <span>{t("catalogUpToDate")}</span>
+          )}
+          {updateError && (
+            <span className="catalog-publish-error">
+              {t("errorPrefix", { error: updateError })}
+            </span>
+          )}
+        </div>
+      )}
       {course.status === "wizard" && (
         <Wizard
           course={course}
@@ -2610,9 +2964,13 @@ function CourseHeaderTitle({ course }: { course: Course }) {
   if (title) return <h2>{title}</h2>;
   return (
     <div className="course-title-pending" role="status" aria-live="polite">
-      <span className="course-title-loader" aria-hidden="true">
-        <span />
-      </span>
+      <img
+        className="course-title-loader"
+        src={appLoader}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+      />
       <div className="course-title-pending-copy">
         <div className="course-title-pending-main">{t("courseTitlePendingReady")}</div>
         <div className="course-title-pending-sub">{t("courseTitlePendingEta")}</div>
@@ -2696,7 +3054,13 @@ function Wizard({
     return (
       <div className="wizard">
         <p>{t("wizardThinking")}</p>
-        <AgentTranscript transcript={transcript} />
+        <AgentTranscript
+          transcript={
+            transcript?.length
+              ? transcript
+              : [{ kind: "running", text: t("wizardThinking") }]
+          }
+        />
       </div>
     );
   }
@@ -2853,7 +3217,15 @@ function StructureBuilder({
       <button onClick={onStart} disabled={running}>
         {running ? t("buildingStructure") : t("generateStructure")}
       </button>
-      {running && <AgentTranscript transcript={transcript} />}
+      {running && (
+        <AgentTranscript
+          transcript={
+            transcript?.length
+              ? transcript
+              : [{ kind: "running", text: t("buildingStructure") }]
+          }
+        />
+      )}
       {errored && (
         <p style={{ color: "var(--danger)" }}>
           {t("errorPrefix", { error: (job as any).error })}
@@ -3270,6 +3642,7 @@ type SubmoduleContent = {
 type WidgetImageItem = {
   placeholder?: boolean;
   description?: string;
+  prompt?: string;
   alt?: string;
   url?: string;
   source?: string;
@@ -3292,6 +3665,14 @@ type WidgetData =
       error?: string;
     }
   | { type: string; [k: string]: any };
+
+type LightboxImage = {
+  key: string;
+  src: string;
+  caption?: string;
+  sourceHref?: string;
+  generated?: boolean;
+};
 
 type Source = { title: string; url: string };
 
@@ -3497,7 +3878,8 @@ function SubmoduleView({
   const moduleIdx = tree!.modules.findIndex((m) => m.id === moduleId);
   const subIdx =
     tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
-  const unresolvedImages = content ? countUnresolvedImageWidgets(content.widgets) : 0;
+  const isPodcast = course.course_format === "podcast_series";
+  const unresolvedImages = !isPodcast && content ? countUnresolvedImageWidgets(content.widgets) : 0;
 
   async function retryImages() {
     if (!course) return;
@@ -3624,14 +4006,14 @@ function SubmoduleView({
                 </div>
               )}
               <ArticleReader
-                article={content.article}
-                widgets={content.widgets}
+                article={isPodcast ? stripArticleWidgetMarkers(content.article) : content.article}
+                widgets={isPodcast ? {} : content.widgets}
                 fontPx={fontPx}
               />
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
               )}
-              {content.test?.length > 0 && (
+              {!isPodcast && content.test?.length > 0 && (
                 <TestSection
                   questions={content.test}
                   alreadyPassed={!!sub.test_passed}
@@ -3644,17 +4026,26 @@ function SubmoduleView({
                   }}
                 />
               )}
-              <AssignmentsSection
-                courseId={course.id}
-                moduleId={moduleId}
-                submoduleId={submoduleId}
-              />
+              {!isPodcast && (
+                <AssignmentsSection
+                  courseId={course.id}
+                  moduleId={moduleId}
+                  submoduleId={submoduleId}
+                />
+              )}
             </>
           )}
         </>
       )}
     </div>
   );
+}
+
+function stripArticleWidgetMarkers(md: string): string {
+  return (md || "")
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("::widget{"))
+    .join("\n");
 }
 
 // Strip markdown + widget markers to plain prose suitable for text-to-speech.
@@ -4983,7 +5374,35 @@ function ArticleReader({
   widgets: Record<string, WidgetData>;
   fontPx: number;
 }) {
-  const parts = splitWidgetMarkers(article);
+  const parts = useMemo(() => splitWidgetMarkers(article), [article]);
+  const lightboxImages = useMemo(
+    () => collectLightboxImages(parts, widgets),
+    [parts, widgets]
+  );
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const openLightboxImage = useCallback(
+    (key: string) => {
+      const index = lightboxImages.findIndex((image) => image.key === key);
+      if (index >= 0) setLightboxIndex(index);
+    },
+    [lightboxImages]
+  );
+  const moveLightbox = useCallback(
+    (delta: number) => {
+      setLightboxIndex((index) => {
+        if (index === null || lightboxImages.length === 0) return index;
+        return (index + delta + lightboxImages.length) % lightboxImages.length;
+      });
+    },
+    [lightboxImages.length]
+  );
+
+  useEffect(() => {
+    if (lightboxIndex !== null && lightboxIndex >= lightboxImages.length) {
+      setLightboxIndex(null);
+    }
+  }, [lightboxImages.length, lightboxIndex]);
+
   return (
     <article className="reader" style={{ ["--reader-font" as string]: `${fontPx}px` }}>
       {parts.map((p, i) =>
@@ -4996,14 +5415,68 @@ function ArticleReader({
             {p.text}
           </ReactMarkdown>
         ) : (
-          <WidgetRenderer key={i} id={p.id} widget={widgets[p.id]} />
+          <WidgetRenderer
+            key={i}
+            id={p.id}
+            widget={widgets[p.id]}
+            onOpenImage={openLightboxImage}
+          />
         )
+      )}
+      {lightboxIndex !== null && lightboxImages[lightboxIndex] && (
+        <ImageLightbox
+          images={lightboxImages}
+          index={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+          onMove={moveLightbox}
+        />
       )}
     </article>
   );
 }
 
-function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
+function collectLightboxImages(
+  parts: Array<{ kind: "md"; text: string } | { kind: "widget"; id: string }>,
+  widgets: Record<string, WidgetData>
+) {
+  const images: LightboxImage[] = [];
+  const addImage = (key: string, item: WidgetImageItem) => {
+    const { hasUrl, imgSrc } = resolveWidgetImage(item.url, item.source);
+    if (!hasUrl || !imgSrc) return;
+    images.push({
+      key,
+      src: imgSrc,
+      caption: item.description,
+      sourceHref: widgetImageSourceHref(item),
+      generated: item.generated,
+    });
+  };
+
+  for (const part of parts) {
+    if (part.kind !== "widget") continue;
+    const widget = widgets[part.id];
+    if (!widget) continue;
+    if (widget.type === "image") {
+      addImage(part.id, widget as WidgetImageItem);
+    } else if (widget.type === "gallery") {
+      const items = Array.isArray((widget as { items?: WidgetImageItem[] }).items)
+        ? (widget as { items: WidgetImageItem[] }).items
+        : [];
+      items.forEach((item, index) => addImage(`${part.id}-${index}`, item));
+    }
+  }
+  return images;
+}
+
+function WidgetRenderer({
+  id,
+  widget,
+  onOpenImage,
+}: {
+  id: string;
+  widget?: WidgetData;
+  onOpenImage?: (key: string) => void;
+}) {
   const t = useT();
   if (!widget) {
     return (
@@ -5012,8 +5485,12 @@ function WidgetRenderer({ id, widget }: { id: string; widget?: WidgetData }) {
       </div>
     );
   }
-  if (widget.type === "image") return <ImagePlaceholder id={id} widget={widget as any} />;
-  if (widget.type === "gallery") return <GalleryWidget id={id} widget={widget as any} />;
+  if (widget.type === "image") {
+    return <ImagePlaceholder id={id} widget={widget as any} onOpenImage={onOpenImage} />;
+  }
+  if (widget.type === "gallery") {
+    return <GalleryWidget id={id} widget={widget as any} onOpenImage={onOpenImage} />;
+  }
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
   if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
   if (widget.type === "interactive") return <InteractiveWidget id={id} widget={widget as any} />;
@@ -5051,6 +5528,153 @@ function resolveWidgetImage(url?: string, source?: string) {
       : url!;
   const linkHref = source || (isLocal ? imgSrc : url);
   return { hasUrl, imgSrc, linkHref };
+}
+
+function widgetImageSourceHref(item: WidgetImageItem) {
+  if (item.source) return item.source;
+  if (!item.url || item.generated) return undefined;
+  if (item.url.startsWith("/") || item.url.startsWith("file://")) return undefined;
+  return item.url;
+}
+
+function ImageCaption({
+  description,
+  generated,
+  sourceHref,
+  className,
+}: {
+  description?: string;
+  generated?: boolean;
+  sourceHref?: string;
+  className?: string;
+}) {
+  const t = useT();
+  if (!description && !generated && !sourceHref) return null;
+  return (
+    <figcaption className={className}>
+      {(description || generated) && (
+        <div>
+          {description}
+          {generated && (
+            <span className="widget-generated">
+              {description ? " · " : ""}
+              🪄 {t("imgGenerated")}
+            </span>
+          )}
+        </div>
+      )}
+      {sourceHref && (
+        <a
+          className="widget-image-source"
+          href={sourceHref}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {t("widgetImageSource")} · {hostnameOf(sourceHref)}
+        </a>
+      )}
+    </figcaption>
+  );
+}
+
+function ImageLightbox({
+  images,
+  index,
+  onClose,
+  onMove,
+}: {
+  images: LightboxImage[];
+  index: number;
+  onClose: () => void;
+  onMove: (delta: number) => void;
+}) {
+  const t = useT();
+  const image = images[index];
+  const hasMany = images.length > 1;
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      else if (event.key === "ArrowLeft" && hasMany) onMove(-1);
+      else if (event.key === "ArrowRight" && hasMany) onMove(1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [hasMany, onClose, onMove]);
+
+  return (
+    <div
+      className="image-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("widgetImageOpen")}
+      onClick={onClose}
+    >
+      <div className="image-lightbox-stage" onClick={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          className="image-lightbox-close"
+          onClick={onClose}
+          aria-label={t("widgetImageLightboxClose")}
+        >
+          {t("widgetImageLightboxClose")}
+        </button>
+        <div className="image-lightbox-media">
+          {hasMany && (
+            <button
+              type="button"
+              className="image-lightbox-nav prev"
+              onClick={() => onMove(-1)}
+              aria-label={t("widgetImageLightboxPrev")}
+            >
+              {"<"}
+            </button>
+          )}
+          <img src={image.src} alt={image.caption || ""} />
+          {hasMany && (
+            <button
+              type="button"
+              className="image-lightbox-nav next"
+              onClick={() => onMove(1)}
+              aria-label={t("widgetImageLightboxNext")}
+            >
+              {">"}
+            </button>
+          )}
+        </div>
+        {(image.caption || image.generated || image.sourceHref) && (
+          <div className="image-lightbox-caption">
+            {(image.caption || image.generated) && (
+              <div>
+                {image.caption}
+                {image.generated && (
+                  <span className="widget-generated">
+                    {image.caption ? " · " : ""}
+                    🪄 {t("imgGenerated")}
+                  </span>
+                )}
+              </div>
+            )}
+            {image.sourceHref && (
+              <a href={image.sourceHref} target="_blank" rel="noreferrer">
+                {t("widgetImageSource")} · {hostnameOf(image.sourceHref)}
+              </a>
+            )}
+            {hasMany && (
+              <div className="image-lightbox-count">
+                {index + 1} / {images.length}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function videoEmbedUrl(url: string): string | null {
@@ -5360,9 +5984,11 @@ ${css}
 function GalleryWidget({
   id,
   widget,
+  onOpenImage,
 }: {
   id: string;
   widget: { caption?: string; items?: WidgetImageItem[] };
+  onOpenImage?: (key: string) => void;
 }) {
   const t = useT();
   const items = Array.isArray(widget.items) ? widget.items : [];
@@ -5387,16 +6013,19 @@ function GalleryWidget({
     <figure className="widget widget-gallery">
       <div className="widget-gallery-grid">
         {items.map((item, index) => {
-          const { hasUrl, imgSrc, linkHref } = resolveWidgetImage(item.url, item.source);
+          const { hasUrl, imgSrc } = resolveWidgetImage(item.url, item.source);
           const unavailable = hasUrl && (!imgSrc || failed.has(index));
+          const imageKey = `${id}-${index}`;
+          const sourceHref = widgetImageSourceHref(item);
           return (
             <div className="widget-gallery-item" key={`${id}-${index}`}>
               {hasUrl && imgSrc && !failed.has(index) ? (
-                <a
-                  href={linkHref}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
                   className="widget-image-link"
+                  onClick={() => onOpenImage?.(imageKey)}
+                  aria-label={t("widgetImageOpen")}
+                  title={t("widgetImageOpen")}
                 >
                   <img
                     src={imgSrc}
@@ -5410,7 +6039,7 @@ function GalleryWidget({
                       })
                     }
                   />
-                </a>
+                </button>
               ) : (
                 <div className={`widget-image-box ${unavailable ? "widget-image-error" : ""}`}>
                   <span className="widget-label">
@@ -5419,20 +6048,12 @@ function GalleryWidget({
                   <span className="widget-id">#{id}.{index + 1}</span>
                 </div>
               )}
-              {(item.description || item.alt || item.generated) && (
-                <figcaption className="widget-gallery-caption">
-                  {item.description}
-                  {item.alt && (
-                    <span className="widget-alt">
-                      {" "}
-                      · {t("widgetImageAlt")} {item.alt}
-                    </span>
-                  )}
-                  {item.generated && (
-                    <span className="widget-generated"> · {t("imgGenerated")}</span>
-                  )}
-                </figcaption>
-              )}
+              <ImageCaption
+                className="widget-gallery-caption"
+                description={item.description}
+                generated={item.generated}
+                sourceHref={sourceHref}
+              />
             </div>
           );
         })}
@@ -5445,6 +6066,7 @@ function GalleryWidget({
 function ImagePlaceholder({
   id,
   widget,
+  onOpenImage,
 }: {
   id: string;
   widget: {
@@ -5454,21 +6076,24 @@ function ImagePlaceholder({
     source?: string;
     generated?: boolean;
   };
+  onOpenImage?: (key: string) => void;
 }) {
   const t = useT();
   const [imageFailed, setImageFailed] = useState(false);
-  const { hasUrl, imgSrc, linkHref } = resolveWidgetImage(widget.url, widget.source);
+  const { hasUrl, imgSrc } = resolveWidgetImage(widget.url, widget.source);
+  const sourceHref = widgetImageSourceHref(widget);
   useEffect(() => {
     setImageFailed(false);
   }, [imgSrc]);
   return (
     <figure className="widget widget-image">
       {hasUrl && imgSrc && !imageFailed ? (
-        <a
-          href={linkHref}
-          target="_blank"
-          rel="noreferrer"
+        <button
+          type="button"
           className="widget-image-link"
+          onClick={() => onOpenImage?.(id)}
+          aria-label={t("widgetImageOpen")}
+          title={t("widgetImageOpen")}
         >
           <img
             src={imgSrc}
@@ -5476,7 +6101,7 @@ function ImagePlaceholder({
             className="widget-image-real"
             onError={() => setImageFailed(true)}
           />
-        </a>
+        </button>
       ) : (
         <div className={`widget-image-box ${hasUrl ? "widget-image-error" : ""}`}>
           <span className="widget-label">
@@ -5485,20 +6110,11 @@ function ImagePlaceholder({
           <span className="widget-id">#{id}</span>
         </div>
       )}
-      {(widget?.description || widget?.alt || widget?.generated) && (
-        <figcaption>
-          {widget.description}
-          {widget.alt && (
-            <span className="widget-alt">
-              {" "}
-              · {t("widgetImageAlt")} {widget.alt}
-            </span>
-          )}
-          {widget.generated && (
-            <span className="widget-generated"> · 🪄 {t("imgGenerated")}</span>
-          )}
-        </figcaption>
-      )}
+      <ImageCaption
+        description={widget.description}
+        generated={widget.generated}
+        sourceHref={sourceHref}
+      />
     </figure>
   );
 }

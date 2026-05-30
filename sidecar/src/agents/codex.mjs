@@ -50,6 +50,58 @@ function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
 
+function normalizeCourseFormat(value) {
+  return ["academic_course", "mini_module", "podcast_series"].includes(value)
+    ? value
+    : "academic_course";
+}
+
+function courseFormatGuide(courseFormat, lang) {
+  const format = normalizeCourseFormat(courseFormat);
+  if (format === "mini_module") {
+    return `Generation format: mini-course for one module.
+- Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
+- Keep the scope narrow and immediately useful.
+- Structure: exactly 1 top-level module with 3-6 submodules.
+- Materials should be concise and practical; avoid broad textbook coverage.
+- Assessments should be small checks or exercises that fit a short intensive.`;
+  }
+  if (format === "podcast_series") {
+    return `Generation format: podcast series.
+- Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
+- Structure the curriculum as seasons/blocks and episodes: 3-6 top-level modules, each with 2-5 episode-like submodules.
+- Submodule titles should feel like podcast episode titles while staying clear and educational.
+- Materials should be written as listenable episode scripts: spoken explanations, narrative flow, examples, recap, and suggested listening notes.
+- Do not generate tests or homework assignments for podcast-series material.
+- Do not plan image/gallery/diagram/interactive widgets. If references help, mention them as optional show notes or source links, not visual lesson blocks.`;
+  }
+  return `Generation format: full academic course.
+- Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
+- Build a serious, progressive curriculum with research-backed sequencing.
+- Structure: 4-10 top-level modules, each with 2-6 submodules.
+- Balance theory, examples, practice, tests, and assignments.
+- Materials may be substantial lesson articles, but should still match the learner's goals and constraints.`;
+}
+
+function wizardQuestionGuide(courseFormat, lang) {
+  const format = normalizeCourseFormat(courseFormat);
+  if (format === "podcast_series") {
+    return `For the podcast-series wizard, ask questions that shape the listening experience: episode length, tone, narrative style, depth, pacing, examples, host style, and whether the learner wants brief show notes or source links. Do NOT ask about maps, images, diagrams, galleries, drawing materials, visual assets, tests, or homework.`;
+  }
+  if (format === "mini_module") {
+    return `For the mini-course wizard, ask only questions that materially narrow one compact module: outcome, current level, time budget, and the few subtopics that matter most.`;
+  }
+  return "";
+}
+
+function podcastNoWidgetGuide(courseFormat) {
+  if (normalizeCourseFormat(courseFormat) !== "podcast_series") return "";
+  return `PODCAST FORMAT OVERRIDE:
+- Do not insert any ::widget markers.
+- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and interactiveWidgets.
+- If a map, image, chart, or diagram would normally help, describe it verbally or put a source link in "sources"/show notes instead of making a visual widget.`;
+}
+
 function normalizeCourseTitle(value) {
   if (typeof value !== "string") return "";
   return value
@@ -118,43 +170,89 @@ async function runOnce(prompt, outputSchema, opts) {
 
 async function runStreamed(prompt, outputSchema, onProgress, opts) {
   if (!onProgress) return await runOnce(prompt, outputSchema, opts);
+  const idleTimeoutMs = opts?.idleTimeoutMs ?? 0;
+  const totalTimeoutMs = opts?.totalTimeoutMs ?? 0;
   const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
+  const controller = new AbortController();
+  let timeoutReason = "";
+  let idleTimer = null;
+  let totalTimer = null;
+  const abortAfter = (ms, message) => {
+    if (!ms) return null;
+    const timer = setTimeout(() => {
+      timeoutReason = message;
+      controller.abort();
+    }, ms);
+    timer.unref?.();
+    return timer;
+  };
+  const resetIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = abortAfter(
+      idleTimeoutMs,
+      `Codex produced no progress for ${Math.round(idleTimeoutMs / 1000)} seconds`
+    );
+  };
+  onProgress({ label: "running", detail: "Starting Codex" });
+  resetIdleTimer();
+  totalTimer = abortAfter(
+    totalTimeoutMs,
+    `Codex did not finish within ${Math.round(totalTimeoutMs / 1000)} seconds`
+  );
   const stream = await thread.runStreamed(
     prompt,
-    outputSchema ? { outputSchema } : undefined
+    outputSchema ? { outputSchema, signal: controller.signal } : { signal: controller.signal }
   );
   let final = "";
-  for await (const ev of stream.events) {
-    if (ev.type === "item.started" || ev.type === "item.updated") {
-      const item = ev.item;
-      if (!item) continue;
-      if (item.type === "web_search" && item.query) {
-        onProgress({ label: "searching", detail: item.query });
-      } else if (item.type === "reasoning" && typeof item.text === "string" && item.text.trim()) {
-        // Full reasoning text — drives the live transcript bubbles.
-        onProgress({ label: "thinking", detail: item.text.trim() });
-      } else if (
-        item.type === "agent_message" &&
-        typeof item.text === "string" &&
-        item.text.trim()
-      ) {
-        // The final message is structured JSON for most stages — keep it a
-        // short indicator rather than dumping the whole payload.
-        const tail = item.text.replace(/\s+/g, " ").trim().slice(-80);
-        onProgress({ label: "writing", detail: tail });
-      } else if (item.type === "command_execution" && item.command) {
-        onProgress({ label: "running", detail: String(item.command).slice(0, 100) });
+  try {
+    for await (const ev of stream.events) {
+      resetIdleTimer();
+      if (ev.type === "turn.started") {
+        onProgress({ label: "thinking" });
+      } else if (ev.type === "turn.failed") {
+        throw new Error(ev.error?.message || "codex turn failed");
+      } else if (ev.type === "item.started" || ev.type === "item.updated") {
+        const item = ev.item;
+        if (!item) continue;
+        if (item.type === "web_search") {
+          onProgress({ label: "searching", detail: item.query || "" });
+        } else if (item.type === "reasoning") {
+          // Reasoning text may be hidden by the CLI; still show that Codex is alive.
+          const detail =
+            typeof item.text === "string" && item.text.trim() ? item.text.trim() : undefined;
+          onProgress({ label: "thinking", detail });
+        } else if (
+          item.type === "agent_message" &&
+          typeof item.text === "string" &&
+          item.text.trim()
+        ) {
+          // The final message is structured JSON for most stages — keep it a
+          // short indicator rather than dumping the whole payload.
+          const tail = item.text.replace(/\s+/g, " ").trim().slice(-80);
+          onProgress({ label: "writing", detail: tail });
+        } else if (item.type === "command_execution" && item.command) {
+          onProgress({ label: "running", detail: String(item.command).slice(0, 100) });
+        } else if (item.type === "mcp_tool_call") {
+          onProgress({ label: "running", detail: `${item.server}.${item.tool}` });
+        }
+      } else if (ev.type === "item.completed") {
+        const item = ev.item;
+        if (item?.type === "agent_message" && typeof item.text === "string") {
+          final = item.text;
+        }
+      } else if (ev.type === "error") {
+        throw new Error(ev.message || "codex stream error");
       }
-    } else if (ev.type === "item.completed") {
-      const item = ev.item;
-      if (item?.type === "agent_message" && typeof item.text === "string") {
-        final = item.text;
-      }
-    } else if (ev.type === "error") {
-      throw new Error(ev.message || "codex stream error");
     }
+    if (!final.trim()) throw new Error("Codex response missing final message");
+    return final;
+  } catch (e) {
+    if (timeoutReason) throw new Error(timeoutReason);
+    throw e;
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (totalTimer) clearTimeout(totalTimer);
   }
-  return final;
 }
 
 // The Codex CLI caches the live model catalog at ~/.codex/models_cache.json —
@@ -249,9 +347,9 @@ export async function chat({ prompt }) {
 }
 
 /**
- * @param {{ topic: string, language: string }} params
+ * @param {{ topic: string, language: string, courseFormat?: string }} params
  */
-export async function wizardQuestions({ topic, language, modelConfig }, ctx) {
+export async function wizardQuestions({ topic, language, courseFormat, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -259,10 +357,14 @@ export async function wizardQuestions({ topic, language, modelConfig }, ctx) {
   const prompt = `You are designing a personalized course on "${topic}".
 The course will be delivered in language code "${lang}".
 
+${courseFormatGuide(courseFormat, lang)}
+
 Generate 5-10 clarifying questions to ask the learner BEFORE you build the
 curriculum. Each question must have 3-5 short, mutually-distinct, concrete,
 topic-specific answer options the learner can pick from. The user will also
 have a free-text fallback so do NOT add an "other" option.
+Do not ask the learner to choose the generation format again.
+${wizardQuestionGuide(courseFormat, lang)}
 
 Also generate a short display title for the whole course. It must NOT copy the
 learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
@@ -310,7 +412,11 @@ ${terminologyGuide(lang)}`;
     required: ["title", "questions"],
   };
 
-  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
+  const text = await runStreamed(prompt, schema, ctx?.progress, {
+    modelConfig,
+    idleTimeoutMs: 180_000,
+    totalTimeoutMs: 900_000,
+  });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.questions)) {
     throw new Error("Codex response missing 'questions' array");
@@ -429,13 +535,18 @@ const testSchema = {
 /**
  * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string, braveApiKey?:string}} params
  */
-export async function generateTest({ topic, language, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+  if (normalizeCourseFormat(courseFormat) === "podcast_series") {
+    return { questions: [] };
+  }
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
   const lang = (language || "en").trim();
   const prompt = `You are writing a short comprehension test for a submodule of
 a course on "${topic}" (language: ${lang}).
+
+${courseFormatGuide(courseFormat, lang)}
 
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -559,13 +670,18 @@ function normalizeReview(parsed) {
 }
 
 /** Design a short chain of practical homework assignments for a submodule. */
-export async function generateAssignments({ topic, language, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+  if (normalizeCourseFormat(courseFormat) === "podcast_series") {
+    return { assignments: [] };
+  }
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for assignment generation");
   }
   const lang = (language || "en").trim();
   const prompt = `You are designing practical homework for one submodule of a
 course on "${topic}" (language: ${lang}).
+
+${courseFormatGuide(courseFormat, lang)}
 
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -794,11 +910,12 @@ const draftSchema = {
           id: { type: "string" },
           mode: { type: "string", enum: ["search", "generate"] },
           description: { type: "string" },
+          prompt: { type: "string" },
           alt: { type: "string" },
           url: { type: "string" },
           source: { type: "string" },
         },
-        required: ["id", "mode", "description", "alt", "url", "source"],
+        required: ["id", "mode", "description", "prompt", "alt", "url", "source"],
       },
     },
     galleryWidgets: {
@@ -819,11 +936,12 @@ const draftSchema = {
               properties: {
                 mode: { type: "string", enum: ["search", "generate"] },
                 description: { type: "string" },
+                prompt: { type: "string" },
                 alt: { type: "string" },
                 url: { type: "string" },
                 source: { type: "string" },
               },
-              required: ["mode", "description", "alt", "url", "source"],
+              required: ["mode", "description", "prompt", "alt", "url", "source"],
             },
           },
         },
@@ -904,6 +1022,7 @@ async function draftArticleInternal(
   {
     topic,
     language,
+    courseFormat,
     courseMd,
     structure,
     memoryFiles,
@@ -925,6 +1044,9 @@ async function draftArticleInternal(
   const prompt = `You are writing one submodule of a personalized course on
 "${topic}" (language: ${lang}).
 
+${courseFormatGuide(courseFormat, lang)}
+${podcastNoWidgetGuide(courseFormat)}
+
 Course brief (wizard Q&A):
 <course-md>
 ${courseMd}
@@ -939,14 +1061,19 @@ ${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this s
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
-Write a detailed, engaging article in language "${lang}". ~600-1200 words.
+Write the lesson material in language "${lang}". For a full academic course,
+write a detailed, engaging article of ~600-1200 words. For a mini-course, keep
+it compact and action-oriented. For a podcast series, write a listenable
+episode script with spoken transitions, examples, recap, and listener notes.
 Use Markdown headings (## / ###), short paragraphs, and concrete examples
 specific to this learner (not generic textbook prose). Do not repeat the
 overall course intro — assume the learner has the curriculum in front of them.
 When relevant, reference what was established in earlier submodules to build
 continuity. Never contradict them.
 
-You may add visual-aid widgets where they meaningfully help. Mark insertion
+For non-podcast formats, you may add visual-aid widgets where they meaningfully help. Be friendly to
+illustration count: on visual subjects, prefer several useful visuals over one
+token image. Mark insertion
 points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
@@ -955,20 +1082,25 @@ points with a single line, alone, with blank lines above and below:
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
-Use 0-4 widgets total, counting one gallery as one widget. Skip widgets if the
-topic is purely textual prose. Do a silent paragraph-by-paragraph visual pass:
+Use 1-6 widgets total when the topic has concrete visual references, counting
+one gallery as one widget. Use 0 only when the topic is purely textual prose.
+Do a silent paragraph-by-paragraph visual pass:
 for each paragraph, decide whether an image, gallery, diagram, video, or
 interactive widget would make the learner understand faster. Add visuals where
 they are genuinely useful; don't decorate every paragraph.
 Diagrams are great for processes, hierarchies, state machines, sequences,
 component relations. Use Mermaid syntax (flowchart TD, sequenceDiagram, etc.).
 
-VIDEO WIDGETS: only include a video if you find one that is RECOMMENDED by
-real people elsewhere — a Reddit/forum thread that calls it out, a "best
-videos on X" listicle, a blog post that says "watch this", a course
-syllabus that links it. NEVER pick a video purely by its YouTube title or
-search rank. Record the recommendation source in "recommended_by". If you
-can't find a recommended one, skip the video — better none than a random.
+VIDEO WIDGETS: for non-podcast formats, actively look for 0-2 helpful YouTube
+or Vimeo videos when a submodule would benefit from seeing a lecture, demo,
+walkthrough, lab, performance, interview, or worked example. Prefer YouTube.
+Do not pick a video purely by search rank or title. Use at least one quality
+signal: an official channel/playlist, university/course syllabus, reputable
+creator, blog/listicle recommendation, forum/Reddit recommendation, or the
+video's surrounding page proving it is directly relevant. Put that evidence URL
+in "recommended_by" (it may be the official video/channel/playlist page when
+that is the evidence). If the video is not embeddable or you cannot find any
+quality signal, skip it.
 
 INTERACTIVE WIDGETS: small self-contained HTML+CSS+JS that runs in a
 sandboxed iframe (no network, no cookies, no parent access). Use 0-2 per
@@ -990,13 +1122,18 @@ IMAGE AND GALLERY WIDGETS — set "mode" per image item:
   • "search" — a real, specific, existing thing to FIND not invent: a particular
     named artwork by a known artist, a real person/place/object/event, a
     historical artifact, a museum hall, a map, a real diagram/plan, or a real
-    software screenshot. "description" = a precise search target.
+    software screenshot. "prompt" = a precise search target.
   • "generate" — a custom conceptual/explanatory illustration that probably
     will not exist as a findable photo: an ideal artist workspace, what should
     be on a table, a staged practice setup, a stylized scene, an abstract
     concept made visual, or a detailed composition you describe.
-    "description" = a rich generation prompt (subject, style, composition,
-    lighting, important objects).
+
+For every image item, keep two fields separate:
+  • "description" — a short learner-facing caption/description, 1 sentence,
+    not a search prompt and not an accessibility alt dump.
+  • "prompt" — the internal search target or generation prompt. For "search",
+    make it precise enough to find the real image. For "generate", include
+    subject, style, composition, lighting, and important objects.
 
 Hard visual sourcing rules:
   • Famous artwork by a known artist -> ALWAYS "search", never "generate".
@@ -1026,8 +1163,8 @@ from a period, before/after examples, or multiple UI states. Keep each gallery
 coherent: one reason to look at all images together, not a random dump.
 
 Return widgets in five separate arrays:
-- imageWidgets: [{id, mode ("search"|"generate"), description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
-- galleryWidgets: [{id, caption (in ${lang}), items: [{mode ("search"|"generate"), description (in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]}]
+- imageWidgets: [{id, mode ("search"|"generate"), description (short UI caption in ${lang}), prompt (internal search/generation prompt in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
+- galleryWidgets: [{id, caption (in ${lang}), items: [{mode ("search"|"generate"), description (short UI caption in ${lang}), prompt (internal search/generation prompt in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
@@ -1043,16 +1180,16 @@ ${
     ? `You have web access through the Brave Search MCP tools:
 - mcp__brave__brave_web_search — for verifying facts, finding concrete
   examples, current best practices, citations, and for finding
-  community-recommended videos. Try queries like "best youtube videos
-  to learn X reddit", "<topic> recommended video tutorials
-  site:reddit.com", "<topic> video recommendations forum".
+  good YouTube/Vimeo videos. Try queries like "<topic> lecture youtube",
+  "<topic> demo youtube", "best youtube videos to learn X reddit",
+  "<topic> recommended video tutorials site:reddit.com", "<topic> syllabus video".
 - mcp__brave__brave_image_search — for REAL image URLs for image and
   gallery widgets.
 
 Codex's built-in web search is also available — use whichever fits.
 `
     : `Use Codex's built-in web search where useful to verify facts and
-find concrete examples + community-recommended videos. For image and gallery
+find concrete examples + useful YouTube/Vimeo videos. For image and gallery
 widgets, use web search to find credible public source pages when the exact
 real image matters. Put the page URL in "source"; put "url" only if you are
 confident it is a direct real image URL. Source-only is useful: the app will
@@ -1124,6 +1261,12 @@ function mergeWidgets(
           placeholder: !url,
           mode: w.mode === "generate" ? "generate" : "search",
           description: typeof w.description === "string" ? w.description.trim() : "",
+          prompt:
+            typeof w.prompt === "string" && w.prompt.trim()
+              ? w.prompt.trim()
+              : typeof w.description === "string"
+                ? w.description.trim()
+                : "",
           alt: typeof w.alt === "string" ? w.alt.trim() : "",
           ...(url ? { url } : {}),
           ...(typeof w.source === "string" && w.source.trim()
@@ -1146,6 +1289,12 @@ function mergeWidgets(
                 mode: item.mode === "generate" ? "generate" : "search",
                 description:
                   typeof item.description === "string" ? item.description.trim() : "",
+                prompt:
+                  typeof item.prompt === "string" && item.prompt.trim()
+                    ? item.prompt.trim()
+                    : typeof item.description === "string"
+                      ? item.description.trim()
+                      : "",
                 alt: typeof item.alt === "string" ? item.alt.trim() : "",
                 ...(url ? { url } : {}),
                 ...(typeof item.source === "string" && item.source.trim()
@@ -1154,7 +1303,7 @@ function mergeWidgets(
                 placeholder: !url,
               };
             })
-            .filter((item) => item && (item.description || item.url))
+            .filter((item) => item && (item.description || item.prompt || item.url))
         : [];
       if (items.length > 0) {
         out[w.id.trim()] = {
@@ -1264,11 +1413,13 @@ Do a silent paragraph-by-paragraph visual pass. For every paragraph, decide
 whether an image or gallery would make the learner understand faster. Add a
 visual only where it is genuinely useful: a concrete object, place, artwork,
 diagram-like visual reference, comparison set, setup, material layout, or
-example the learner should inspect. Do not decorate every paragraph.
+example the learner should inspect. Be friendly to illustration count on visual
+subjects: several precise illustrations are better than one token image. Do not
+decorate every paragraph.
 
 Rules:
 - Preserve all existing widget marker lines and existing ids.
-- Add at most 4 NEW image/gallery widgets total.
+- Add at most 6 NEW image/gallery widgets total.
 - Use ids that do not collide with existing ids, e.g. img-auto-1,
   img-auto-2, gal-auto-1.
 - New marker lines must be alone, with blank lines around them:
@@ -1288,9 +1439,13 @@ Image/gallery mode:
 - Famous artworks by known artists are always "search".
 - If unsure whether a real thing exists, use "search".
 
-For each new image item provide a precise description and short alt text in
-language "${lang}". Use a gallery only when several images are needed for one
-comparison.
+For each new image item provide a short display description and short alt text
+in language "${lang}". Keep image fields separate:
+- description: short learner-facing caption, 1 sentence, not a search prompt.
+- prompt: internal search target or generation prompt. For search, name the
+  exact real thing to find. For generate, describe subject, style, composition,
+  lighting, and important objects.
+Use a gallery only when several images are needed for one comparison.
 
 Return only NEW image/gallery widgets. If no new visual is useful, return the
 unchanged article and empty arrays.`;
@@ -1622,6 +1777,7 @@ export async function generateSubmodule(params) {
 function buildRefinePrompt({
   topic,
   language,
+  courseFormat,
   courseMd,
   currentStructure,
   memoryFiles,
@@ -1643,6 +1799,8 @@ function buildRefinePrompt({
       : "";
   return `You are iterating on a course curriculum on "${topic}" (language: ${lang}).
 
+${courseFormatGuide(courseFormat, lang)}
+
 Course brief (wizard Q&A):
 <course-md>
 ${courseMd}
@@ -1663,7 +1821,7 @@ B) If unclear or you'd like to negotiate — ask one specific clarifying questio
    in "reply". Set "modules" to []. Do NOT propose half a tree.
 
 All titles and summaries in language "${lang}". When proposing, return the
-FULL tree (4-10 top-level modules × 2-6 submodules), not a diff.
+FULL tree, not a diff. The tree size must follow the chosen generation format.
 
 ${terminologyGuide(lang)}`;
 }
@@ -1725,7 +1883,7 @@ const refineSchema = {
 };
 
 /**
- * @param {{topic:string, language:string, courseMd:string, currentStructure:object, memoryFiles:{filename:string,content:string}[], chatHistory:{role:string,text:string}[], userMessage:string}} params
+ * @param {{topic:string, language:string, courseFormat?:string, courseMd:string, currentStructure:object, memoryFiles:{filename:string,content:string}[], chatHistory:{role:string,text:string}[], userMessage:string}} params
  */
 export async function refineStructure(params, ctx) {
   if (typeof params?.userMessage !== "string" || !params.userMessage.trim()) {
@@ -1740,9 +1898,9 @@ export async function refineStructure(params, ctx) {
 }
 
 /**
- * @param {{ courseMd: string, topic: string, language: string }} params
+ * @param {{ courseMd: string, topic: string, language: string, courseFormat?: string }} params
  */
-export async function buildStructure({ courseMd, topic, language, modelConfig }, ctx) {
+export async function buildStructure({ courseMd, topic, language, courseFormat, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -1752,6 +1910,8 @@ export async function buildStructure({ courseMd, topic, language, modelConfig },
   const lang = (language || "en").trim();
   const prompt = `You are designing a personalized course on "${topic}".
 The course will be delivered in language code "${lang}".
+
+${courseFormatGuide(courseFormat, lang)}
 
 Below is the course brief — a markdown file with the wizard Q&A.
 
@@ -1781,7 +1941,7 @@ exist.
 Constraints:
 - Reflect the learner's specific goals, prior knowledge, and constraints.
 - Skip modules irrelevant to those goals; do not produce a generic textbook.
-- 4-10 top-level modules; each with 2-6 submodules.
+- Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
 
 ${terminologyGuide(lang)}`;
@@ -1825,7 +1985,11 @@ ${terminologyGuide(lang)}`;
     required: ["title", "modules"],
   };
 
-  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
+  const text = await runStreamed(prompt, schema, ctx?.progress, {
+    modelConfig,
+    idleTimeoutMs: 180_000,
+    totalTimeoutMs: 900_000,
+  });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
     throw new Error("Codex response missing non-empty 'modules' array");
