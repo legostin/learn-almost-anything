@@ -23,6 +23,23 @@ import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
 // long-lived state. Without a key, falls back to a shared instance.
+let defaultCodex = null;
+
+function codexOptions(config) {
+  const cliPath = process.env.LEARN_ANYTHING_CODEX_CLI;
+  if (!cliPath) {
+    throw new Error(
+      "Codex CLI is not installed or not visible to the app. Install @openai/codex, run codex login, and restart the app."
+    );
+  }
+  return config ? { codexPathOverride: cliPath, config } : { codexPathOverride: cliPath };
+}
+
+function getDefaultCodex() {
+  defaultCodex ??= new Codex(codexOptions());
+  return defaultCodex;
+}
+
 function makeCodex(braveApiKey, opts = {}) {
   const config = {};
   if (opts.referenceMcp !== false) {
@@ -40,11 +57,9 @@ function makeCodex(braveApiKey, opts = {}) {
   if (opts.imageGenerationEnabled === false) {
     config.features = { image_generation: false };
   }
-  if (Object.keys(config).length === 0) return defaultCodex;
-  return new Codex({ config });
+  if (Object.keys(config).length === 0) return getDefaultCodex();
+  return new Codex(codexOptions(config));
 }
-
-const defaultCodex = new Codex();
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
@@ -325,7 +340,7 @@ export async function generateImage({ prompt }, ctx) {
   }
   const before = new Set(listImages(GENERATED_IMAGES_DIR));
   ctx?.progress?.({ label: "generating", detail: prompt.slice(0, 100) });
-  const thread = defaultCodex.startThread({
+  const thread = getDefaultCodex().startThread({
     skipGitRepoCheck: true,
     sandboxMode: "workspace-write",
     networkAccessEnabled: true,

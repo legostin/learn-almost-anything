@@ -125,6 +125,15 @@ function modelOptions(modelConfig) {
 //   allowedTools, deny anything else instantly instead of prompting (no hang).
 const AGENT_ISOLATION = { settingSources: [], permissionMode: "dontAsk" };
 
+function claudeCliOptions() {
+  const cliPath = process.env.LEARN_ANYTHING_CLAUDE_CLI;
+  return cliPath ? { pathToClaudeCodeExecutable: cliPath } : {};
+}
+
+function claudeBaseOptions(extra = {}) {
+  return { ...AGENT_ISOLATION, ...claudeCliOptions(), ...extra };
+}
+
 const REFERENCE_MCP_ALLOWED_TOOLS = [
   "mcp__context7__resolve-library-id",
   "mcp__context7__query-docs",
@@ -154,8 +163,7 @@ function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig } = {}) {
     // before it writes the article. Research depth is throttled in the prompt
     // (a few targeted lookups, then write), not by starving the turn budget.
     maxTurns: maxTurns ?? (hasTools ? 10 : 1),
-    ...AGENT_ISOLATION,
-    ...modelOptions(modelConfig),
+    ...claudeBaseOptions(modelOptions(modelConfig)),
   };
   const allowedTools = [];
   if (web) {
@@ -262,7 +270,7 @@ function extractJson(text) {
 let _modelsCache = null;
 export async function listModels() {
   if (_modelsCache) return { models: _modelsCache };
-  const q = query({ prompt: "list models", options: { maxTurns: 1, ...AGENT_ISOLATION } });
+  const q = query({ prompt: "list models", options: { maxTurns: 1, ...claudeBaseOptions() } });
   try {
     const models = await q.supportedModels();
     _modelsCache = (models || []).map((m) => ({
@@ -938,7 +946,7 @@ export async function reviewWidgetRender({ title, description, pngPath, modelCon
   let text = "";
   for await (const m of query({
     prompt: userPrompt(),
-    options: { maxTurns: 1, ...AGENT_ISOLATION, ...modelOptions(modelConfig) },
+    options: { maxTurns: 1, ...claudeBaseOptions(modelOptions(modelConfig)) },
   })) {
     if (m.type === "result" && m.subtype === "success") text = m.result;
   }
@@ -1577,7 +1585,7 @@ Output ONLY a single-line JSON object:
   let text = "";
   for await (const m of query({
     prompt: userPrompt(),
-    options: { maxTurns: 1, ...AGENT_ISOLATION, ...modelOptions(modelConfig) },
+    options: { maxTurns: 1, ...claudeBaseOptions(modelOptions(modelConfig)) },
   })) {
     if (m.type === "result" && m.subtype === "success") {
       text = m.result;

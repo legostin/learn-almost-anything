@@ -26,7 +26,9 @@
 
 ## Latest release
 
-**v0.1.2** adds in-app update checks with signed updater bundles. Install this version manually once; future releases can be installed from Settings with **Update and restart**.
+**v0.1.3** fixes production agent discovery: the app now finds user-installed `claude` / `codex` CLIs from normal shell and npm locations, passes those exact executables to the SDKs, and no longer bundles the SDKs' native agent CLI binaries into the app.
+
+**v0.1.2** added in-app update checks with signed updater bundles. Install v0.1.2 or newer manually once; future releases can be installed from Settings with **Update and restart**.
 
 **v0.1.1** added the public catalog, course format selection, richer visual prompts for generated lessons, and macOS release signing/notarization fixes.
 
@@ -66,6 +68,8 @@ Starting with **v0.1.2**, the app can check GitHub Releases from Settings, downl
    | **Codex CLI** | ChatGPT Plus / Pro | `npm i -g @openai/codex` → `codex login` |
 
    You can install both and pick the backend per course.
+
+   The desktop app uses your installed CLI executable rather than a bundled copy, so your existing `claude login` / `codex login` subscription session is reused. After installing or moving a CLI, restart the app so it can refresh PATH detection.
 
 3. **Optional** (set in app Settings, stored locally):
 
