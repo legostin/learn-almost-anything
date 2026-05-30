@@ -92,6 +92,7 @@ jobs:
             exit 1
           fi
 
+          export APP_PATH="$app_path"
           echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
           printf '%s\n' "$app_path" > "$DIAG_DIR/app-path.txt"
           du -sh "$app_path" > "$DIAG_DIR/app-size.txt"
