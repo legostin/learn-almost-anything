@@ -24,6 +24,7 @@ jobs:
     env:
       DIAG_DIR: notarization-diagnostics
       TARGET: ${{ inputs.target }}
+      COPY_SIDECAR_DEREFERENCE: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +102,7 @@ jobs:
           printf '%s\n' "$app_path" > "$DIAG_DIR/app-path.txt"
           du -sh "$app_path" > "$DIAG_DIR/app-size.txt"
           find "$app_path" | wc -l | tr -d ' ' > "$DIAG_DIR/app-file-count.txt"
+          find "$app_path" -type l | wc -l | tr -d ' ' > "$DIAG_DIR/app-symlink-count.txt"
 
           codesign --verify --deep --strict --verbose=4 "$app_path" > "$DIAG_DIR/codesign-verify-app.txt" 2>&1 || true
           codesign -dvvv --entitlements :- "$app_path" > "$DIAG_DIR/codesign-details-app.txt" 2>&1 || true

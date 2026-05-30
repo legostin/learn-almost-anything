@@ -2,8 +2,9 @@
 // Tauri bundle's `resources` glob can pick it up. Runs as part of `pnpm build`
 // before `tauri build` packages everything.
 //
-// pnpm's node_modules layout uses symlinks into .pnpm/ — we dereference so the
-// resulting tree is self-contained inside the bundle.
+// pnpm's node_modules layout uses symlinks into .pnpm/. By default we
+// dereference them so the staged tree is self-contained. Set
+// COPY_SIDECAR_DEREFERENCE=0 to preserve pnpm's relative symlinks instead.
 
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -13,6 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const src = join(repoRoot, "sidecar");
 const dest = join(repoRoot, "src-tauri", "sidecar");
+const dereference = process.env.COPY_SIDECAR_DEREFERENCE !== "0";
 
 if (!existsSync(src)) {
   console.error(`[copy-sidecar] missing source: ${src}`);
@@ -34,9 +36,10 @@ function include(p) {
 
 cpSync(src, dest, {
   recursive: true,
-  dereference: true,
+  dereference,
   errorOnExist: false,
   filter: (s) => include(s),
+  verbatimSymlinks: !dereference,
 });
 
-console.log(`[copy-sidecar] copied → ${dest}`);
+console.log(`[copy-sidecar] copied -> ${dest} (${dereference ? "dereferenced" : "symlinks preserved"})`);

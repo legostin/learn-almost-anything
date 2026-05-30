@@ -30,6 +30,8 @@ jobs:
             rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
+    env:
+      COPY_SIDECAR_DEREFERENCE: ${{ startsWith(matrix.label, 'macos-') && '0' || '1' }}
 
     steps:
       - uses: actions/checkout@v4

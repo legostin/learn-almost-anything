@@ -3,7 +3,7 @@
 // resource resolution will fail with the cryptic "path not found" — this
 // script catches that early with a useful message.
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,8 +15,9 @@ function countFiles(p) {
   let n = 0;
   for (const e of readdirSync(p)) {
     const sub = join(p, e);
-    const st = statSync(sub);
-    if (st.isDirectory()) n += countFiles(sub);
+    const st = lstatSync(sub);
+    if (st.isSymbolicLink()) n++;
+    else if (st.isDirectory()) n += countFiles(sub);
     else n++;
   }
   return n;
