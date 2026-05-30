@@ -398,6 +398,19 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             )?;
             Ok(Value::Null)
         }
+        "start_illustrate_submodule" => {
+            crate::start_illustrate_submodule(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                app.state(),
+                req("courseId")?,
+                req("moduleId")?,
+                req("submoduleId")?,
+            )?;
+            Ok(Value::Null)
+        }
         _ => Err(format!("unknown command: {name}")),
     }
 }

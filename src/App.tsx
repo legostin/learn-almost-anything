@@ -2539,7 +2539,7 @@ function CourseView({
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
   return (
     <div className="course-view">
-      <h2>{courseTitle(course, t("courseTitlePending"))}</h2>
+      <CourseHeaderTitle course={course} />
       <div className="course-meta-full">
         <span className="lang-pill">{course.language}</span>
         <select
@@ -2599,6 +2599,24 @@ function CourseView({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function CourseHeaderTitle({ course }: { course: Course }) {
+  const t = useT();
+  const title =
+    course.title === undefined ? course.topic.trim() : course.title?.trim();
+  if (title) return <h2>{title}</h2>;
+  return (
+    <div className="course-title-pending" role="status" aria-live="polite">
+      <span className="course-title-loader" aria-hidden="true">
+        <span />
+      </span>
+      <div className="course-title-pending-copy">
+        <div className="course-title-pending-main">{t("courseTitlePendingReady")}</div>
+        <div className="course-title-pending-sub">{t("courseTitlePendingEta")}</div>
+      </div>
     </div>
   );
 }
@@ -3308,6 +3326,26 @@ type Assignment = {
   chat: AssignmentTurn[];
 };
 
+function countUnresolvedImageWidgets(widgets: Record<string, WidgetData>) {
+  const isUnresolved = (item?: WidgetImageItem) => {
+    if (!item) return true;
+    const { imgSrc } = resolveWidgetImage(item.url, item.source);
+    return item.placeholder === true || !imgSrc;
+  };
+  return Object.values(widgets ?? {}).reduce((count, widget) => {
+    if (widget.type === "image") {
+      return count + (isUnresolved(widget as WidgetImageItem) ? 1 : 0);
+    }
+    if (widget.type === "gallery") {
+      const items = Array.isArray((widget as { items?: WidgetImageItem[] }).items)
+        ? (widget as { items: WidgetImageItem[] }).items
+        : [];
+      return count + items.filter((item: WidgetImageItem) => isUnresolved(item)).length;
+    }
+    return count;
+  }, 0);
+}
+
 function SubmoduleView({
   course,
   moduleId,
@@ -3333,6 +3371,8 @@ function SubmoduleView({
   const [error, setError] = useState<string | null>(null);
   const [confirmingRegen, setConfirmingRegen] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const [retryingImages, setRetryingImages] = useState(false);
+  const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [fontPx, setFontPx] = useState(
     () => Number(localStorage.getItem("readerFontPx")) || 16
   );
@@ -3370,6 +3410,8 @@ function SubmoduleView({
   useEffect(() => {
     setContent(null);
     setError(null);
+    setRetryingImages(false);
+    setImageRetryError(null);
     reloadTree();
   }, [reloadTree, submoduleId]);
 
@@ -3437,6 +3479,8 @@ function SubmoduleView({
       async (e) => {
         const p = e.payload;
         if (p.courseId !== course.id || p.submoduleId !== submoduleId) return;
+        setRetryingImages(false);
+        setImageRetryError(null);
         await reloadTree();
         await reloadContent();
       }
@@ -3453,6 +3497,23 @@ function SubmoduleView({
   const moduleIdx = tree!.modules.findIndex((m) => m.id === moduleId);
   const subIdx =
     tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
+  const unresolvedImages = content ? countUnresolvedImageWidgets(content.widgets) : 0;
+
+  async function retryImages() {
+    if (!course) return;
+    setRetryingImages(true);
+    setImageRetryError(null);
+    try {
+      await invoke("start_illustrate_submodule", {
+        courseId: course.id,
+        moduleId,
+        submoduleId,
+      });
+    } catch (e) {
+      setRetryingImages(false);
+      setImageRetryError(String(e));
+    }
+  }
 
   return (
     <div className="submodule-view">
@@ -3534,6 +3595,34 @@ function SubmoduleView({
           {!content && <div className="placeholder">{t("loadingStructure")}</div>}
           {content && (
             <>
+              {!enriching && unresolvedImages > 0 && (
+                <div className="sub-recovery">
+                  <div>
+                    <div className="sub-recovery-title">
+                      {t("subImagesIncomplete", { count: unresolvedImages })}
+                    </div>
+                    <div className="sub-recovery-body">{t("subImagesIncompleteBody")}</div>
+                    {imageRetryError && (
+                      <div className="sub-recovery-error">
+                        {t("errorPrefix", { error: imageRetryError })}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    className="sub-recovery-action"
+                    disabled={retryingImages}
+                    onClick={retryImages}
+                  >
+                    {retryingImages ? (
+                      <>
+                        <span className="spinner" /> {t("subImagesRetrying")}
+                      </>
+                    ) : (
+                      t("subImagesRetry")
+                    )}
+                  </button>
+                </div>
+              )}
               <ArticleReader
                 article={content.article}
                 widgets={content.widgets}

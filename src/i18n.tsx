@@ -97,6 +97,9 @@ const STRINGS = {
     courseStatusHasIssues: "ошибок генерации: {count}",
     courseStatusComplete: "курс пройден",
     courseTitlePending: "Название генерируется",
+    courseTitlePendingReady: "Готовы собрать ваш курс",
+    courseTitlePendingEta:
+      "Подбираем название и вопросы. Обычно это занимает 10–30 секунд.",
 
     createTitle: "Новый курс",
     topicLabel: "Что хотите изучить?",
@@ -163,6 +166,11 @@ const STRINGS = {
     stageTest: "Тест",
     stagePendingHint: "Раздел ещё не сгенерирован.",
     subEnriching: "Иллюстрации и тест ещё загружаются…",
+    subImagesIncomplete: "Картинки не дозагрузились: {count}",
+    subImagesIncompleteBody:
+      "Агент заново пройдёт статью по абзацам, добавит нужные иллюстрации и соберёт картинки. Тест и домашние задания не изменятся.",
+    subImagesRetry: "Пересобрать иллюстрации",
+    subImagesRetrying: "Собираю картинки…",
     lectureListen: "Слушать",
     lecturePause: "Пауза",
     lectureResume: "Продолжить",
@@ -390,6 +398,9 @@ const STRINGS = {
     courseStatusHasIssues: "{count} failed generations",
     courseStatusComplete: "course completed",
     courseTitlePending: "Generating title",
+    courseTitlePendingReady: "Ready to build your course",
+    courseTitlePendingEta:
+      "Choosing the title and questions. This usually takes 10–30 seconds.",
 
     createTitle: "New course",
     topicLabel: "What do you want to learn?",
@@ -456,6 +467,11 @@ const STRINGS = {
     stageTest: "Test",
     stagePendingHint: "This section has not been generated yet.",
     subEnriching: "Illustrations and the test are still loading…",
+    subImagesIncomplete: "Images did not finish loading: {count}",
+    subImagesIncompleteBody:
+      "The agent will review the article paragraph by paragraph, add useful illustration markers, and collect images. The test and assignments stay unchanged.",
+    subImagesRetry: "Rebuild illustrations",
+    subImagesRetrying: "Collecting images…",
     lectureListen: "Listen",
     lecturePause: "Pause",
     lectureResume: "Resume",

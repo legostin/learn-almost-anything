@@ -1211,6 +1211,116 @@ function mergeWidgets(
   return out;
 }
 
+function stripUnknownWidgetMarkers(article, widgets) {
+  const ids = new Set(Object.keys(widgets || {}));
+  return String(article || "")
+    .split("\n")
+    .filter((line) => {
+      const match = /^::widget\{[^}]*id="([^"]+)"[^}]*\}\s*$/.exec(line.trim());
+      return !match || ids.has(match[1]);
+    })
+    .join("\n")
+    .trim();
+}
+
+const illustrationPlanSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    article: { type: "string" },
+    imageWidgets: draftSchema.properties.imageWidgets,
+    galleryWidgets: draftSchema.properties.galleryWidgets,
+  },
+  required: ["article", "imageWidgets", "galleryWidgets"],
+};
+
+export async function planIllustrations(
+  { topic, language, article, widgets, braveApiKey, modelConfig },
+  ctx
+) {
+  const lang = (language || "en").trim();
+  const existingWidgets = widgets && typeof widgets === "object" ? widgets : {};
+  const existingIds = Object.keys(existingWidgets).sort();
+  const prompt = `You are doing the illustration pass for one already-written
+course submodule on "${topic}" (language: ${lang}).
+
+Your job is NOT to rewrite the article. Keep the prose exactly as-is except
+for inserting image/gallery widget marker lines after paragraphs where a visual
+will materially help comprehension.
+
+Article:
+<article>
+${article}
+</article>
+
+Existing widgets:
+<widgets>
+${JSON.stringify(existingWidgets, null, 2)}
+</widgets>
+
+Existing widget ids: ${existingIds.join(", ") || "(none)"}
+
+Do a silent paragraph-by-paragraph visual pass. For every paragraph, decide
+whether an image or gallery would make the learner understand faster. Add a
+visual only where it is genuinely useful: a concrete object, place, artwork,
+diagram-like visual reference, comparison set, setup, material layout, or
+example the learner should inspect. Do not decorate every paragraph.
+
+Rules:
+- Preserve all existing widget marker lines and existing ids.
+- Add at most 4 NEW image/gallery widgets total.
+- Use ids that do not collide with existing ids, e.g. img-auto-1,
+  img-auto-2, gal-auto-1.
+- New marker lines must be alone, with blank lines around them:
+  ::widget{type="image" id="img-auto-1"}
+  ::widget{type="gallery" id="gal-auto-1"}
+- Return the full article with only these marker-line insertions.
+- Do not add diagrams, videos, interactive widgets, headings, paragraphs, or
+  wording edits in this pass.
+
+Image/gallery mode:
+- "search" for real, specific, existing things: named artworks, real people,
+  real places, artifacts, museum halls, architecture, maps/plans, technical
+  diagrams, and real screenshots. Never generate fake versions of those.
+- "generate" only for intentionally conceptual teaching scenes: idealized
+  workspace, staged practice setup, material layout, abstract workflow, or
+  custom explanatory illustration.
+- Famous artworks by known artists are always "search".
+- If unsure whether a real thing exists, use "search".
+
+For each new image item provide a precise description and short alt text in
+language "${lang}". Use a gallery only when several images are needed for one
+comparison.
+
+Return only NEW image/gallery widgets. If no new visual is useful, return the
+unchanged article and empty arrays.`;
+  ctx?.progress?.({ label: "marking", detail: "paragraph-by-paragraph visual pass" });
+  const text = await runStreamed(prompt, illustrationPlanSchema, ctx?.progress, {
+    braveApiKey,
+    modelConfig,
+  });
+  const parsed = JSON.parse(text);
+  const additions = mergeWidgets(
+    parsed.imageWidgets,
+    parsed.galleryWidgets,
+    [],
+    [],
+    []
+  );
+  const merged = { ...existingWidgets };
+  for (const [id, widget] of Object.entries(additions)) {
+    if (!merged[id]) merged[id] = widget;
+  }
+  const plannedArticle =
+    typeof parsed.article === "string" && parsed.article.trim()
+      ? parsed.article.trim()
+      : String(article || "");
+  return {
+    article: stripUnknownWidgetMarkers(plannedArticle, merged),
+    widgets: merged,
+  };
+}
+
 function normalizeSources(raw) {
   if (!Array.isArray(raw)) return [];
   return raw

@@ -1040,6 +1040,23 @@ fn spawn_generate_submodule(
         let widgets = if can_illustrate {
             emit_stage_event(&app2, &cid, &sid, "illustrate");
             let illustrate_started = Instant::now();
+            let (illustrated_article, planned_widgets) = plan_illustrations(
+                &app2,
+                &course,
+                &sid,
+                &sidecar,
+                final_article.clone(),
+                widgets,
+                &brave_api_key,
+                &writing_model,
+            );
+            if illustrated_article != final_article {
+                if let Err(e) =
+                    courses::write_submodule_article(&paths, &cid, &mid, &sid, &illustrated_article)
+                {
+                    eprintln!("[generate_submodule] write illustrated article (non-fatal): {e}");
+                }
+            }
             let w = illustrate_widgets(
                 &app2,
                 &course,
@@ -1047,7 +1064,7 @@ fn spawn_generate_submodule(
                 &sid,
                 &paths,
                 &sidecar,
-                widgets,
+                planned_widgets,
                 &brave_api_key,
                 &gemini_key,
                 &writing_model,
@@ -1082,6 +1099,71 @@ fn spawn_generate_submodule(
         emit_assignments_event(&app2, &cid, &sid);
     });
     Ok(true)
+}
+
+fn plan_illustrations(
+    app: &AppHandle,
+    course: &db::Course,
+    submodule_id: &str,
+    sidecar: &Arc<Sidecar>,
+    article: String,
+    widgets: serde_json::Value,
+    brave_api_key: &Option<String>,
+    model_config: &serde_json::Value,
+) -> (String, serde_json::Value) {
+    emit_progress_event(
+        app,
+        &course.id,
+        submodule_id,
+        "illustrate",
+        "marking",
+        Some("paragraph-by-paragraph visual pass"),
+    );
+    let original_article = article.clone();
+    let original_widgets = widgets.clone();
+    let mut params = json!({
+        "backend": course.agent,
+        "topic": course.topic,
+        "language": course.language,
+        "article": article,
+        "widgets": widgets,
+        "modelConfig": model_config,
+    });
+    if let Some(ref key) = brave_api_key {
+        params["braveApiKey"] = json!(key);
+    }
+    match sidecar.call_with_progress(
+        "plan_illustrations",
+        params,
+        Duration::from_secs(900),
+        {
+            let app2 = app.clone();
+            let cid = course.id.clone();
+            let sid = submodule_id.to_string();
+            move |p: sidecar::ProgressPayload| {
+                emit_progress_event(&app2, &cid, &sid, "illustrate", &p.label, p.detail.as_deref());
+            }
+        },
+    ) {
+        Ok(v) => {
+            let article = v
+                .get("article")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| original_article.clone());
+            let widgets = v
+                .get("widgets")
+                .cloned()
+                .unwrap_or_else(|| original_widgets.clone());
+            (article, widgets)
+        }
+        Err(e) => {
+            eprintln!("[illustrate] visual pass failed (soft): {e}");
+            (original_article, original_widgets)
+        }
+    }
 }
 
 // Generate one illustration as JPEG bytes. Prefers Gemini (reliable); falls
@@ -2343,6 +2425,81 @@ fn start_generate_assignments(
     Ok(())
 }
 
+/// Retry only the illustration enrichment for an already-readable submodule.
+/// The article, test and assignment state are left intact.
+#[tauri::command]
+fn start_illustrate_submodule(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+) -> Result<(), String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let paths = paths_state.inner().clone();
+    let content = courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+        .map_err(|_| "submodule not ready yet".to_string())?;
+    let sidecar = sidecar_state.inner().clone();
+    let brave_api_key = settings_state.brave_api_key();
+    let gemini_key = settings_state.gemini_api_key();
+    let writing_model = settings_state.stage_model(&course.agent, "writing");
+    let gemini_image_model = settings_state.gemini_image_model();
+    let app2 = app.clone();
+
+    thread::spawn(move || {
+        emit_stage_event(&app2, &course_id, &submodule_id, "illustrate");
+        let started = Instant::now();
+        let (article, widgets) = plan_illustrations(
+            &app2,
+            &course,
+            &submodule_id,
+            &sidecar,
+            content.article,
+            content.widgets,
+            &brave_api_key,
+            &writing_model,
+        );
+        if let Err(e) =
+            courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &article)
+        {
+            eprintln!("[start_illustrate_submodule] write article (non-fatal): {e}");
+        }
+        let widgets = illustrate_widgets(
+            &app2,
+            &course,
+            &module_id,
+            &submodule_id,
+            &paths,
+            &sidecar,
+            widgets,
+            &brave_api_key,
+            &gemini_key,
+            &writing_model,
+            &gemini_image_model,
+        );
+        log_timing(&app2, &course_id, &submodule_id, "illustrate", started);
+        if let Err(e) = courses::write_submodule_widgets(
+            &paths,
+            &course_id,
+            &module_id,
+            &submodule_id,
+            &widgets,
+        ) {
+            eprintln!("[start_illustrate_submodule] write widgets (non-fatal): {e}");
+        }
+        emit_enrich_event(&app2, &course_id, &submodule_id);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn start_generate_submodule(
     app: AppHandle,
@@ -2557,6 +2714,7 @@ pub fn run() {
             get_assignments,
             submit_assignment,
             start_generate_assignments,
+            start_illustrate_submodule,
             delete_course,
             get_settings_status,
             set_brave_key,

@@ -40,6 +40,7 @@ const methods = {
   submodule_draft: async (params, ctx) => pickAgent(params).submoduleDraft(params, ctx),
   submodule_review: async (params, ctx) => pickAgent(params).submoduleReview(params, ctx),
   submodule_annotate: async (params, ctx) => pickAgent(params).submoduleAnnotate(params, ctx),
+  plan_illustrations: async (params, ctx) => pickAgent(params).planIllustrations(params, ctx),
   submodule_review_images: async (params, ctx) => pickAgent(params).reviewImages(params, ctx),
   search_image_candidates: async (params, ctx) => pickAgent(params).searchImageCandidates(params, ctx),
   generate_test: async (params, ctx) => pickAgent(params).generateTest(params, ctx),
