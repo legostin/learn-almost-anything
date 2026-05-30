@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::env;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -57,6 +59,19 @@ pub enum SidecarMsg {
     Done(Result<Value, String>),
 }
 
+#[cfg(target_os = "macos")]
+const EXTRA_PATH_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+];
+
+#[cfg(not(target_os = "macos"))]
+const EXTRA_PATH_DIRS: &[&str] = &[];
+
 type Pending = Arc<Mutex<HashMap<String, mpsc::Sender<SidecarMsg>>>>;
 
 pub struct Sidecar {
@@ -66,13 +81,57 @@ pub struct Sidecar {
     next_id: AtomicU64,
 }
 
+pub fn expanded_path() -> OsString {
+    let mut paths: Vec<PathBuf> = env::var_os("PATH")
+        .map(|p| env::split_paths(&p).collect())
+        .unwrap_or_default();
+
+    for dir in EXTRA_PATH_DIRS {
+        push_unique_path(&mut paths, PathBuf::from(dir));
+    }
+
+    env::join_paths(paths).unwrap_or_else(|_| OsString::from(env::var("PATH").unwrap_or_default()))
+}
+
+pub fn command_path(name: &str) -> PathBuf {
+    let path = expanded_path();
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if executable_exists(&candidate) {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|p| p == &path) {
+        paths.push(path);
+    }
+}
+
+#[cfg(unix)]
+fn executable_exists(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn executable_exists(path: &Path) -> bool {
+    path.is_file()
+}
+
 impl Sidecar {
     pub fn spawn(script: &Path) -> Result<Self, SidecarError> {
-        let mut child = Command::new("node")
+        let mut child = Command::new(command_path("node"))
             .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .env("PATH", expanded_path())
             .env_remove("ANTHROPIC_API_KEY")
             .spawn()?;
 

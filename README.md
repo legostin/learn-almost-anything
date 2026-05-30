@@ -26,7 +26,9 @@
 
 ## Latest release
 
-**v0.1.1** adds the public catalog, course format selection, richer visual prompts for generated lessons, and macOS release signing/notarization fixes.
+**v0.1.2** adds in-app update checks with signed updater bundles. Install this version manually once; future releases can be installed from Settings with **Update and restart**.
+
+**v0.1.1** added the public catalog, course format selection, richer visual prompts for generated lessons, and macOS release signing/notarization fixes.
 
 <!-- TODO: four GIFs for the main flows -->
 <table>
@@ -48,6 +50,10 @@ Grab a prebuilt binary from the [Releases](https://github.com/legostin/learn-alm
 - **Windows** — `.msi` / `.exe` for x64. Unsigned: SmartScreen will warn — click "More info" → "Run anyway".
 
 The UI starts in English; switch to Russian in Settings if you prefer.
+
+## Updates
+
+Starting with **v0.1.2**, the app can check GitHub Releases from Settings, download a signed updater bundle, install it, and restart. Update signing uses a Tauri updater key stored in GitHub Actions secrets; the app verifies every update before installing it.
 
 ## What else you need
 

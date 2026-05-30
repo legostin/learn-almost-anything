@@ -31,7 +31,6 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     env:
-      COPY_SIDECAR_DEREFERENCE: ${{ startsWith(matrix.label, 'macos-') && '0' || '1' }}
       SIGN_SIDECAR_NATIVE: ${{ startsWith(matrix.label, 'macos-') && '1' || '0' }}
 
     steps:
@@ -116,6 +115,10 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Required by Tauri's updater. The public key is embedded in
+          # tauri.conf.json; these secrets sign latest.json updater bundles.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: 'Learn (Almost) Anything ${{ github.ref_name }}'
@@ -125,9 +128,21 @@ jobs:
 
             Requires Node.js (≥ 20) installed on the user machine.
             See README for prerequisites (Claude / Codex CLI subscription).
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify bundled sidecar
+        if: startsWith(matrix.label, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "::error::No macOS .app bundle found"
+            exit 1
+          fi
+          SIDECAR_DIR="$app_path/Contents/Resources/sidecar" node scripts/verify-sidecar.mjs
 
       - name: Upload bundles (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
@@ -136,6 +151,8 @@ jobs:
           name: ${{ matrix.label }}-${{ github.run_number }}
           path: |
             src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/**/*.sig
+            src-tauri/target/**/release/bundle/**/latest.json
             src-tauri/target/**/release/bundle/macos/*.app.tar.gz
             src-tauri/target/**/release/bundle/msi/*.msi
             src-tauri/target/**/release/bundle/nsis/*.exe

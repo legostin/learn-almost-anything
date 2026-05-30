@@ -1944,11 +1944,12 @@ struct AgentAvailability {
 }
 
 fn cli_present(cmd: &str) -> bool {
-    std::process::Command::new(cmd)
+    std::process::Command::new(sidecar::command_path(cmd))
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .env("PATH", sidecar::expanded_path())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -2848,6 +2849,8 @@ fn sidecar_script_path(app: &AppHandle) -> PathBuf {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let db_path = dir.join("learn-anything.db");

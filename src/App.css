@@ -394,6 +394,18 @@ button {
   background: var(--accent-soft);
   color: #92400e;
 }
+.banner-update {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.banner-update .banner-main {
+  flex: 1;
+}
+.banner-action:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
 .form-error {
   font-size: 13px;
   color: var(--danger);
@@ -3303,6 +3315,73 @@ button {
   border-color: var(--danger);
   background: transparent;
 }
+.app-update-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+}
+.app-update-main {
+  min-width: 0;
+  flex: 1;
+}
+.app-update-status {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.app-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.app-update-actions button {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.app-update-actions button:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.app-update-actions button.ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+.app-update-actions button.ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text);
+  background: transparent;
+}
+.app-update-actions button:disabled {
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+.app-update-progress {
+  height: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.app-update-progress div {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 120ms ease;
+}
 .mcp-list {
   display: flex;
   flex-direction: column;
@@ -4545,6 +4624,13 @@ button.domain-chip {
   .brave-row .custom-answer,
   .brave-row input {
     flex: 1 1 100%;
+  }
+  .app-update-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .app-update-actions {
+    justify-content: flex-start;
   }
   .mcp-row {
     grid-template-columns: 1fr;

@@ -1,6 +1,6 @@
 [package]
 name = "learn-almost-anything"
-version = "0.1.1"
+version = "0.1.2"
 description = "Learn (Almost) Anything — local AI tutor"
 authors = ["you"]
 edition = "2021"
@@ -34,3 +34,5 @@ base64 = "0.22"
 tiny_http = "0.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

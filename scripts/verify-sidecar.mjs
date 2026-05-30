@@ -3,13 +3,14 @@
 // resource resolution will fail with the cryptic "path not found" — this
 // script catches that early with a useful message.
 
-import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
-const target = join(root, "src-tauri", "sidecar");
+const target = process.env.SIDECAR_DIR || join(root, "src-tauri", "sidecar");
 
 function countFiles(p) {
   let n = 0;
@@ -29,10 +30,34 @@ if (!existsSync(target)) {
 }
 
 const required = ["src/index.mjs", "node_modules", "package.json"];
-const missing = required.filter((p) => !existsSync(join(target, p)));
+let missing = required.filter((p) => !existsSync(join(target, p)));
 if (missing.length) {
   console.error(`[verify-sidecar] FAIL: missing ${missing.join(", ")} under ${target}`);
   process.exit(1);
+}
+
+const pkg = JSON.parse(readFileSync(join(target, "package.json"), "utf8"));
+for (const name of Object.keys(pkg.dependencies || {})) {
+  required.push(join("node_modules", name, "package.json"));
+}
+
+missing = required.filter((p) => !existsSync(join(target, p)));
+if (missing.length) {
+  console.error(`[verify-sidecar] FAIL: missing ${missing.join(", ")} under ${target}`);
+  process.exit(1);
+}
+
+const ping = spawnSync(process.execPath, [join(target, "src", "index.mjs")], {
+  input: JSON.stringify({ id: "verify", method: "ping", params: {} }) + "\n",
+  encoding: "utf8",
+  timeout: 10000,
+});
+
+if (ping.status !== 0 || !ping.stdout.includes('"pong":true')) {
+  console.error(`[verify-sidecar] FAIL: sidecar ping failed under ${target}`);
+  if (ping.stdout) console.error(ping.stdout.trim());
+  if (ping.stderr) console.error(ping.stderr.trim());
+  process.exit(ping.status || 1);
 }
 
 const files = countFiles(target);

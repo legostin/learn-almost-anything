@@ -18,6 +18,8 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import QRCode from "qrcode";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { convertFileSrc, invoke, listen, isTauri } from "./transport";
 import { useLang, useT, type Lang } from "./i18n";
 import appLoader from "./assets/app-loader.gif";
@@ -95,6 +97,22 @@ type CatalogUpdateStatus = {
   local_generated_lessons: number;
   remote_generated_lessons: number | null;
   available: boolean;
+};
+
+type AppUpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "restarting"
+  | "error";
+
+type AppUpdateInfo = {
+  version: string;
+  currentVersion: string;
+  body?: string;
+  date?: string;
 };
 
 function courseTitle(course: Course, fallback: string) {
@@ -529,6 +547,122 @@ function summarizeStructure(tree: StructureFile): CourseProgress {
     }
   }
   return progress;
+}
+
+function updateInfo(update: Update): AppUpdateInfo {
+  return {
+    version: update.version,
+    currentVersion: update.currentVersion,
+    body: update.body,
+    date: update.date,
+  };
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function useAppUpdater(autoCheck = false) {
+  const [phase, setPhase] = useState<AppUpdatePhase>("idle");
+  const [info, setInfo] = useState<AppUpdateInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [downloaded, setDownloaded] = useState(0);
+  const [contentLength, setContentLength] = useState<number | null>(null);
+  const updateRef = useRef<Update | null>(null);
+
+  const clearPendingUpdate = useCallback(() => {
+    updateRef.current?.close().catch(() => {});
+    updateRef.current = null;
+  }, []);
+
+  const checkForUpdate = useCallback(
+    async (silent = false) => {
+      if (!isTauri) {
+        setPhase("idle");
+        return;
+      }
+      setPhase("checking");
+      setError(null);
+      setDownloaded(0);
+      setContentLength(null);
+      try {
+        const update = await check({ timeout: 30_000 });
+        clearPendingUpdate();
+        updateRef.current = update;
+        if (update) {
+          setInfo(updateInfo(update));
+          setPhase("available");
+        } else {
+          setInfo(null);
+          setPhase("current");
+        }
+      } catch (e) {
+        setInfo(null);
+        setError(String(e));
+        setPhase(silent ? "idle" : "error");
+      }
+    },
+    [clearPendingUpdate]
+  );
+
+  const installAndRestart = useCallback(async () => {
+    if (!updateRef.current) {
+      await checkForUpdate();
+      if (!updateRef.current) return;
+    }
+
+    let received = 0;
+    setPhase("downloading");
+    setError(null);
+    setDownloaded(0);
+    setContentLength(null);
+    try {
+      await updateRef.current.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === "Started") {
+          setContentLength(event.data.contentLength ?? null);
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          setDownloaded(received);
+        }
+      });
+      clearPendingUpdate();
+      setPhase("restarting");
+      await relaunch();
+    } catch (e) {
+      setError(String(e));
+      setPhase("error");
+    }
+  }, [checkForUpdate, clearPendingUpdate]);
+
+  useEffect(() => {
+    if (!autoCheck || !isTauri) return;
+    checkForUpdate(true);
+    return clearPendingUpdate;
+  }, [autoCheck, checkForUpdate, clearPendingUpdate]);
+
+  const progress =
+    contentLength && contentLength > 0
+      ? Math.max(0, Math.min(100, Math.round((downloaded / contentLength) * 100)))
+      : null;
+
+  return {
+    phase,
+    info,
+    error,
+    downloaded,
+    contentLength,
+    progress,
+    checkForUpdate,
+    installAndRestart,
+  };
 }
 
 function App() {
@@ -1031,6 +1165,7 @@ function App() {
           braveConfigured={braveConfigured}
           onOpenSettings={() => setSettingsOpen(true)}
         />
+        <AppUpdateBanner />
         {(view.kind === "catalog" || view.kind === "course" || view.kind === "submodule") && (
           <nav className="crumbs">
             <button className="crumb" onClick={() => setView({ kind: "empty" })}>
@@ -1176,6 +1311,55 @@ function CapabilityBanners({
     );
   }
   return null;
+}
+
+function AppUpdateBanner() {
+  const t = useT();
+  const updater = useAppUpdater(true);
+  if (!updater.info || !["available", "downloading", "restarting", "error"].includes(updater.phase)) {
+    return null;
+  }
+
+  const installing = updater.phase === "downloading" || updater.phase === "restarting";
+  return (
+    <div className="banner banner-update">
+      <div className="banner-main">
+        <div className="banner-title">
+          {t("appUpdateBannerTitle", { version: updater.info.version })}
+        </div>
+        <div className="banner-body">
+          {updater.phase === "downloading"
+            ? updateProgressLabel(t, updater)
+            : updater.phase === "restarting"
+              ? t("appUpdateRestarting")
+              : updater.error
+                ? t("appUpdateError", { error: updater.error })
+                : t("appUpdateBannerBody")}
+        </div>
+      </div>
+      <button
+        className="banner-action"
+        onClick={updater.installAndRestart}
+        disabled={installing}
+      >
+        {installing ? t("appUpdateInstalling") : t("appUpdateInstallRestart")}
+      </button>
+    </div>
+  );
+}
+
+function updateProgressLabel(
+  t: ReturnType<typeof useT>,
+  updater: ReturnType<typeof useAppUpdater>
+) {
+  if (updater.progress !== null && updater.contentLength) {
+    return t("appUpdateProgress", {
+      percent: updater.progress,
+      downloaded: formatBytes(updater.downloaded),
+      total: formatBytes(updater.contentLength),
+    });
+  }
+  return t("appUpdateDownloading", { downloaded: formatBytes(updater.downloaded) });
 }
 
 function CourseDashboard({
@@ -1872,6 +2056,67 @@ const GEMINI_VOICES: { name: string; ru: string; en: string }[] = [
   { name: "Aoede", ru: "лёгкий", en: "breezy" },
 ];
 
+function AppUpdateSettingsPanel() {
+  const t = useT();
+  const updater = useAppUpdater(true);
+  const installing = updater.phase === "downloading" || updater.phase === "restarting";
+  const checking = updater.phase === "checking";
+  const canInstall = updater.phase === "available" || updater.phase === "error";
+
+  let status = t("appUpdateIdle");
+  if (!isTauri) status = t("appUpdateUnsupported");
+  else if (checking) status = t("appUpdateChecking");
+  else if (updater.phase === "current") status = t("appUpdateCurrent");
+  else if (updater.info && updater.phase === "available") {
+    status = t("appUpdateAvailable", { version: updater.info.version });
+  } else if (updater.phase === "downloading") {
+    status = updateProgressLabel(t, updater);
+  } else if (updater.phase === "restarting") {
+    status = t("appUpdateRestarting");
+  } else if (updater.error) {
+    status = t("appUpdateError", { error: updater.error });
+  }
+
+  return (
+    <div className="setting-group">
+      <div className="setting-label">{t("appUpdateTitle")}</div>
+      <div className="app-update-card">
+        <div className="app-update-main">
+          <div className="app-update-status">{status}</div>
+          {updater.info && (
+            <div className="setting-note">
+              {t("appUpdateVersionLine", {
+                current: updater.info.currentVersion,
+                latest: updater.info.version,
+              })}
+            </div>
+          )}
+          {updater.phase === "downloading" && updater.progress !== null && (
+            <div className="app-update-progress" aria-hidden="true">
+              <div style={{ width: `${updater.progress}%` }} />
+            </div>
+          )}
+        </div>
+        <div className="app-update-actions">
+          <button
+            className="ghost"
+            onClick={() => updater.checkForUpdate()}
+            disabled={!isTauri || checking || installing}
+          >
+            {checking ? t("appUpdateChecking") : t("appUpdateCheck")}
+          </button>
+          {canInstall && updater.info && (
+            <button onClick={updater.installAndRestart} disabled={installing}>
+              {installing ? t("appUpdateInstalling") : t("appUpdateInstallRestart")}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="setting-note">{t("appUpdateNote")}</div>
+    </div>
+  );
+}
+
 function SettingsModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const [lang, setLang] = useLang();
@@ -2165,6 +2410,8 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
           <div className="setting-note">{t("uiLanguageNote")}</div>
         </div>
+
+        <AppUpdateSettingsPanel />
 
         <div className="setting-group">
           <div className="setting-label">{t("braveTitle")}</div>

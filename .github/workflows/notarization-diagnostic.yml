@@ -24,7 +24,6 @@ jobs:
     env:
       DIAG_DIR: notarization-diagnostics
       TARGET: ${{ inputs.target }}
-      COPY_SIDECAR_DEREFERENCE: "0"
       SIGN_SIDECAR_NATIVE: "1"
 
     steps:

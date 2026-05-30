@@ -1,11 +1,8 @@
-// Copies the sidecar (source + node_modules) into src-tauri/sidecar/ so the
-// Tauri bundle's `resources` glob can pick it up. Runs as part of `pnpm build`
-// before `tauri build` packages everything.
-//
-// pnpm's node_modules layout uses symlinks into .pnpm/. By default we
-// dereference them so the staged tree is self-contained. Set
-// COPY_SIDECAR_DEREFERENCE=0 to preserve pnpm's relative symlinks instead.
+// Stages the sidecar into src-tauri/sidecar/ so Tauri's `bundle.resources`
+// can pick it up. The staged node_modules uses pnpm's hoisted linker: the
+// default pnpm symlink layout is not preserved reliably inside macOS bundles.
 
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +11,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
 const src = join(repoRoot, "sidecar");
 const dest = join(repoRoot, "src-tauri", "sidecar");
-const dereference = process.env.COPY_SIDECAR_DEREFERENCE !== "0";
 
 if (!existsSync(src)) {
   console.error(`[copy-sidecar] missing source: ${src}`);
@@ -29,6 +25,7 @@ if (existsSync(dest)) {
 function include(p) {
   const rel = p.slice(src.length).split(sep).join("/");
   if (rel === "" || rel === "/") return true;
+  if (rel === "/node_modules" || rel.startsWith("/node_modules/")) return false;
   if (rel.startsWith("/_")) return false;
   if (rel.endsWith(".log")) return false;
   return true;
@@ -36,10 +33,20 @@ function include(p) {
 
 cpSync(src, dest, {
   recursive: true,
-  dereference,
   errorOnExist: false,
   filter: (s) => include(s),
-  verbatimSymlinks: !dereference,
 });
 
-console.log(`[copy-sidecar] copied -> ${dest} (${dereference ? "dereferenced" : "symlinks preserved"})`);
+const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const install = spawnSync(
+  pnpm,
+  ["install", "--prod", "--frozen-lockfile", "--config.node-linker=hoisted"],
+  { cwd: dest, stdio: "inherit" },
+);
+
+if (install.status !== 0) {
+  console.error(`[copy-sidecar] pnpm install failed in ${dest}`);
+  process.exit(install.status ?? 1);
+}
+
+console.log(`[copy-sidecar] staged hoisted sidecar -> ${dest}`);
