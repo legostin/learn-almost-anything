@@ -74,12 +74,14 @@ pub fn start_ngrok(state: &ShareState, domain: Option<&str>) -> Result<String, S
         args.push("--url".to_string());
         args.push(url);
     }
-    let child = Command::new("ngrok")
+    let ngrok_path = crate::sidecar::command_path("ngrok");
+    let child = Command::new(&ngrok_path)
         .args(&args)
+        .env("PATH", crate::sidecar::expanded_path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("failed to start ngrok (is it installed?): {e}"))?;
+        .map_err(|e| format!("failed to start ngrok at {}: {e}", ngrok_path.display()))?;
     state.inner.lock().unwrap().child = Some(child);
 
     let url = poll_ngrok_url()?;
