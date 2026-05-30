@@ -56,6 +56,7 @@ jobs:
           security default-keychain -d user -s "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
           security find-identity -p codesigning -v "$keychain_path" > "$DIAG_DIR/signing-identities.txt"
+          echo "KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
 
       - name: Check notarytool account access
         env:
@@ -64,6 +65,25 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -u
+          profile="notary-canary"
+
+          set +e
+          xcrun notarytool store-credentials "$profile" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --keychain "$KEYCHAIN_PATH" \
+            --validate \
+            --verbose \
+            > "$DIAG_DIR/notary-store-credentials.txt" \
+            2> "$DIAG_DIR/notary-store-credentials.stderr"
+          store_status=$?
+          set -e
+
+          printf '%s\n' "$store_status" > "$DIAG_DIR/notary-store-credentials-exit-code.txt"
+          cat "$DIAG_DIR/notary-store-credentials.txt" || true
+          cat "$DIAG_DIR/notary-store-credentials.stderr" || true
+
           set +e
           xcrun notarytool history \
             --apple-id "$APPLE_ID" \
@@ -78,6 +98,22 @@ jobs:
           printf '%s\n' "$history_status" > "$DIAG_DIR/notary-history-exit-code.txt"
           cat "$DIAG_DIR/notary-history.json" || true
           cat "$DIAG_DIR/notary-history.stderr" || true
+
+          if [[ "$store_status" -eq 0 ]]; then
+            set +e
+            xcrun notarytool history \
+              --keychain-profile "$profile" \
+              --keychain "$KEYCHAIN_PATH" \
+              --output-format json \
+              > "$DIAG_DIR/notary-history-profile.json" \
+              2> "$DIAG_DIR/notary-history-profile.stderr"
+            history_profile_status=$?
+            set -e
+
+            printf '%s\n' "$history_profile_status" > "$DIAG_DIR/notary-history-profile-exit-code.txt"
+            cat "$DIAG_DIR/notary-history-profile.json" || true
+            cat "$DIAG_DIR/notary-history-profile.stderr" || true
+          fi
 
       - name: Build and sign minimal app
         env:
