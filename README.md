@@ -26,6 +26,8 @@
 
 ## Latest release
 
+**v0.1.4** stops production agent checks from launching `claude --version` / `codex --version`, so macOS Gatekeeper prompts do not appear just from opening the app or Settings. The app still finds user-installed CLIs and launches the selected agent only when generation needs it.
+
 **v0.1.3** fixes production agent discovery: the app now finds user-installed `claude` / `codex` CLIs from normal shell and npm locations, passes those exact executables to the SDKs, and no longer bundles the SDKs' native agent CLI binaries into the app.
 
 **v0.1.2** added in-app update checks with signed updater bundles. Install v0.1.2 or newer manually once; future releases can be installed from Settings with **Update and restart**.

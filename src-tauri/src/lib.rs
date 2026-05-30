@@ -1944,15 +1944,7 @@ struct AgentAvailability {
 }
 
 fn cli_present(cmd: &str) -> bool {
-    std::process::Command::new(sidecar::command_path(cmd))
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env("PATH", sidecar::expanded_path())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    sidecar::command_path(cmd).is_absolute()
 }
 
 #[tauri::command]
