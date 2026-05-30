@@ -10,6 +10,10 @@ on:
         options:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
+      upload_app_zip:
+        description: Upload the pre-notarization app zip as a large artifact
+        type: boolean
+        default: false
 
 jobs:
   diagnose:
@@ -147,9 +151,9 @@ jobs:
       - name: Zip app for notarytool
         run: |
           set -euo pipefail
-          zip_path="$DIAG_DIR/LearnAlmostAnything-$TARGET.app.zip"
+          zip_path="$RUNNER_TEMP/LearnAlmostAnything-$TARGET.app.zip"
           ditto -c -k --keepParent "$APP_PATH" "$zip_path"
-          shasum -a 256 "$zip_path" > "$zip_path.sha256"
+          shasum -a 256 "$zip_path" > "$DIAG_DIR/app-zip.sha256"
           echo "ZIP_PATH=$zip_path" >> "$GITHUB_ENV"
 
       - name: Submit with notarytool
@@ -158,7 +162,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          set -uo pipefail
+          set -u
+          set +e
           xcrun notarytool submit "$ZIP_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
@@ -168,6 +173,7 @@ jobs:
             > "$DIAG_DIR/notary-submit.json" \
             2> "$DIAG_DIR/notary-submit.stderr"
           submit_status=$?
+          set -e
 
           printf '%s\n' "$submit_status" > "$DIAG_DIR/notary-submit-exit-code.txt"
           cat "$DIAG_DIR/notary-submit.json" || true
@@ -202,6 +208,14 @@ jobs:
           fi
 
           exit "$submit_status"
+
+      - name: Upload pre-notarization app zip
+        if: always() && inputs.upload_app_zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-notary-app-${{ inputs.target }}-${{ github.run_number }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: warn
 
       - name: Upload diagnostics
         if: always()
