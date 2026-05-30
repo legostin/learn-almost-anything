@@ -74,7 +74,6 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --keychain "$KEYCHAIN_PATH" \
             --validate \
-            --verbose \
             > "$DIAG_DIR/notary-store-credentials.txt" \
             2> "$DIAG_DIR/notary-store-credentials.stderr"
           store_status=$?
