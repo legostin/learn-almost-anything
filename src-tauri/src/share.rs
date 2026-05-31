@@ -5,7 +5,7 @@
 // /api/cmd/<name> (command dispatch), /api/events (long-poll for job/stage
 // events), and /media (widget images). ngrok publishes the local port.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -201,7 +201,7 @@ fn handle(app: &AppHandle, mut request: tiny_http::Request) {
     }
 
     if method == Method::Get {
-        serve_static(request, path);
+        serve_static(app, request, path);
         return;
     }
 
@@ -487,26 +487,18 @@ fn serve_media(app: &AppHandle, request: tiny_http::Request, raw_path: &str) {
     }
 }
 
-// Serve the built SPA from ../dist, falling back to index.html for client routes.
-fn serve_static(request: tiny_http::Request, path: &str) {
-    let dir = dist_dir();
+// Serve the built SPA, falling back to index.html for client routes.
+fn serve_static(app: &AppHandle, request: tiny_http::Request, path: &str) {
     let rel = path.trim_start_matches('/');
     if rel.contains("..") {
         respond_text(request, 403, "forbidden");
         return;
     }
     if !rel.is_empty() {
-        let candidate = dir.join(rel);
-        if candidate.is_file() {
-            let ct = content_type(candidate.extension().and_then(|e| e.to_str()).unwrap_or(""));
-            match std::fs::read(&candidate) {
-                Ok(bytes) => {
-                    let resp =
-                        Response::from_data(bytes).with_header(header("Content-Type", ct));
-                    let _ = request.respond(resp);
-                }
-                Err(_) => respond_text(request, 404, "not found"),
-            }
+        if let Some(bytes) = read_static_asset(app, rel) {
+            let ct = content_type(Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or(""));
+            let resp = Response::from_data(bytes).with_header(header("Content-Type", ct));
+            let _ = request.respond(resp);
             return;
         }
         // A missing file with an extension is a real asset (JS/CSS/font), not a
@@ -525,19 +517,25 @@ fn serve_static(request: tiny_http::Request, path: &str) {
     }
     // SPA shell for "/" and extensionless client routes. no-cache so a stale
     // index.html can't keep pointing at chunk hashes that no longer exist.
-    match std::fs::read(dir.join("index.html")) {
-        Ok(bytes) => {
+    match read_static_asset(app, "index.html") {
+        Some(bytes) => {
             let resp = Response::from_data(bytes)
                 .with_header(header("Content-Type", "text/html; charset=utf-8"))
                 .with_header(header("Cache-Control", "no-cache"));
             let _ = request.respond(resp);
         }
-        Err(_) => respond_text(
-            request,
-            404,
-            "frontend not built — run `npm run build` to populate dist/",
-        ),
+        None => respond_text(request, 404, "frontend assets unavailable"),
     }
+}
+
+fn read_static_asset(app: &AppHandle, rel: &str) -> Option<Vec<u8>> {
+    let resolver = app.asset_resolver();
+    for (asset_path, bytes) in resolver.iter() {
+        if asset_path.as_ref().trim_start_matches('/') == rel {
+            return Some(bytes.into_owned());
+        }
+    }
+    std::fs::read(dist_dir().join(rel)).ok()
 }
 
 fn dist_dir() -> PathBuf {
