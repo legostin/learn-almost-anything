@@ -495,7 +495,7 @@ fn serve_static(app: &AppHandle, request: tiny_http::Request, path: &str) {
         return;
     }
     if !rel.is_empty() {
-        if let Some(bytes) = read_static_asset(app, rel) {
+        if let Some(bytes) = read_direct_static_asset(app, rel) {
             let ct = content_type(Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or(""));
             let resp = Response::from_data(bytes).with_header(header("Content-Type", ct));
             let _ = request.respond(resp);
@@ -517,7 +517,7 @@ fn serve_static(app: &AppHandle, request: tiny_http::Request, path: &str) {
     }
     // SPA shell for "/" and extensionless client routes. no-cache so a stale
     // index.html can't keep pointing at chunk hashes that no longer exist.
-    match read_static_asset(app, "index.html") {
+    match read_index_asset(app) {
         Some(bytes) => {
             let resp = Response::from_data(bytes)
                 .with_header(header("Content-Type", "text/html; charset=utf-8"))
@@ -528,14 +528,24 @@ fn serve_static(app: &AppHandle, request: tiny_http::Request, path: &str) {
     }
 }
 
-fn read_static_asset(app: &AppHandle, rel: &str) -> Option<Vec<u8>> {
-    let resolver = app.asset_resolver();
-    for (asset_path, bytes) in resolver.iter() {
-        if asset_path.as_ref().trim_start_matches('/') == rel {
-            return Some(bytes.into_owned());
-        }
+fn read_direct_static_asset(app: &AppHandle, rel: &str) -> Option<Vec<u8>> {
+    if embedded_asset_exists(app, rel) {
+        return app.asset_resolver().get(rel.to_string()).map(|asset| asset.bytes);
     }
     std::fs::read(dist_dir().join(rel)).ok()
+}
+
+fn read_index_asset(app: &AppHandle) -> Option<Vec<u8>> {
+    app.asset_resolver()
+        .get("index.html".to_string())
+        .map(|asset| asset.bytes)
+        .or_else(|| std::fs::read(dist_dir().join("index.html")).ok())
+}
+
+fn embedded_asset_exists(app: &AppHandle, rel: &str) -> bool {
+    app.asset_resolver()
+        .iter()
+        .any(|(asset_path, _)| asset_path.as_ref().trim_start_matches('/') == rel)
 }
 
 fn dist_dir() -> PathBuf {
