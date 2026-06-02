@@ -131,16 +131,12 @@ Artifacts are written under `src-tauri/target/release/bundle/`. Before bundling,
 
 For Developer ID macOS builds, provide the Apple signing and notarization environment expected by `.github/workflows/release.yml`.
 
-## Catalog Server
+## Catalog Service
 
-The optional catalog service lives in `catalog-server/`:
-
-```bash
-cd catalog-server
-npm start
-```
-
-It serves catalog metadata and `.laacourse` downloads. Set `CATALOG_UPLOAD_TOKEN` to allow publishing. `PORT`, `HOST`, `PUBLIC_ORIGIN`, and `CATALOG_DATA_DIR` are configurable.
+The public catalog backend is deployed separately from the private
+`legostin/learn-almost-anything-catalog` repository. The app talks to
+`https://catalog.almost-anything.io`; browsing and downloads are public,
+publishing requires the configured catalog upload token.
 
 ## Architecture
 

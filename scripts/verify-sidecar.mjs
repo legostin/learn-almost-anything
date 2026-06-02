@@ -47,14 +47,29 @@ if (missing.length) {
   process.exit(1);
 }
 
-const ping = spawnSync(process.execPath, [join(target, "src", "index.mjs")], {
-  input: JSON.stringify({ id: "verify", method: "ping", params: {} }) + "\n",
-  encoding: "utf8",
-  timeout: 10000,
-});
+const pingTimeoutMs = positiveNumber(process.env.SIDECAR_VERIFY_TIMEOUT_MS, 10000);
+const pingAttempts = positiveNumber(process.env.SIDECAR_VERIFY_ATTEMPTS, 3);
+
+function runPing() {
+  return spawnSync(process.execPath, [join(target, "src", "index.mjs")], {
+    input: JSON.stringify({ id: "verify", method: "ping", params: {} }) + "\n",
+    encoding: "utf8",
+    timeout: pingTimeoutMs,
+  });
+}
+
+let ping;
+for (let attempt = 1; attempt <= pingAttempts; attempt++) {
+  ping = runPing();
+  if (ping.status === 0 && ping.stdout.includes('"pong":true')) break;
+  if (attempt < pingAttempts) {
+    console.warn(`[verify-sidecar] ping attempt ${attempt}/${pingAttempts} failed, retrying`);
+  }
+}
 
 if (ping.status !== 0 || !ping.stdout.includes('"pong":true')) {
   console.error(`[verify-sidecar] FAIL: sidecar ping failed under ${target}`);
+  if (ping.error) console.error(ping.error.message);
   if (ping.stdout) console.error(ping.stdout.trim());
   if (ping.stderr) console.error(ping.stderr.trim());
   process.exit(ping.status || 1);
@@ -62,3 +77,8 @@ if (ping.status !== 0 || !ping.stdout.includes('"pong":true')) {
 
 const files = countFiles(target);
 console.log(`[verify-sidecar] OK: ${files} files staged under ${target}`);
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
