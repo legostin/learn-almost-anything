@@ -222,6 +222,8 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             req("language")?,
             s("courseFormat").or_else(|| s("course_format")),
             s("agent"),
+            s("spaceId").or_else(|| s("space_id")),
+            None,
         )?),
         "set_course_agent" => {
             crate::set_course_agent(app.state(), req("courseId")?, req("agent")?)?;
@@ -252,7 +254,7 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             app.state(),
             from_arg(a, "models", json!({}))?,
         )?),
-        "list_catalog_courses" => to_val(crate::list_catalog_courses()?),
+        "list_catalog_courses" => to_val(crate::list_catalog_courses(s("query"))?),
         "publish_course_to_catalog" => to_val(crate::publish_course_to_catalog(
             app.state(),
             app.state(),
@@ -379,6 +381,14 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "start_first_pending_submodule" => to_val(crate::start_first_pending_submodule(
+            app.clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            req("courseId")?,
+        )?),
+        "start_full_course_generation" => to_val(crate::start_full_course_generation(
             app.clone(),
             app.state(),
             app.state(),

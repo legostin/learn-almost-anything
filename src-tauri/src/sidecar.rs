@@ -137,7 +137,7 @@ pub fn command_path(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn command_path_if_found(name: &str) -> Option<PathBuf> {
+pub fn command_path_if_found(name: &str) -> Option<PathBuf> {
     let path = command_path(name);
     path.is_absolute().then_some(path)
 }

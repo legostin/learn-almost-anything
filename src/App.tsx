@@ -16,9 +16,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
 import "katex/dist/katex.min.css";
+import "highlight.js/styles/github.css";
 import QRCode from "qrcode";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { convertFileSrc, invoke, listen, isTauri } from "./transport";
 import { useLang, useT, type Lang } from "./i18n";
@@ -72,6 +75,8 @@ type Course = {
   catalog_origin_id?: string | null;
   catalog_version?: number;
   catalog_synced_at?: number | null;
+  space_id?: string | null;
+  translated_from?: string | null;
 };
 
 type CatalogCourse = {
@@ -80,11 +85,14 @@ type CatalogCourse = {
   title: string;
   topic: string;
   language: string;
+  course_format?: CourseFormat;
   updated_at: number;
   version?: number;
   modules: number;
   lessons: number;
   generated_lessons: number;
+  tags?: string[];
+  topics?: string[];
   view_url: string;
   download_url: string;
 };
@@ -122,7 +130,7 @@ function courseTitle(course: Course, fallback: string) {
 
 type Question = { text: string; options: string[]; multi?: boolean };
 
-type GenState = "pending" | "generating" | "ready" | "failed";
+type GenState = "pending" | "queued" | "generating" | "ready" | "failed";
 
 type ModuleNode = {
   id: string;
@@ -149,12 +157,12 @@ type ChatMessage = {
   modules: ModuleNode[];
 };
 
-type JobKind = "wizard_questions" | "build_structure" | "generate_submodule";
+type JobKind = "wizard_questions" | "build_structure" | "generate_submodule" | "translate";
 
 type JobState =
   | { kind: JobKind; status: "running" }
   | { kind: JobKind; status: "done"; result?: unknown }
-  | { kind: JobKind; status: "error"; error: string };
+  | { kind: JobKind; status: "error"; error: string; exhausted?: boolean; agent?: string };
 
 type JobEvent = {
   courseId: string;
@@ -190,10 +198,34 @@ type CourseSuggestionState =
 
 type View =
   | { kind: "empty" }
-  | { kind: "creating" }
+  | { kind: "creating"; spaceId?: string }
   | { kind: "catalog" }
+  | { kind: "spaces" }
+  | { kind: "space"; id: string }
   | { kind: "course"; id: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
+
+type Space = {
+  id: string;
+  name: string;
+  description: string;
+  created_at: number;
+  updated_at: number;
+  strict: boolean;
+  source_count: number;
+};
+
+type SpaceSource = {
+  id: string;
+  space_id: string;
+  kind: string;
+  title: string;
+  ref: string;
+  status: string;
+  md_path?: string | null;
+  error?: string | null;
+  created_at: number;
+};
 
 type StageName = "draft" | "annotate" | "illustrate" | "test";
 
@@ -245,6 +277,8 @@ type SettingsStatus = {
   tts_voice: string;
   gemini_image_model: string;
   gemini_tts_model: string;
+  debug_logging?: boolean;
+  image_generation?: boolean;
 };
 type Tagline = { ru: string; en: string };
 
@@ -487,6 +521,7 @@ type CourseProgress = {
   verified: number;
   verifiedAt: number[];
   pending: number;
+  queued: number;
   generating: number;
   failed: number;
   reviewDue: number;
@@ -508,6 +543,7 @@ function emptyProgress(): CourseProgress {
     verified: 0,
     verifiedAt: [],
     pending: 0,
+    queued: 0,
     generating: 0,
     failed: 0,
     reviewDue: 0,
@@ -535,6 +571,8 @@ function summarizeStructure(tree: StructureFile): CourseProgress {
         if (!progress.nextPending) {
           progress.nextPending = pointer;
         }
+      } else if (submodule.generation_state === "queued") {
+        progress.queued += 1;
       } else if (submodule.generation_state === "generating") {
         progress.generating += 1;
       } else if (submodule.generation_state === "failed") {
@@ -671,6 +709,9 @@ function App() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
+  const [translateStatus, setTranslateStatus] = useState<
+    Map<string, { done: number; total: number; complete: boolean }>
+  >(new Map());
   const [stages, setStages] = useState<Map<string, StageDetail>>(new Map());
   const [transcripts, setTranscripts] = useState<Map<string, Bubble[]>>(new Map());
   const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
@@ -684,6 +725,7 @@ function App() {
   const [agentAvail, setAgentAvail] = useState<AgentAvailability | null>(null);
   const [braveConfigured, setBraveConfigured] = useState<boolean | null>(null);
   const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
+  const [debugLogging, setDebugLogging] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelConfig | null>(null);
   const [sidebarLanguageFilter, setSidebarLanguageFilter] = useState("all");
   const [homeTitleTextStyles, setHomeTitleTextStyles] = useState<HomeTitleTextStyles>({
@@ -704,26 +746,44 @@ function App() {
       setSidebarLanguageFilter("all");
     }
   }, [sidebarLanguageFilter, sidebarLanguageOptions]);
-  const sidebarCourses = useMemo(
-    () =>
-      sidebarLanguageFilter === "all"
-        ? courses
-        : courses.filter(
-            (course) => (course.language || "").trim().toLowerCase() === sidebarLanguageFilter
-          ),
-    [courses, sidebarLanguageFilter]
-  );
+  // When viewing a space (or a course/submodule that belongs to one), scope the
+  // sidebar to that space's courses.
+  const activeSpaceId = useMemo(() => {
+    if (view.kind === "space") return view.id;
+    if (view.kind === "course") return courses.find((c) => c.id === view.id)?.space_id ?? null;
+    if (view.kind === "submodule")
+      return courses.find((c) => c.id === view.courseId)?.space_id ?? null;
+    return null;
+  }, [view, courses]);
+  const sidebarCourses = useMemo(() => {
+    let list = activeSpaceId ? courses.filter((c) => c.space_id === activeSpaceId) : courses;
+    if (!activeSpaceId && sidebarLanguageFilter !== "all") {
+      list = list.filter(
+        (course) => (course.language || "").trim().toLowerCase() === sidebarLanguageFilter
+      );
+    }
+    return list;
+  }, [courses, sidebarLanguageFilter, activeSpaceId]);
+  const [spaceNames, setSpaceNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    invoke<Space[]>("list_spaces")
+      .then((list) => setSpaceNames(Object.fromEntries(list.map((s) => [s.id, s.name]))))
+      .catch(() => {});
+  }, [courses]);
 
   const refreshCapabilities = useCallback(async () => {
     const [aa, ss, ms] = await Promise.allSettled([
       invoke<AgentAvailability>("check_agent_availability"),
-      invoke<{ brave_configured: boolean; gemini_configured?: boolean }>("get_settings_status"),
+      invoke<{ brave_configured: boolean; gemini_configured?: boolean; debug_logging?: boolean }>(
+        "get_settings_status"
+      ),
       invoke<ModelConfig>("get_model_settings"),
     ]);
     if (aa.status === "fulfilled") setAgentAvail(aa.value);
     if (ss.status === "fulfilled") {
       setBraveConfigured(ss.value.brave_configured);
       setGeminiConfigured(Boolean(ss.value.gemini_configured));
+      setDebugLogging(Boolean(ss.value.debug_logging));
     }
     if (ms.status === "fulfilled") setModelSettings(ms.value);
   }, []);
@@ -800,10 +860,28 @@ function App() {
           jobKey(courseId, kind),
           ok
             ? { kind, status: "done", result }
-            : { kind, status: "error", error: error ?? "unknown" }
+            : {
+                kind,
+                status: "error",
+                error: error ?? "unknown",
+                exhausted: (e.payload as { exhausted?: boolean }).exhausted,
+                agent: (e.payload as { agent?: string }).agent,
+              }
         );
         return next;
       });
+      if (kind === "translate") {
+        const pl = e.payload as { done?: number; total?: number };
+        setTranslateStatus((prev) => {
+          const next = new Map(prev);
+          next.set(courseId, {
+            done: ok ? pl.total ?? 0 : pl.done ?? 0,
+            total: pl.total ?? 0,
+            complete: !!ok,
+          });
+          return next;
+        });
+      }
       if (kind === "wizard_questions" && ok) {
         const questions = (result as { questions?: Question[] } | undefined)?.questions ?? [];
         setWizardQuestionsById((prev) => {
@@ -1097,16 +1175,41 @@ function App() {
             <SettingsIcon />
           </button>
         </div>
-        <button className="new-course" onClick={() => setView({ kind: "creating" })}>
+        <button
+          className="new-course"
+          onClick={() => setView({ kind: "creating", spaceId: activeSpaceId ?? undefined })}
+        >
           {t("newCourse")}
         </button>
-        <button
-          className={`catalog-nav ${view.kind === "catalog" ? "active" : ""}`}
-          onClick={() => setView({ kind: "catalog" })}
-        >
-          {t("catalogOpen")}
-        </button>
-        {courses.length > 0 && sidebarLanguageOptions.length > 1 && (
+        <div className="sidebar-links">
+          <button
+            className={`sidebar-link ${view.kind === "spaces" || view.kind === "space" ? "active" : ""}`}
+            onClick={() => setView({ kind: "spaces" })}
+          >
+            {t("spacesNav")}
+          </button>
+          <button
+            className={`sidebar-link ${view.kind === "catalog" ? "active" : ""}`}
+            onClick={() => setView({ kind: "catalog" })}
+          >
+            {t("catalogOpen")}
+          </button>
+        </div>
+        {activeSpaceId && (
+          <div className="sidebar-space-scope">
+            <span className="sidebar-space-name">
+              {spaceNames[activeSpaceId] ?? t("spacesTitle")}
+            </span>
+            <button
+              className="sidebar-space-clear"
+              onClick={() => setView({ kind: "empty" })}
+              title={t("sidebarAllCourses")}
+            >
+              {t("sidebarAllCourses")}
+            </button>
+          </div>
+        )}
+        {!activeSpaceId && courses.length > 0 && sidebarLanguageOptions.length > 1 && (
           <div className="sidebar-language-filter" aria-label={t("homeLanguageFilterLabel")}>
             <button
               className={sidebarLanguageFilter === "all" ? "active" : ""}
@@ -1166,7 +1269,11 @@ function App() {
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <AppUpdateBanner />
-        {(view.kind === "catalog" || view.kind === "course" || view.kind === "submodule") && (
+        {(view.kind === "catalog" ||
+          view.kind === "spaces" ||
+          view.kind === "space" ||
+          view.kind === "course" ||
+          view.kind === "submodule") && (
           <nav className="crumbs">
             <button className="crumb" onClick={() => setView({ kind: "empty" })}>
               {t("crumbCourses")}
@@ -1175,6 +1282,18 @@ function App() {
               <>
                 <span className="crumb-sep">›</span>
                 <span className="crumb current">{t("catalogTitle")}</span>
+              </>
+            )}
+            {(view.kind === "spaces" || view.kind === "space") && (
+              <>
+                <span className="crumb-sep">›</span>
+                {view.kind === "space" ? (
+                  <button className="crumb" onClick={() => setView({ kind: "spaces" })}>
+                    {t("spacesTitle")}
+                  </button>
+                ) : (
+                  <span className="crumb current">{t("spacesTitle")}</span>
+                )}
               </>
             )}
             {view.kind === "submodule" && (
@@ -1207,6 +1326,8 @@ function App() {
             homeTitleTextStyles={homeTitleTextStyles}
             onNewCourse={() => setView({ kind: "creating" })}
             onOpenCatalog={() => setView({ kind: "catalog" })}
+            onOpenSpaces={() => setView({ kind: "spaces" })}
+            onOpenSpace={(id) => setView({ kind: "space", id })}
             onOpenSettings={() => setSettingsOpen(true)}
             onHomeTitleTap={startCourseSuggestion}
             onStudySuggestion={studySuggestedCourse}
@@ -1219,6 +1340,7 @@ function App() {
         {view.kind === "creating" && (
           <CreateCourse
             agentAvail={agentAvail}
+            spaceId={view.spaceId}
             onCreated={async (id) => {
               await refresh();
               openCourse(id);
@@ -1233,6 +1355,12 @@ function App() {
               openCourse(courseId);
             }}
           />
+        )}
+        {view.kind === "spaces" && (
+          <SpacesView onOpenSpace={(id) => setView({ kind: "space", id })} />
+        )}
+        {view.kind === "space" && (
+          <SpaceView spaceId={view.id} onBack={() => setView({ kind: "spaces" })} />
         )}
         {view.kind === "course" && (
           <CourseView
@@ -1250,6 +1378,8 @@ function App() {
               setView({ kind: "empty" });
               await refresh();
             }}
+            onOpenCourse={openCourse}
+            translateStatus={translateStatus.get(view.id)}
           />
         )}
         {view.kind === "submodule" && (
@@ -1262,6 +1392,9 @@ function App() {
             lastError={subErrors.get(view.submoduleId) ?? null}
             enriching={enrichingSubs.has(view.submoduleId)}
             onStartGen={(subId) => startSubmoduleGen(view.courseId, subId)}
+            onOpenSubmodule={(moduleId, submoduleId) =>
+              openSubmodule(view.courseId, moduleId, submoduleId)
+            }
           />
         )}
         </div>
@@ -1273,10 +1406,430 @@ function App() {
             setSettingsOpen(false);
             refreshCapabilities();
           }}
+          onDebugLoggingChange={setDebugLogging}
         />
       )}
+
+      {debugLogging && <DevLogPanel />}
     </div>
     </AudioPlayerProvider>
+  );
+}
+
+// --- Dev log structured rendering (collapsible JSON, framed blocks) ---
+
+type LogEvent = {
+  type: "request" | "frame" | "note";
+  key: string;
+  reqId: string;
+  method: string;
+  course: string;
+  tone: string;
+  // request/note payload:
+  text?: string;
+  // frame payload:
+  header?: string;
+  label?: string;
+  body?: string;
+};
+
+const REQUEST_RE = /\]\s[▶✓✗]\s?REQUEST\s/;
+
+function reqIdOf(line: string): string {
+  const m = line.match(/#(\d+)/);
+  return m ? m[1] : "";
+}
+
+// Parse the raw log into ordered events, each tagged with its request's
+// method (action) + course (topic) so the panel can filter by them. reqId ties
+// streaming reasoning/tool notes back to their originating request.
+function parseDevLog(text: string): LogEvent[] {
+  const lines = text.split("\n");
+  const events: LogEvent[] = [];
+  const registry = new Map<string, { method: string; course: string }>();
+  const remember = (reqId: string, method?: string, course?: string) => {
+    if (!reqId) return;
+    const cur = registry.get(reqId) || { method: "", course: "" };
+    if (method) cur.method = method;
+    if (course) cur.course = course;
+    registry.set(reqId, cur);
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("┌")) {
+      const header = line;
+      let label = "";
+      if (i + 1 < lines.length && lines[i + 1].startsWith("│")) {
+        label = lines[i + 1].replace(/^│\s?/, "");
+        i += 1;
+      }
+      const body: string[] = [];
+      while (i + 1 < lines.length && !lines[i + 1].startsWith("└")) {
+        body.push(lines[i + 1]);
+        i += 1;
+      }
+      if (i + 1 < lines.length && lines[i + 1].startsWith("└")) i += 1; // consume └ rule
+      const reqId = reqIdOf(header);
+      const method =
+        header.match(/\[#\d+\]\s+(\S+)/)?.[1] || header.match(/[✓✗]\s+(\S+)\s+#\d+/)?.[1] || "";
+      const course = header.match(/course="([^"]*)"/)?.[1] || "";
+      remember(reqId, method, course);
+      const tone = /RESPONSE/i.test(label)
+        ? "response"
+        : /ERROR/i.test(label)
+          ? "error"
+          : /PROMPT/i.test(label)
+            ? "prompt"
+            : "plain";
+      events.push({ type: "frame", key: `f${header}`, reqId, method, course, tone, header, label, body: body.join("\n") });
+    } else if (REQUEST_RE.test(line)) {
+      const reqId = reqIdOf(line);
+      const method = line.match(/REQUEST\s+(\S+)\s+#\d+/)?.[1] || "";
+      const course = line.match(/course="([^"]*)"/)?.[1] || "";
+      remember(reqId, method, course);
+      events.push({
+        type: "request",
+        key: `r${i}`,
+        reqId,
+        method,
+        course,
+        tone: /✗/.test(line) ? "error" : "request",
+        text: line,
+      });
+    } else if (line.startsWith("·")) {
+      const reqId = reqIdOf(line);
+      const buf = [line];
+      while (
+        i + 1 < lines.length &&
+        !lines[i + 1].startsWith("·") &&
+        !lines[i + 1].startsWith("┌") &&
+        !REQUEST_RE.test(lines[i + 1]) &&
+        !/^─{3,}/.test(lines[i + 1])
+      ) {
+        buf.push(lines[i + 1]);
+        i += 1;
+      }
+      events.push({ type: "note", key: `n${i}`, reqId, method: "", course: "", tone: "note", text: buf.join("\n") });
+    } else {
+      if (/^─{3,}/.test(line) || line.trim() === "") continue;
+      events.push({ type: "note", key: `x${i}`, reqId: "", method: "", course: "", tone: "note", text: line });
+    }
+  }
+
+  // Notes carry only a reqId; backfill their method/course from the registry so
+  // filtering by topic/action also catches the reasoning chain.
+  for (const e of events) {
+    if (e.reqId && (!e.course || !e.method)) {
+      const r = registry.get(e.reqId);
+      if (r) {
+        if (!e.course) e.course = r.course;
+        if (!e.method) e.method = r.method;
+      }
+    }
+  }
+  return events;
+}
+
+function distinct(arr: string[]): string[] {
+  return Array.from(new Set(arr.filter(Boolean)));
+}
+
+// Best-effort: pull a JSON value out of a block body (raw, fenced, or embedded).
+function tryParseJson(body: string): unknown | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  const candidates: string[] = [];
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) candidates.push(fence[1]);
+  if (trimmed[0] === "{" || trimmed[0] === "[") candidates.push(trimmed);
+  const first = trimmed.search(/[[{]/);
+  const last = Math.max(trimmed.lastIndexOf("}"), trimmed.lastIndexOf("]"));
+  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1));
+  for (const c of candidates) {
+    try {
+      return JSON.parse(c);
+    } catch {
+      /* try next candidate */
+    }
+  }
+  return null;
+}
+
+const STR_LIMIT = 180;
+
+function JsonScalar({ value }: { value: unknown }) {
+  const [expanded, setExpanded] = useState(false);
+  if (typeof value === "string") {
+    const long = value.length > STR_LIMIT;
+    if (long && !expanded) {
+      return (
+        <span className="jv-str jv-clip" onClick={() => setExpanded(true)} title="развернуть">
+          "{value.slice(0, STR_LIMIT)}
+          <span className="jv-more">… +{value.length - STR_LIMIT}</span>"
+        </span>
+      );
+    }
+    return (
+      <span
+        className={long ? "jv-str jv-clip" : "jv-str"}
+        onClick={() => long && setExpanded(false)}
+      >
+        "{value}"
+      </span>
+    );
+  }
+  if (value === null) return <span className="jv-null">null</span>;
+  if (typeof value === "number") return <span className="jv-num">{String(value)}</span>;
+  if (typeof value === "boolean") return <span className="jv-bool">{String(value)}</span>;
+  return <span>{String(value)}</span>;
+}
+
+function JsonNode({
+  k,
+  value,
+  depth,
+}: {
+  k?: string | number;
+  value: unknown;
+  depth: number;
+}) {
+  const isObj = value !== null && typeof value === "object";
+  const [open, setOpen] = useState(depth < 1);
+  const pad = { paddingLeft: depth * 14 } as CSSProperties;
+  if (!isObj) {
+    return (
+      <div className="jv-row" style={pad}>
+        {k !== undefined && <span className="jv-key">{k}:</span>} <JsonScalar value={value} />
+      </div>
+    );
+  }
+  const isArr = Array.isArray(value);
+  const entries: [string | number, unknown][] = isArr
+    ? (value as unknown[]).map((v, i) => [i, v])
+    : Object.entries(value as Record<string, unknown>);
+  return (
+    <div className="jv-node">
+      <div className="jv-row jv-toggle" style={pad} onClick={() => setOpen((o) => !o)}>
+        <span className="jv-caret">{open ? "▾" : "▸"}</span>
+        {k !== undefined && <span className="jv-key">{k}:</span>}
+        <span className="jv-brace">{isArr ? "[" : "{"}</span>
+        {!open && (
+          <span className="jv-collapsed">
+            {entries.length}
+            {isArr ? "]" : "}"}
+          </span>
+        )}
+      </div>
+      {open && (
+        <>
+          {entries.map(([ck, cv]) => (
+            <JsonNode key={ck} k={ck} value={cv} depth={depth + 1} />
+          ))}
+          <div className="jv-row" style={pad}>
+            <span className="jv-brace">{isArr ? "]" : "}"}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LogFrame({ block }: { block: LogEvent }) {
+  const body = block.body ?? "";
+  const json = useMemo(() => tryParseJson(body), [body]);
+  const big = body.length > 400;
+  const [open, setOpen] = useState(block.tone === "response" || block.tone === "error" || !big);
+  const title = (block.header ?? "").replace(/^┌─/, "").trim();
+  return (
+    <div className={`devlog-frame tone-${block.tone}`}>
+      <div className="devlog-frame-head" onClick={() => setOpen((o) => !o)}>
+        <span className="jv-caret">{open ? "▾" : "▸"}</span>
+        <span className="devlog-frame-title">{title}</span>
+        <span className="devlog-frame-label">
+          {block.label}
+          {json ? " · json" : ""}
+        </span>
+      </div>
+      {open &&
+        (json ? (
+          <div className="jv-root">
+            <JsonNode value={json} depth={0} />
+          </div>
+        ) : (
+          <pre className="devlog-frame-body">{block.body}</pre>
+        ))}
+    </div>
+  );
+}
+
+function DevLogContent({ events }: { events: LogEvent[] }) {
+  return (
+    <>
+      {events.map((e) =>
+        e.type === "frame" ? (
+          <LogFrame key={e.key} block={e} />
+        ) : e.type === "request" ? (
+          <div key={e.key} className={`devlog-req tone-${e.tone}`}>
+            {e.text}
+          </div>
+        ) : (
+          <pre key={e.key} className="devlog-loose">
+            {e.text}
+          </pre>
+        )
+      )}
+    </>
+  );
+}
+
+// Dev-only debug panel: live tail of the sidecar agent transcript log
+// (prompts, reasoning, tool calls, responses). Only mounted in `pnpm tauri dev`
+// (import.meta.env.DEV); never shipped in a production build.
+function DevLogPanel() {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [paused, setPaused] = useState(false);
+  const [raw, setRaw] = useState(false);
+  const [methodFilter, setMethodFilter] = useState("");
+  const [courseFilter, setCourseFilter] = useState("");
+  const [q, setQ] = useState("");
+  const preRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+
+  const events = useMemo(() => parseDevLog(text), [text]);
+  const methods = useMemo(() => distinct(events.map((e) => e.method)), [events]);
+  const courses = useMemo(() => distinct(events.map((e) => e.course)), [events]);
+  const shown = useMemo(
+    () =>
+      events.filter((e) => {
+        if (methodFilter && e.method !== methodFilter) return false;
+        if (courseFilter && e.course !== courseFilter) return false;
+        if (q) {
+          const hay = (
+            e.type === "frame" ? `${e.header} ${e.label} ${e.body}` : e.text || ""
+          ).toLowerCase();
+          if (!hay.includes(q.toLowerCase())) return false;
+        }
+        return true;
+      }),
+    [events, methodFilter, courseFilter, q]
+  );
+  const filtered = Boolean(methodFilter || courseFilter || q);
+
+  useEffect(() => {
+    if (!open || paused) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const s = await invoke<string>("read_dev_log", { maxBytes: 400_000 });
+        if (alive) setText(s);
+      } catch {
+        /* ignore transient read errors */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 1500);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [open, paused]);
+
+  useEffect(() => {
+    const el = preRef.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [text]);
+
+  function onScroll() {
+    const el = preRef.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  }
+
+  async function clearLog() {
+    try {
+      await invoke("clear_dev_log");
+      setText("");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <>
+      <button
+        className="devlog-fab"
+        onClick={() => setOpen((o) => !o)}
+        title="Agent logs (dev)"
+        aria-label="Toggle agent logs"
+      >
+        🐛
+      </button>
+      {open && (
+        <div className="devlog-panel">
+          <div className="devlog-head">
+            <span className="devlog-title">agent logs</span>
+            <div className="devlog-actions">
+              <button onClick={() => setRaw((r) => !r)}>{raw ? "pretty" : "raw"}</button>
+              <button onClick={() => setPaused((p) => !p)}>{paused ? "▶ resume" : "⏸ pause"}</button>
+              <button onClick={clearLog}>clear</button>
+              <button onClick={() => setOpen(false)}>✕</button>
+            </div>
+          </div>
+          {!raw && (
+            <div className="devlog-filters">
+              <select value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)}>
+                <option value="">все действия</option>
+                {methods.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <select value={courseFilter} onChange={(e) => setCourseFilter(e.target.value)}>
+                <option value="">все топики</option>
+                {courses.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <input
+                placeholder="поиск…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+              {filtered && (
+                <button
+                  onClick={() => {
+                    setMethodFilter("");
+                    setCourseFilter("");
+                    setQ("");
+                  }}
+                >
+                  сброс
+                </button>
+              )}
+            </div>
+          )}
+          <div ref={preRef} className="devlog-body" onScroll={onScroll}>
+            {!text ? (
+              <pre className="devlog-loose">
+                — пусто. Запусти генерацию раздела, и здесь появятся промпты, reasoning и ответы
+                агентов. —
+              </pre>
+            ) : raw ? (
+              <pre className="devlog-loose">{text}</pre>
+            ) : shown.length === 0 ? (
+              <pre className="devlog-loose">— нет записей под фильтр —</pre>
+            ) : (
+              <DevLogContent events={shown} />
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1375,6 +1928,8 @@ function CourseDashboard({
   homeTitleTextStyles,
   onNewCourse,
   onOpenCatalog,
+  onOpenSpaces,
+  onOpenSpace,
   onOpenSettings,
   onHomeTitleTap,
   onStudySuggestion,
@@ -1395,6 +1950,8 @@ function CourseDashboard({
   homeTitleTextStyles: HomeTitleTextStyles;
   onNewCourse: () => void;
   onOpenCatalog: () => void;
+  onOpenSpaces: () => void;
+  onOpenSpace: (id: string) => void;
   onOpenSettings: () => void;
   onHomeTitleTap: () => void;
   onStudySuggestion: () => void;
@@ -1407,6 +1964,12 @@ function CourseDashboard({
   const [uiLang] = useLang();
   const [progressById, setProgressById] = useState<Map<string, CourseProgress>>(new Map());
   const [languageFilter, setLanguageFilter] = useState("all");
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  useEffect(() => {
+    invoke<Space[]>("list_spaces")
+      .then(setSpaces)
+      .catch(() => {});
+  }, []);
   const languageOptions = useMemo(() => {
     const counts = new Map<string, number>();
     for (const course of courses) {
@@ -1539,6 +2102,10 @@ function CourseDashboard({
         actionLabel = t("courseActionWorking");
         actionDisabled = true;
         statusText = t("courseStatusWorking");
+      } else if (progress.queued > 0) {
+        actionLabel = t("courseActionOpen");
+        statusText = t("courseStatusQueued");
+        needsAction = true;
       } else if (progress.nextReady) {
         const next = progress.nextReady;
         actionLabel = t("courseActionContinue");
@@ -1660,7 +2227,10 @@ function CourseDashboard({
             <SettingsIcon />
             <span>{t("settings")}</span>
           </button>
-          <button className="home-catalog-action" onClick={onOpenCatalog}>
+          <button className="home-link-action" onClick={onOpenSpaces}>
+            {t("spacesNav")}
+          </button>
+          <button className="home-link-action" onClick={onOpenCatalog}>
             {t("catalogOpen")}
           </button>
           <button className="home-primary" onClick={onNewCourse}>
@@ -1705,6 +2275,29 @@ function CourseDashboard({
           </div>
         </div>
       )}
+
+      <section className="home-spaces">
+        <div className="home-spaces-head">
+          <span className="home-section-kicker">{t("spacesTitle")}</span>
+          <button className="home-link-action" onClick={onOpenSpaces}>
+            {t("spacesManage")}
+          </button>
+        </div>
+        <div className="home-spaces-row">
+          {spaces.slice(0, 6).map((s) => (
+            <button key={s.id} className="home-space-card" onClick={() => onOpenSpace(s.id)}>
+              <span className="home-space-name">{s.name}</span>
+              <span className="home-space-meta">
+                {t("spaceSourceCount", { count: s.source_count })}
+              </span>
+            </button>
+          ))}
+          <button className="home-space-card home-space-new" onClick={onOpenSpaces}>
+            <span className="home-space-name">+ {t("spaceCreate")}</span>
+            <span className="home-space-meta">{t("spacesShortHint")}</span>
+          </button>
+        </div>
+      </section>
 
       {courses.length === 0 ? (
         <div className="home-empty">
@@ -1937,6 +2530,9 @@ function courseGenerationLine(
   if (progress.generating > 0) {
     return t("courseGenerationWorking", { count: progress.generating });
   }
+  if (progress.queued > 0) {
+    return t("courseGenerationQueued", { count: progress.queued });
+  }
   if (progress.failed > 0) {
     return t("courseGenerationFailed", { count: progress.failed });
   }
@@ -2117,9 +2713,19 @@ function AppUpdateSettingsPanel() {
   );
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+function SettingsModal({
+  onClose,
+  onDebugLoggingChange,
+}: {
+  onClose: () => void;
+  onDebugLoggingChange: (enabled: boolean) => void;
+}) {
   const t = useT();
   const [lang, setLang] = useLang();
+  const [debugLogging, setDebugLogging] = useState(false);
+  const [savingDebug, setSavingDebug] = useState(false);
+  const [imageGeneration, setImageGeneration] = useState(true);
+  const [savingImageGen, setSavingImageGen] = useState(false);
   const [braveKey, setBraveKey] = useState("");
   const [braveConfigured, setBraveConfigured] = useState(false);
   const [savingBrave, setSavingBrave] = useState(false);
@@ -2169,6 +2775,33 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     if (s.tts_voice) setTtsVoice(s.tts_voice);
     if (s.gemini_image_model) setGeminiImageModel(s.gemini_image_model);
     if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
+    setDebugLogging(Boolean(s.debug_logging));
+    setImageGeneration(s.image_generation !== false);
+  }
+
+  async function saveImageGeneration(enabled: boolean) {
+    setSavingImageGen(true);
+    try {
+      await invoke("set_image_generation", { enabled });
+      setImageGeneration(enabled);
+    } catch {
+      /* ignore */
+    } finally {
+      setSavingImageGen(false);
+    }
+  }
+
+  async function saveDebugLogging(enabled: boolean) {
+    setSavingDebug(true);
+    try {
+      await invoke("set_debug_logging", { enabled });
+      setDebugLogging(enabled);
+      onDebugLoggingChange(enabled);
+    } catch {
+      /* ignore */
+    } finally {
+      setSavingDebug(false);
+    }
   }
 
   useEffect(() => {
@@ -2411,6 +3044,19 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <div className="setting-note">{t("uiLanguageNote")}</div>
         </div>
 
+        <div className="setting-group">
+          <label className="setting-toggle">
+            <input
+              type="checkbox"
+              checked={debugLogging}
+              disabled={savingDebug}
+              onChange={(e) => saveDebugLogging(e.target.checked)}
+            />
+            <span className="setting-label">{t("debugLoggingLabel")}</span>
+          </label>
+          <div className="setting-note">{t("debugLoggingNote")}</div>
+        </div>
+
         <AppUpdateSettingsPanel />
 
         <div className="setting-group">
@@ -2550,6 +3196,19 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               </select>
             </div>
           )}
+        </div>
+
+        <div className="setting-group">
+          <label className="setting-toggle">
+            <input
+              type="checkbox"
+              checked={imageGeneration}
+              disabled={savingImageGen}
+              onChange={(e) => saveImageGeneration(e.target.checked)}
+            />
+            <span className="setting-label">{t("imageGenerationLabel")}</span>
+          </label>
+          <div className="setting-note">{t("imageGenerationNote")}</div>
         </div>
 
         <div className="setting-group">
@@ -2754,17 +3413,403 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function SpacesView({ onOpenSpace }: { onOpenSpace: (id: string) => void }) {
+  const t = useT();
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      setSpaces(await invoke<Space[]>("list_spaces"));
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim() || creating) return;
+    setCreating(true);
+    try {
+      const space = await invoke<Space>("create_space", {
+        name: name.trim(),
+        description: description.trim() || null,
+      });
+      setName("");
+      setDescription("");
+      await reload();
+      onOpenSpace(space.id);
+    } catch {
+      /* ignore */
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div className="spaces-view">
+      <h2>{t("spacesTitle")}</h2>
+      <p className="spaces-intro">{t("spacesIntro")}</p>
+
+      <form className="space-create" onSubmit={create}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={t("spaceNamePlaceholder")}
+        />
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder={t("spaceDescPlaceholder")}
+        />
+        <button type="submit" disabled={!name.trim() || creating}>
+          {creating ? t("spaceCreating") : t("spaceCreate")}
+        </button>
+      </form>
+
+      {loading ? (
+        <div className="placeholder">{t("loadingStructure")}</div>
+      ) : spaces.length === 0 ? (
+        <div className="placeholder">{t("spacesEmpty")}</div>
+      ) : (
+        <ul className="space-list">
+          {spaces.map((s) => (
+            <li key={s.id} onClick={() => onOpenSpace(s.id)}>
+              <div className="space-name">{s.name}</div>
+              {s.description && <div className="space-desc">{s.description}</div>}
+              <div className="space-meta">{t("spaceSourceCount", { count: s.source_count })}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const SOURCE_KIND_ICON: Record<string, string> = {
+  site: "🌐",
+  repo: "📦",
+  directory: "📁",
+  document: "📄",
+  image: "🖼️",
+  table: "📊",
+};
+
+function SpaceView({
+  spaceId,
+  onBack,
+}: {
+  spaceId: string;
+  onBack: () => void;
+}) {
+  const t = useT();
+  const [space, setSpace] = useState<Space | null>(null);
+  const [sources, setSources] = useState<SpaceSource[]>([]);
+  const [linkUrl, setLinkUrl] = useState("");
+  const [linkKind, setLinkKind] = useState<"site" | "repo">("site");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [converter, setConverter] = useState<{ available: boolean; via: string } | null>(null);
+  const [installing, setInstalling] = useState(false);
+
+  const checkConverter = useCallback(async () => {
+    try {
+      setConverter(await invoke<{ available: boolean; via: string }>("markitdown_status"));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    checkConverter();
+  }, [checkConverter]);
+
+  async function installConverter() {
+    if (installing) return;
+    setInstalling(true);
+    setError(null);
+    try {
+      await invoke<string>("install_markitdown");
+      await checkConverter();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  const reload = useCallback(async () => {
+    try {
+      const [sp, src] = await Promise.all([
+        invoke<Space | null>("get_space", { spaceId }),
+        invoke<SpaceSource[]>("list_space_sources", { spaceId }),
+      ]);
+      setSpace(sp);
+      setSources(src);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [spaceId]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+  // While a folder import converts documents in the background, keep refreshing.
+  useEffect(() => {
+    if (!sources.some((s) => s.status === "converting")) return;
+    const id = setInterval(reload, 2500);
+    return () => clearInterval(id);
+  }, [sources, reload]);
+
+  async function addLink(e: React.FormEvent) {
+    e.preventDefault();
+    if (!linkUrl.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("add_space_link", { spaceId, url: linkUrl.trim(), kind: linkKind });
+      setLinkUrl("");
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadDocument() {
+    if (busy) return;
+    let picked: string | null = null;
+    try {
+      const sel = await openFileDialog({
+        multiple: false,
+        filters: [
+          {
+            name: t("spaceFileFilter"),
+            extensions: ["pdf", "docx", "pptx", "xlsx", "xls", "csv", "html", "htm", "md", "txt", "png", "jpg", "jpeg", "webp", "gif"],
+          },
+        ],
+      });
+      picked = typeof sel === "string" ? sel : null;
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    if (!picked) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("add_space_document", { spaceId, filePath: picked });
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadDirectory() {
+    if (busy) return;
+    let picked: string | null = null;
+    try {
+      const sel = await openFileDialog({ directory: true, multiple: false });
+      picked = typeof sel === "string" ? sel : null;
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    if (!picked) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("add_space_directory", { spaceId, dirPath: picked });
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSource(id: string) {
+    try {
+      await invoke("remove_space_source", { sourceId: id });
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function deleteSpace() {
+    try {
+      await invoke("delete_space", { spaceId });
+      onBack();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  if (!space) return <div className="placeholder">{t("loadingStructure")}</div>;
+
+  return (
+    <div className="space-detail">
+      <div className="space-detail-head">
+        <div>
+          <h2>{space.name}</h2>
+          {space.description && <p className="space-desc">{space.description}</p>}
+        </div>
+      </div>
+
+      <div className="space-strict">
+        <label className="setting-toggle">
+          <input
+            type="checkbox"
+            checked={space.strict}
+            onChange={async (e) => {
+              const strict = e.target.checked;
+              try {
+                await invoke("set_space_strict", { spaceId, strict });
+                setSpace((prev) => (prev ? { ...prev, strict } : prev));
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+          />
+          <span className="setting-label">{t("spaceStrictDefaultLabel")}</span>
+        </label>
+        <div className="setting-note">
+          {space.strict ? t("spaceStrictDefaultOnNote") : t("spaceStrictDefaultOffNote")}
+        </div>
+      </div>
+
+      <div className="space-add">
+        <form className="space-add-link" onSubmit={addLink}>
+          <select value={linkKind} onChange={(e) => setLinkKind(e.target.value as "site" | "repo")}>
+            <option value="site">{t("spaceKindSite")}</option>
+            <option value="repo">{t("spaceKindRepo")}</option>
+          </select>
+          <input
+            value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)}
+            placeholder={t("spaceLinkPlaceholder")}
+          />
+          <button type="submit" disabled={!linkUrl.trim() || busy}>
+            {t("spaceAddLink")}
+          </button>
+        </form>
+        <button className="ghost" onClick={uploadDocument} disabled={busy}>
+          {busy ? t("spaceUploading") : t("spaceUpload")}
+        </button>
+        <button className="ghost" onClick={uploadDirectory} disabled={busy}>
+          {t("spaceAddFolder")}
+        </button>
+      </div>
+      <div className="space-upload-note">{t("spaceUploadNote")}</div>
+
+      {converter && !converter.available && (
+        <div className="converter-banner">
+          <span>{t("converterMissing")}</span>
+          <button onClick={installConverter} disabled={installing}>
+            {installing ? t("converterInstalling") : t("converterInstall")}
+          </button>
+        </div>
+      )}
+
+      {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+
+      {sources.length === 0 ? (
+        <div className="placeholder">{t("spaceNoSources")}</div>
+      ) : (
+        <ul className="source-list">
+          {sources.map((s) => (
+            <li key={s.id} className={`source-item status-${s.status}`}>
+              <span className="source-icon">{SOURCE_KIND_ICON[s.kind] ?? "📄"}</span>
+              <div className="source-body">
+                <div className="source-title">{s.title}</div>
+                {(s.kind === "site" || s.kind === "repo" || s.kind === "directory") && (
+                  <div className="source-ref">{s.ref}</div>
+                )}
+                {s.status === "failed" && s.error && (
+                  <div className="source-error">{s.error}</div>
+                )}
+                {s.status === "converting" && (
+                  <div className="source-ref">{t("spaceConverting")}</div>
+                )}
+              </div>
+              <button
+                className="source-remove"
+                onClick={() => removeSource(s.id)}
+                title={t("deleteConfirm")}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="course-danger-zone">
+        {confirmDelete ? (
+          <span className="delete-confirm-row">
+            {t("spaceDeleteConfirm")}
+            <button className="danger-link" onClick={deleteSpace}>
+              {t("deleteConfirm")}
+            </button>
+            <button className="ghost" onClick={() => setConfirmDelete(false)}>
+              {t("cancel")}
+            </button>
+          </span>
+        ) : (
+          <button className="danger-link" onClick={() => setConfirmDelete(true)}>
+            {t("spaceDelete")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CreateCourse({
   agentAvail,
+  spaceId,
   onCreated,
   onCancel,
 }: {
   agentAvail: { claude: boolean; codex: boolean } | null;
+  spaceId?: string;
   onCreated: (id: string) => void;
   onCancel: () => void;
 }) {
   const t = useT();
   const [uiLang] = useLang();
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [selectedSpace, setSelectedSpace] = useState<string>(spaceId ?? "");
+  const [strict, setStrict] = useState(true);
+
+  useEffect(() => {
+    invoke<Space[]>("list_spaces")
+      .then(setSpaces)
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (spaceId) setSelectedSpace(spaceId);
+  }, [spaceId]);
+  // Default the strict choice from the selected space whenever it changes.
+  useEffect(() => {
+    if (!selectedSpace) return;
+    const sp = spaces.find((s) => s.id === selectedSpace);
+    if (sp) setStrict(sp.strict);
+  }, [selectedSpace, spaces]);
   const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
   const [topic, setTopic] = useState("");
   const [courseFormat, setCourseFormat] = useState<CourseFormat>(DEFAULT_COURSE_FORMAT);
@@ -2800,6 +3845,8 @@ function CreateCourse({
       language,
       courseFormat,
       agent,
+      spaceId: selectedSpace || null,
+      strict: selectedSpace ? strict : null,
     });
     onCreated(id);
   }
@@ -2902,6 +3949,36 @@ function CreateCourse({
           </label>
         </div>
       </label>
+      {(spaces.length > 0 || selectedSpace) && (
+        <>
+          <label>
+            {t("spacePickLabel")}
+            <select value={selectedSpace} onChange={(e) => setSelectedSpace(e.target.value)}>
+              <option value="">{t("spaceNone")}</option>
+              {spaces.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedSpace && (
+            <label>
+              {t("spaceStrictFieldLabel")}
+              <select
+                value={strict ? "strict" : "open"}
+                onChange={(e) => setStrict(e.target.value === "strict")}
+              >
+                <option value="strict">{t("spaceStrictOptStrict")}</option>
+                <option value="open">{t("spaceStrictOptOpen")}</option>
+              </select>
+              <div className="field-note">
+                {strict ? t("spaceStrictOnNote") : t("spaceStrictOffNote")}
+              </div>
+            </label>
+          )}
+        </>
+      )}
       {noAgents && (
         <div className="form-error">{t("noAgentsBody")}</div>
       )}
@@ -2932,26 +4009,37 @@ function AgentAvailBadge({ available }: { available: boolean }) {
 function CatalogView({ onImported }: { onImported: (courseId: string) => void | Promise<void> }) {
   const t = useT();
   const [items, setItems] = useState<CatalogCourse[]>([]);
+  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const loadSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (nextQuery: string) => {
+    const seq = loadSeq.current + 1;
+    loadSeq.current = seq;
     setLoading(true);
     setError(null);
     try {
-      const list = await invoke<CatalogCourse[]>("list_catalog_courses");
+      const list = await invoke<CatalogCourse[]>("list_catalog_courses", {
+        query: nextQuery.trim() || null,
+      });
+      if (seq !== loadSeq.current) return;
       setItems(list);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    const handle = window.setTimeout(() => {
+      load(query);
+    }, 180);
+    return () => window.clearTimeout(handle);
+  }, [load, query]);
 
   async function download(item: CatalogCourse) {
     setDownloading(item.id);
@@ -2974,14 +4062,24 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
           <h2>{t("catalogTitle")}</h2>
           <p>{t("catalogSubtitle")}</p>
         </div>
-        <button className="ghost" onClick={load} disabled={loading}>
+        <button className="ghost" onClick={() => load(query)} disabled={loading}>
           {loading ? t("catalogLoading") : t("catalogRefresh")}
         </button>
       </div>
+      <label className="catalog-search">
+        <span>{t("catalogSearchLabel")}</span>
+        <input
+          value={query}
+          placeholder={t("catalogSearchPlaceholder")}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </label>
       {error && <div className="error-banner">{t("errorPrefix", { error })}</div>}
       {loading && <div className="placeholder">{t("catalogLoading")}</div>}
       {!loading && items.length === 0 && (
-        <div className="placeholder">{t("catalogEmpty")}</div>
+        <div className="placeholder">
+          {query.trim() ? t("catalogSearchEmpty") : t("catalogEmpty")}
+        </div>
       )}
       <div className="catalog-list">
         {items.map((item) => (
@@ -2994,6 +4092,13 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
                   count: item.generated_lessons || item.lessons,
                 })} · {t("catalogModules", { count: item.modules })}
               </div>
+              {item.tags && item.tags.length > 0 && (
+                <div className="catalog-card-tags">
+                  {item.tags.slice(0, 6).map((tag) => (
+                    <span key={tag}>{tag}</span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="catalog-card-actions">
               <a href={item.view_url} target="_blank" rel="noreferrer">
@@ -3023,6 +4128,8 @@ function CourseView({
   onOpenSub,
   onStartSubGen,
   onDeleted,
+  onOpenCourse,
+  translateStatus,
 }: {
   course?: Course;
   jobs: Map<string, JobState>;
@@ -3033,8 +4140,12 @@ function CourseView({
   onOpenSub: (moduleId: string, submoduleId: string) => void;
   onStartSubGen: (submoduleId: string) => void | Promise<void>;
   onDeleted: () => void | Promise<void>;
+  onOpenCourse: (id: string) => void;
+  translateStatus?: { done: number; total: number; complete: boolean };
 }) {
   const t = useT();
+  const [translateOpen, setTranslateOpen] = useState(false);
+  const [translating, setTranslating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -3103,6 +4214,24 @@ function CourseView({
     }
   }
 
+  async function translateCourse(lang: string) {
+    if (!course || translating) return;
+    setTranslating(true);
+    try {
+      const newId = await invoke<string>("translate_course", {
+        courseId: course.id,
+        targetLanguage: lang,
+      });
+      setTranslateOpen(false);
+      await onChanged();
+      onOpenCourse(newId);
+    } catch (e) {
+      console.error("translate_course failed", e);
+    } finally {
+      setTranslating(false);
+    }
+  }
+
   return (
     <div className="course-view">
       <CourseHeaderTitle course={course} />
@@ -3123,7 +4252,38 @@ function CourseView({
         <span className={`status-pill status-${course.status}`}>
           {courseLifecycleStatusLabel(course.status, t)}
         </span>
+        {course.translated_from && (
+          <span className="translated-badge">🌐 {t("translatedBadge")}</span>
+        )}
+        <div className="translate-wrap">
+          <button
+            className="ghost translate-btn"
+            onClick={() => setTranslateOpen((v) => !v)}
+            disabled={translating}
+          >
+            {translating ? t("translating") : t("translateButton")}
+          </button>
+          {translateOpen && (
+            <div className="translate-menu">
+              {COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
+                <button key={l.code} onClick={() => translateCourse(l.code)} disabled={translating}>
+                  {l.nativeName}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+      {translateStatus && (
+        <div className={`translate-status ${translateStatus.complete ? "done" : ""}`}>
+          {translateStatus.complete
+            ? `✓ ${t("translateDone")}`
+            : t("translateProgress", {
+                done: translateStatus.done,
+                total: translateStatus.total,
+              })}
+        </div>
+      )}
       {course.status === "ready" && (
         <div className="catalog-publish-row">
           <button className="ghost" onClick={publishCourse} disabled={publishing}>
@@ -3172,8 +4332,14 @@ function CourseView({
       {course.status === "structuring" && (
         <StructureBuilder
           job={jobs.get(jobKey(course.id, "build_structure"))}
+          course={course}
           transcript={structureTranscript}
           onStart={() => onStartJob("build_structure")}
+          onSwitchAndRetry={async (agent) => {
+            await invoke("set_course_agent", { courseId: course.id, agent });
+            await onChanged();
+            onStartJob("build_structure");
+          }}
         />
       )}
       {course.status === "ready" && (
@@ -3448,16 +4614,21 @@ function AnsweringForm({
 
 function StructureBuilder({
   job,
+  course,
   transcript,
   onStart,
+  onSwitchAndRetry,
 }: {
   job?: JobState;
+  course: Course;
   transcript: Bubble[] | null;
   onStart: () => void;
+  onSwitchAndRetry: (agent: string) => void;
 }) {
   const t = useT();
   const running = job?.status === "running";
   const errored = job?.status === "error";
+  const other = course.agent === "claude" ? "codex" : "claude";
   return (
     <div className="wizard">
       <p>{t("builderIntro")}</p>
@@ -3474,9 +4645,20 @@ function StructureBuilder({
         />
       )}
       {errored && (
-        <p style={{ color: "var(--danger)" }}>
-          {t("errorPrefix", { error: (job as any).error })}
-        </p>
+        <div className="builder-error">
+          <p style={{ color: "var(--danger)" }}>
+            {t("errorPrefix", { error: (job as { error: string }).error })}
+          </p>
+          <p className="builder-error-hint">{t("structureFailedHint")}</p>
+          <div className="builder-error-actions">
+            <button onClick={onStart} disabled={running}>
+              {t("retryButton")}
+            </button>
+            <button className="ghost" onClick={() => onSwitchAndRetry(other)} disabled={running}>
+              {t("switchAgentRetry", { agent: other })}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -3498,6 +4680,7 @@ function Structure({
   const [input, setInput] = useState("");
   const [accepting, setAccepting] = useState<string | null>(null);
   const [showRefine, setShowRefine] = useState(false);
+  const [startingFull, setStartingFull] = useState(false);
 
   async function reloadChat() {
     try {
@@ -3524,6 +4707,7 @@ function Structure({
     setError(null);
     setInput("");
     setShowRefine(false);
+    setStartingFull(false);
     Promise.all([
       invoke<StructureFile>("get_structure", { courseId: course.id }),
       invoke<ChatMessage[]>("list_chat", { courseId: course.id }),
@@ -3545,8 +4729,8 @@ function Structure({
       if (p.courseId !== course.id) return;
       if (p.kind === "refine_structure") {
         await reloadChat();
-      } else if (p.kind === "generate_submodule") {
-        // Submodule generation finished (ok or failed) — pull fresh state.
+      } else if (p.kind === "generate_submodule" || p.kind === "translate") {
+        // Generation/translation progressed — pull fresh titles/state.
         await reloadTree();
       }
     });
@@ -3598,6 +4782,23 @@ function Structure({
   if (error && !tree) return <div className="placeholder">{t("loadError", { error })}</div>;
   if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
+  const progress = summarizeStructure(tree);
+  const canStartFull =
+    progress.pending > 0 || (progress.queued > 0 && progress.generating === 0);
+
+  async function startFullGeneration() {
+    if (startingFull || !canStartFull) return;
+    setStartingFull(true);
+    try {
+      await invoke("start_full_course_generation", { courseId: course.id });
+      await reloadTree();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setStartingFull(false);
+    }
+  }
+
   return (
     <div className="structure">
       {tree.modules.length === 0 ? (
@@ -3606,23 +4807,36 @@ function Structure({
         <>
           <div className="structure-toolbar">
             <button
+              type="button"
+              onClick={startFullGeneration}
+              disabled={startingFull || !canStartFull}
+            >
+              {startingFull || (!canStartFull && (progress.queued > 0 || progress.generating > 0))
+                ? t("generateFullCourseBusy")
+                : t("generateFullCourse")}
+            </button>
+            <button
+              type="button"
               className="ghost"
               onClick={() => setShowRefine((v) => !v)}
               aria-expanded={showRefine}
             >
               {showRefine ? t("closeRefine") : t("refinePlanButton")}
             </button>
+            {progress.queued > 0 && (
+              <span className="toolbar-note">
+                {t("fullCourseQueueStatus", { count: progress.queued })}
+              </span>
+            )}
           </div>
           <StructureTree
             tree={tree}
             onOpenSub={onOpenSub}
-            onStartSubGen={(subId) => {
-              const mod = tree.modules.find((m) =>
-                m.submodules.some((s) => s.id === subId)
-              );
-              if (!mod) return;
-              onStartSubGen(subId);
-              onOpenSub(mod.id, subId);
+            onStartSubGen={async (subId) => {
+              // Start (re)generation in the background — stay on the plan and
+              // just refresh the row's state, don't jump to the lesson page.
+              await onStartSubGen(subId);
+              await reloadTree();
             }}
           />
         </>
@@ -3851,6 +5065,13 @@ function SubmoduleAction({
       </button>
     );
   }
+  if (state === "queued") {
+    return (
+      <button className="sub-action queued" disabled>
+        {t("subQueued")}
+      </button>
+    );
+  }
   if (state === "failed") {
     return (
       <button
@@ -3974,6 +5195,447 @@ function countUnresolvedImageWidgets(widgets: Record<string, WidgetData>) {
   }, 0);
 }
 
+type AssistantMsg = { role: "user" | "assistant"; text: string; fragment?: string; image?: string };
+type Note = {
+  id: string;
+  courseId: string;
+  moduleId: string;
+  submoduleId: string;
+  title: string;
+  fragment?: string;
+  messages: AssistantMsg[];
+  created_at: number;
+};
+
+function CourseAssistant({
+  courseId,
+  moduleId,
+  submoduleId,
+  onOpenSubmodule,
+}: {
+  courseId: string;
+  moduleId: string;
+  submoduleId: string;
+  onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"chat" | "notes">("chat");
+  const [messages, setMessages] = useState<AssistantMsg[]>([]);
+  const [input, setInput] = useState("");
+  const [fragment, setFragment] = useState<string | null>(null);
+  const [image, setImage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [saved, setSaved] = useState(false);
+  const [currentNoteId, setCurrentNoteId] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  function newChat() {
+    setMessages([]);
+    setInput("");
+    setFragment(null);
+    setImage(null);
+    setError(null);
+    setCurrentNoteId(null);
+    setMode("chat");
+  }
+
+  const loadNotes = useCallback(async () => {
+    try {
+      setNotes(await invoke<Note[]>("list_notes", { courseId }));
+    } catch {
+      /* ignore */
+    }
+  }, [courseId]);
+
+  function highlightFragment(text?: string) {
+    if (!text) return;
+    const probe = text.replace(/…$/, "").slice(0, 80).trim();
+    if (!probe) return;
+    setTimeout(() => {
+      try {
+        (window as unknown as { find?: (s: string) => boolean }).find?.(probe);
+      } catch {
+        /* find unsupported */
+      }
+    }, 150);
+  }
+
+  function loadNote(note: Note) {
+    setMessages(note.messages || []);
+    setCurrentNoteId(note.id);
+    setMode("chat");
+    setOpen(true);
+    if (note.fragment) highlightFragment(note.fragment);
+  }
+
+  function openNote(note: Note) {
+    if (note.submoduleId === submoduleId) {
+      loadNote(note);
+    } else {
+      try {
+        localStorage.setItem(`pendingNote:${courseId}`, note.id);
+      } catch {
+        /* ignore */
+      }
+      onOpenSubmodule(note.moduleId, note.submoduleId);
+    }
+  }
+
+  async function saveCurrentNote() {
+    if (!messages.length) return;
+    const firstQ = messages.find((m) => m.role === "user");
+    const frag = messages.find((m) => m.fragment)?.fragment;
+    const titleSrc = firstQ?.text || frag || t("notesUntitled");
+    // Upsert: reuse this conversation's note id so saving again updates it
+    // instead of creating a duplicate.
+    const existing = currentNoteId ? notes.find((n) => n.id === currentNoteId) : undefined;
+    const id = currentNoteId ?? crypto.randomUUID();
+    const note: Note = {
+      id,
+      courseId,
+      moduleId,
+      submoduleId,
+      title: titleSrc.replace(/\s+/g, " ").trim().slice(0, 70),
+      fragment: frag,
+      messages,
+      created_at: existing?.created_at ?? Date.now(),
+    };
+    try {
+      await invoke("save_note", { courseId, note });
+      setCurrentNoteId(id);
+      await loadNotes();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeNote(id: string) {
+    try {
+      await invoke("delete_note", { courseId, noteId: id });
+      await loadNotes();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // On mount: load notes; if navigation left a pending note for this submodule,
+  // open its conversation and highlight the original fragment.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const list = await invoke<Note[]>("list_notes", { courseId });
+        if (!alive) return;
+        setNotes(list);
+        const pid = localStorage.getItem(`pendingNote:${courseId}`);
+        if (pid) {
+          localStorage.removeItem(`pendingNote:${courseId}`);
+          const note = list.find((n) => n.id === pid && n.submoduleId === submoduleId);
+          if (note) loadNote(note);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseId, submoduleId]);
+
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+  }, [messages, busy]);
+
+  // Show a floating "ask about this" pill when text is selected in the article.
+  useEffect(() => {
+    function onMouseUp() {
+      const s = window.getSelection?.();
+      if (!s || s.isCollapsed) {
+        setSel(null);
+        return;
+      }
+      const text = s.toString().trim();
+      let node: Node | null = s.anchorNode;
+      let inReader = false;
+      while (node) {
+        if (node instanceof HTMLElement && node.classList?.contains("reader")) {
+          inReader = true;
+          break;
+        }
+        node = node.parentNode;
+      }
+      if (!text || !inReader) {
+        setSel(null);
+        return;
+      }
+      const rect = s.getRangeAt(0).getBoundingClientRect();
+      setSel({
+        text: text.length > 1500 ? text.slice(0, 1500) + "…" : text,
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+      });
+    }
+    function onMouseDown() {
+      setSel(null);
+    }
+    document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, []);
+
+  function quoteSelection() {
+    if (!sel) return;
+    setFragment(sel.text);
+    setOpen(true);
+    setSel(null);
+    window.getSelection?.()?.removeAllRanges();
+  }
+
+  async function attachImage() {
+    try {
+      const selFile = await openFileDialog({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+      if (typeof selFile === "string") setImage(selFile);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function send() {
+    const q = input.trim();
+    if ((!q && !image) || busy) return;
+    const userMsg: AssistantMsg = {
+      role: "user",
+      text: q,
+      fragment: fragment ?? undefined,
+      image: image ?? undefined,
+    };
+    const history = messages.map((m) => ({ role: m.role, text: m.text }));
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    setFragment(null);
+    setImage(null);
+    setBusy(true);
+    setError(null);
+    try {
+      const answer = await invoke<string>("ask_course_assistant", {
+        courseId,
+        moduleId,
+        submoduleId,
+        question: q || "(see attached image)",
+        fragment: userMsg.fragment ?? null,
+        imagePath: userMsg.image ?? null,
+        history,
+      });
+      setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      {sel && !open && (
+        <button
+          className="assistant-quote"
+          style={{ left: sel.x, top: sel.y }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={quoteSelection}
+        >
+          💬 {t("assistantQuote")}
+        </button>
+      )}
+      {!open && (
+        <button className="assistant-fab" onClick={() => setOpen(true)} title={t("assistantTitle")}>
+          <span className="assistant-fab-icon">💬</span>
+          {t("assistantOpen")}
+        </button>
+      )}
+      {open && (
+        <div className="assistant-panel">
+          <div className="assistant-head">
+            <div className="assistant-tabs">
+              <button
+                className={mode === "chat" ? "active" : ""}
+                onClick={() => setMode("chat")}
+              >
+                {t("assistantTabChat")}
+              </button>
+              <button
+                className={mode === "notes" ? "active" : ""}
+                onClick={() => {
+                  setMode("notes");
+                  loadNotes();
+                }}
+              >
+                {t("assistantTabNotes")}
+                {notes.length > 0 && <span className="assistant-tab-count">{notes.length}</span>}
+              </button>
+            </div>
+            <div className="assistant-head-actions">
+              {mode === "chat" && messages.length > 0 && (
+                <>
+                  <button className="assistant-save" onClick={newChat} title={t("notesNew")}>
+                    ＋ {t("notesNew")}
+                  </button>
+                  <button
+                    className="assistant-save"
+                    onClick={saveCurrentNote}
+                    title={t("notesSave")}
+                  >
+                    {saved
+                      ? `✓ ${t("notesSaved")}`
+                      : `★ ${currentNoteId ? t("notesUpdate") : t("notesSave")}`}
+                  </button>
+                </>
+              )}
+              <button className="assistant-close" onClick={() => setOpen(false)} aria-label="close">
+                ✕
+              </button>
+            </div>
+          </div>
+
+          {mode === "notes" ? (
+            <div className="assistant-body assistant-notes">
+              {notes.length === 0 ? (
+                <div className="assistant-empty">{t("notesEmpty")}</div>
+              ) : (
+                [...notes]
+                  .sort((a, b) => b.created_at - a.created_at)
+                  .map((n) => (
+                    <div key={n.id} className="note-item">
+                      <button className="note-open" onClick={() => openNote(n)}>
+                        <span className="note-title">
+                          {n.fragment ? "“ " : ""}
+                          {n.title}
+                        </span>
+                        <span className="note-meta">
+                          {new Date(n.created_at).toLocaleString()}
+                          {n.submoduleId !== submoduleId ? ` · ${t("notesOtherSection")}` : ""}
+                        </span>
+                      </button>
+                      <button
+                        className="note-del"
+                        onClick={() => removeNote(n.id)}
+                        aria-label={t("deleteConfirm")}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="assistant-body" ref={bodyRef}>
+                {messages.length === 0 && (
+                  <div className="assistant-empty">{t("assistantHint")}</div>
+                )}
+                {messages.map((m, i) => (
+                  <div key={i} className={`assistant-msg ${m.role}`}>
+                    {m.fragment && <div className="assistant-frag">“{m.fragment}”</div>}
+                    {m.role === "assistant" ? (
+                      <div className="assistant-md reader">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[
+                            rehypeKatex,
+                            [rehypeHighlight, { detect: true, ignoreMissing: true }],
+                          ]}
+                        >
+                          {m.text}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <div className="assistant-text">
+                        {m.image && (
+                          <img className="assistant-msg-img" src={convertFileSrc(m.image)} alt="" />
+                        )}
+                        {m.text}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {busy && <div className="assistant-typing">{t("assistantThinking")}</div>}
+              </div>
+              {error && <div className="assistant-error">{t("errorPrefix", { error })}</div>}
+              {fragment && (
+                <div className="assistant-frag-chip">
+                  <span>
+                    “{fragment.slice(0, 90)}
+                    {fragment.length > 90 ? "…" : ""}”
+                  </span>
+                  <button onClick={() => setFragment(null)} aria-label="remove">
+                    ✕
+                  </button>
+                </div>
+              )}
+              {image && (
+                <div className="assistant-img-chip">
+                  <img src={convertFileSrc(image)} alt="" />
+                  <span>{image.split("/").pop()}</span>
+                  <button onClick={() => setImage(null)} aria-label="remove">
+                    ✕
+                  </button>
+                </div>
+              )}
+              <div className="assistant-input">
+                <button
+                  className="assistant-attach"
+                  onClick={attachImage}
+                  title={t("assistantAttach")}
+                  aria-label={t("assistantAttach")}
+                >
+                  📎
+                </button>
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={t("assistantPlaceholder")}
+                  rows={3}
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      send();
+                    }
+                  }}
+                />
+                <button
+                  className="assistant-send"
+                  onClick={send}
+                  disabled={(!input.trim() && !image) || busy}
+                  title={t("assistantSend")}
+                  aria-label={t("assistantSend")}
+                >
+                  {busy ? "…" : "↑"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function SubmoduleView({
   course,
   moduleId,
@@ -3983,6 +5645,7 @@ function SubmoduleView({
   lastError,
   enriching,
   onStartGen,
+  onOpenSubmodule,
 }: {
   course?: Course;
   moduleId: string;
@@ -3992,6 +5655,7 @@ function SubmoduleView({
   lastError: string | null;
   enriching: boolean;
   onStartGen: (submoduleId: string) => void | Promise<void>;
+  onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
   const t = useT();
   const [tree, setTree] = useState<StructureFile | null>(null);
@@ -4001,6 +5665,13 @@ function SubmoduleView({
   const [savedError, setSavedError] = useState<string | null>(null);
   const [retryingImages, setRetryingImages] = useState(false);
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
+  const [canGenerate, setCanGenerate] = useState(false);
+  useEffect(() => {
+    if (!course) return;
+    invoke<boolean>("image_generation_available", { courseId: course.id })
+      .then(setCanGenerate)
+      .catch(() => setCanGenerate(false));
+  }, [course]);
   const [fontPx, setFontPx] = useState(
     () => Number(localStorage.getItem("readerFontPx")) || 16
   );
@@ -4146,6 +5817,14 @@ function SubmoduleView({
 
   return (
     <div className="submodule-view">
+      {course && (
+        <CourseAssistant
+          courseId={course.id}
+          moduleId={moduleId}
+          submoduleId={submoduleId}
+          onOpenSubmodule={onOpenSubmodule}
+        />
+      )}
       <div className="sub-numbering">
         {moduleIdx + 1}.{subIdx + 1}
         {sub.test_passed && <span className="learned-badge">✓ {t("subLearned")}</span>}
@@ -4153,22 +5832,30 @@ function SubmoduleView({
       <h1 className="sub-h1">{sub.title}</h1>
       {sub.summary && <div className="sub-lead">{sub.summary}</div>}
 
-      {(state === "pending" || state === "failed") && (
+      {(state === "pending" || state === "queued" || state === "failed") && (
         <div className="sub-empty">
           <p>
-            {state === "failed" ? t("stageFailedHint") : t("stagePendingHint")}
+            {state === "failed"
+              ? t("stageFailedHint")
+              : state === "queued"
+                ? t("stageQueuedHint")
+                : t("stagePendingHint")}
           </p>
           {state === "failed" && (lastError || savedError) && (
             <pre className="sub-error">{lastError || savedError}</pre>
           )}
-          <button
-            onClick={async () => {
-              await onStartGen(submoduleId);
-              await reloadTree();
-            }}
-          >
-            {state === "failed" ? t("subContinue") : t("subGenerate")}
-          </button>
+          {state === "queued" ? (
+            <button disabled>{t("subQueued")}</button>
+          ) : (
+            <button
+              onClick={async () => {
+                await onStartGen(submoduleId);
+                await reloadTree();
+              }}
+            >
+              {state === "failed" ? t("subContinue") : t("subGenerate")}
+            </button>
+          )}
           {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
         </div>
       )}
@@ -4256,6 +5943,17 @@ function SubmoduleView({
                 article={isPodcast ? stripArticleWidgetMarkers(content.article) : content.article}
                 widgets={isPodcast ? {} : content.widgets}
                 fontPx={fontPx}
+                widgetCtx={
+                  course && !isPodcast
+                    ? {
+                        courseId: course.id,
+                        moduleId,
+                        submoduleId,
+                        canGenerate,
+                        onChanged: reloadContent,
+                      }
+                    : undefined
+                }
               />
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
@@ -5612,14 +7310,51 @@ function StageStrip({ current }: { current: StageName }) {
   );
 }
 
+type WidgetCtx = {
+  courseId: string;
+  moduleId: string;
+  submoduleId: string;
+  canGenerate: boolean;
+  onChanged: () => void | Promise<void>;
+};
+
+function CodeBlock({ children, className }: { children?: ReactNode; className?: string }) {
+  const t = useT();
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    const text = preRef.current?.innerText ?? "";
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+  return (
+    <div className="code-block">
+      <button type="button" className="code-copy" onClick={copy} aria-label={t("copyCode")}>
+        {copied ? t("copied") : t("copy")}
+      </button>
+      <pre ref={preRef} className={className}>
+        {children}
+      </pre>
+    </div>
+  );
+}
+
 function ArticleReader({
   article,
   widgets,
   fontPx,
+  widgetCtx,
 }: {
   article: string;
   widgets: Record<string, WidgetData>;
   fontPx: number;
+  widgetCtx?: WidgetCtx;
 }) {
   const parts = useMemo(() => splitWidgetMarkers(article), [article]);
   const lightboxImages = useMemo(
@@ -5657,7 +7392,8 @@ function ArticleReader({
           <ReactMarkdown
             key={i}
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
+            rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+            components={{ pre: CodeBlock }}
           >
             {p.text}
           </ReactMarkdown>
@@ -5667,6 +7403,7 @@ function ArticleReader({
             id={p.id}
             widget={widgets[p.id]}
             onOpenImage={openLightboxImage}
+            widgetCtx={widgetCtx}
           />
         )
       )}
@@ -5719,10 +7456,12 @@ function WidgetRenderer({
   id,
   widget,
   onOpenImage,
+  widgetCtx,
 }: {
   id: string;
   widget?: WidgetData;
   onOpenImage?: (key: string) => void;
+  widgetCtx?: WidgetCtx;
 }) {
   const t = useT();
   if (!widget) {
@@ -5733,7 +7472,14 @@ function WidgetRenderer({
     );
   }
   if (widget.type === "image") {
-    return <ImagePlaceholder id={id} widget={widget as any} onOpenImage={onOpenImage} />;
+    return (
+      <ImagePlaceholder
+        id={id}
+        widget={widget as any}
+        onOpenImage={onOpenImage}
+        widgetCtx={widgetCtx}
+      />
+    );
   }
   if (widget.type === "gallery") {
     return <GalleryWidget id={id} widget={widget as any} onOpenImage={onOpenImage} />;
@@ -6310,10 +8056,13 @@ function GalleryWidget({
   );
 }
 
+type ImageCandidate = { url: string; source: string; title: string; thumbnail: string };
+
 function ImagePlaceholder({
   id,
   widget,
   onOpenImage,
+  widgetCtx,
 }: {
   id: string;
   widget: {
@@ -6324,17 +8073,101 @@ function ImagePlaceholder({
     generated?: boolean;
   };
   onOpenImage?: (key: string) => void;
+  widgetCtx?: WidgetCtx;
 }) {
   const t = useT();
   const [imageFailed, setImageFailed] = useState(false);
   const { hasUrl, imgSrc } = resolveWidgetImage(widget.url, widget.source);
   const sourceHref = widgetImageSourceHref(widget);
+  const [phase, setPhase] = useState<"idle" | "searching" | "picking" | "notfound" | "busy">(
+    "idle"
+  );
+  const [candidates, setCandidates] = useState<ImageCandidate[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
   useEffect(() => {
     setImageFailed(false);
   }, [imgSrc]);
+
+  const ctxArgs = widgetCtx
+    ? {
+        courseId: widgetCtx.courseId,
+        moduleId: widgetCtx.moduleId,
+        submoduleId: widgetCtx.submoduleId,
+        widgetId: id,
+      }
+    : null;
+
+  async function retry() {
+    if (!ctxArgs) return;
+    setPhase("searching");
+    setActionError(null);
+    try {
+      const cands = await invoke<ImageCandidate[]>("search_widget_candidates", ctxArgs);
+      if (cands.length) {
+        setCandidates(cands);
+        setPhase("picking");
+      } else {
+        setPhase("notfound");
+      }
+    } catch (e) {
+      setActionError(String(e));
+      setPhase("notfound");
+    }
+  }
+  async function pick(c: ImageCandidate) {
+    if (!ctxArgs) return;
+    setPhase("busy");
+    setActionError(null);
+    try {
+      await invoke("set_widget_image", { ...ctxArgs, url: c.url, source: c.source || null });
+      await widgetCtx?.onChanged();
+    } catch (e) {
+      setActionError(String(e));
+      setPhase("picking");
+    }
+  }
+  async function generate() {
+    if (!ctxArgs) return;
+    setPhase("busy");
+    setActionError(null);
+    try {
+      await invoke("generate_widget_image", ctxArgs);
+      await widgetCtx?.onChanged();
+    } catch (e) {
+      setActionError(String(e));
+      setPhase("notfound");
+    }
+  }
+  async function remove() {
+    if (!ctxArgs) return;
+    setPhase("busy");
+    try {
+      await invoke("remove_widget", ctxArgs);
+      await widgetCtx?.onChanged();
+    } catch (e) {
+      setActionError(String(e));
+      setPhase("idle");
+    }
+  }
+
+  const resolved = hasUrl && imgSrc && !imageFailed;
+  const showActions = !!widgetCtx && !resolved;
+
   return (
     <figure className="widget widget-image">
-      {hasUrl && imgSrc && !imageFailed ? (
+      {widgetCtx && (
+        <button
+          type="button"
+          className="widget-remove"
+          onClick={remove}
+          disabled={phase === "busy"}
+          title={t("widgetRemove")}
+          aria-label={t("widgetRemove")}
+        >
+          ×
+        </button>
+      )}
+      {resolved ? (
         <button
           type="button"
           className="widget-image-link"
@@ -6355,6 +8188,53 @@ function ImagePlaceholder({
             {hasUrl ? t("widgetImageUnavailable") : t("widgetImage")}
           </span>
           <span className="widget-id">#{id}</span>
+          {showActions && (
+            <div className="widget-actions">
+              {phase === "searching" || phase === "busy" ? (
+                <span className="widget-action-status">
+                  {phase === "searching" ? t("widgetSearching") : t("widgetWorking")}
+                </span>
+              ) : phase === "picking" ? (
+                <div className="widget-candidates">
+                  <div className="widget-candidates-grid">
+                    {candidates.map((c, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        className="widget-candidate"
+                        onClick={() => pick(c)}
+                        title={c.title || c.source}
+                      >
+                        <img src={c.thumbnail || c.url} alt="" loading="lazy" />
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" className="widget-action-link" onClick={() => setPhase("idle")}>
+                    {t("cancel")}
+                  </button>
+                </div>
+              ) : phase === "notfound" ? (
+                <div className="widget-notfound">
+                  <span>{t("widgetNotFound")}</span>
+                  <span className="widget-action-row">
+                    <button type="button" className="widget-action-link" onClick={retry}>
+                      {t("widgetRetry")}
+                    </button>
+                    {widgetCtx?.canGenerate && (
+                      <button type="button" className="widget-action-link" onClick={generate}>
+                        {t("widgetTryGenerate")}
+                      </button>
+                    )}
+                  </span>
+                </div>
+              ) : (
+                <button type="button" className="widget-action-link" onClick={retry}>
+                  {t("widgetRetry")}
+                </button>
+              )}
+              {actionError && <span className="widget-action-error">{actionError}</span>}
+            </div>
+          )}
         </div>
       )}
       <ImageCaption
@@ -6520,6 +8400,13 @@ function SubmoduleStateIcon({ state }: { state: GenState }) {
   const t = useT();
   if (state === "generating") {
     return <span className="state-icon generating" title={t("generatingTitle")} />;
+  }
+  if (state === "queued") {
+    return (
+      <span className="state-icon queued" title={t("stateQueued")} aria-label={t("stateQueued")}>
+        …
+      </span>
+    );
   }
   if (state === "ready") {
     return (

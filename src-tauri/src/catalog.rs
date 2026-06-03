@@ -73,12 +73,18 @@ pub struct CatalogCourseSummary {
     pub title: String,
     pub topic: String,
     pub language: String,
+    #[serde(default = "default_course_format")]
+    pub course_format: String,
     pub updated_at: i64,
     #[serde(default)]
     pub version: i64,
     pub modules: usize,
     pub lessons: usize,
     pub generated_lessons: usize,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
     pub view_url: String,
     pub download_url: String,
 }
@@ -416,8 +422,15 @@ fn write_package_to_course(
     Ok(())
 }
 
-pub fn list_remote(base_url: &str) -> Result<Vec<CatalogCourseSummary>, String> {
-    let url = format!("{}/api/catalog", trim_base_url(base_url));
+pub fn list_remote(
+    base_url: &str,
+    query: Option<&str>,
+) -> Result<Vec<CatalogCourseSummary>, String> {
+    let mut url = format!("{}/api/catalog", trim_base_url(base_url));
+    if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
+        url.push_str("?q=");
+        url.push_str(&urlencoding::encode(q));
+    }
     let response = ureq::get(&url).call().map_err(ureq_error)?;
     response.into_json().map_err(|e| e.to_string())
 }

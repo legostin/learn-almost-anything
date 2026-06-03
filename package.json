@@ -1,7 +1,7 @@
 {
   "name": "learn-almost-anything",
   "private": true,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Local desktop AI tutor that designs personalized courses on any topic — articles, interactive widgets, tests, homework with agent review, and TTS lectures. Uses your Claude Pro/Max or ChatGPT Plus/Pro subscription.",
   "keywords": [
     "ai-tutor",
@@ -43,15 +43,18 @@
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
+    "highlight.js": "^11.11.1",
     "katex": "^0.17.0",
     "mermaid": "^11.15.0",
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0"

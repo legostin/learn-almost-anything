@@ -33,6 +33,14 @@ pub struct Settings {
     /// Secret used to publish courses to the public catalog.
     #[serde(default)]
     pub catalog_upload_token: Option<String>,
+    /// Debug mode: capture the full agent transcript log and show the in-app
+    /// debug panel. `None` means "use the build default" (on in dev builds).
+    #[serde(default)]
+    pub debug_logging: Option<bool>,
+    /// When false, never AI-generate illustrations — fall back to searching for
+    /// real images only. `None` means the default (enabled).
+    #[serde(default)]
+    pub image_generation: Option<bool>,
 }
 
 /// Per-backend model + reasoning choices for each kind of task. Empty
@@ -299,6 +307,42 @@ impl SettingsState {
         {
             let mut guard = self.inner.lock().expect("settings lock");
             guard.models = models;
+        }
+        self.persist()
+    }
+
+    /// Whether debug logging / the debug panel are enabled. Defaults to the
+    /// build type (on in dev) until the user sets it explicitly in Settings.
+    pub fn debug_logging(&self) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| s.debug_logging)
+            .unwrap_or(cfg!(debug_assertions))
+    }
+
+    pub fn set_debug_logging(&self, enabled: bool) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.debug_logging = Some(enabled);
+        }
+        self.persist()
+    }
+
+    /// Whether AI image generation is allowed. Defaults to on; when off the
+    /// illustration pipeline searches for real images only.
+    pub fn image_generation(&self) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| s.image_generation)
+            .unwrap_or(true)
+    }
+
+    pub fn set_image_generation(&self, enabled: bool) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.image_generation = Some(enabled);
         }
         self.persist()
     }

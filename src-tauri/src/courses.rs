@@ -9,11 +9,21 @@ use crate::db;
 
 pub struct AppPaths {
     pub courses_root: PathBuf,
+    pub spaces_root: PathBuf,
 }
 
 impl AppPaths {
     pub fn course_dir(&self, course_id: &str) -> PathBuf {
         self.courses_root.join(course_id)
+    }
+
+    pub fn space_dir(&self, space_id: &str) -> PathBuf {
+        self.spaces_root.join(space_id)
+    }
+
+    /// Where a space's converted-markdown / stored sources live.
+    pub fn space_sources_dir(&self, space_id: &str) -> PathBuf {
+        self.space_dir(space_id).join("sources")
     }
 }
 

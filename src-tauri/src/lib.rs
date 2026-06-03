@@ -73,6 +73,8 @@ fn create_course(
     language: String,
     course_format: Option<String>,
     agent: Option<String>,
+    space_id: Option<String>,
+    strict: Option<bool>,
 ) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| "claude".to_string());
     if agent != "claude" && agent != "codex" {
@@ -81,8 +83,11 @@ fn create_course(
     let course_format = db::normalize_course_format(course_format.as_deref());
     let id = Uuid::new_v4().to_string();
     let now = now_unix_secs()?;
+    let space = space_id.as_deref().filter(|s| !s.trim().is_empty());
+    // Per-course strict override only matters for space-scoped courses.
+    let strict = if space.is_some() { strict } else { None };
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    db::insert_course(&conn, &id, &topic, &language, course_format, &agent, now)
+    db::insert_course(&conn, &id, &topic, &language, course_format, &agent, now, space, strict)
         .map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -454,12 +459,18 @@ fn start_build_structure(
     };
     let course_md = courses::read_course_md(&paths_state, &course_id).map_err(|e| e.to_string())?;
 
+    let (space_sources, space_links, space_dirs, space_strict) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        course_space_context(&paths_state, &conn, &course)
+    };
+
     let db = db_state.inner().clone();
     let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
     let model_config = settings_state.stage_model(&course.agent, "planning");
     let app2 = app.clone();
     let cid = course_id.clone();
+    let agent = course.agent.clone();
 
     thread::spawn(move || {
         let params = json!({
@@ -469,42 +480,45 @@ fn start_build_structure(
             "courseFormat": course.course_format,
             "courseMd": course_md,
             "modelConfig": model_config,
+            "spaceSources": space_sources,
+            "spaceLinks": space_links,
+            "spaceDirs": space_dirs,
+            "spaceStrict": space_strict,
         });
-        let cb = {
-            let app3 = app2.clone();
-            let cid3 = cid.clone();
-            move |p: sidecar::ProgressPayload| {
-                emit_progress_event(&app3, &cid3, &cid3, "structure", &p.label, p.detail.as_deref());
-            }
-        };
-        let payload = match sidecar.call_with_progress(
-            "build_structure",
-            params,
-            Duration::from_secs(4200),
-            cb,
-        ) {
-            Ok(v) => match serde_json::from_value::<courses::SidecarTree>(v) {
-                Ok(raw) => {
-                    let conn = match db.0.lock() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            emit_job_event(
-                                &app2,
-                                &cid,
-                                "build_structure",
-                                json!({ "ok": false, "error": e.to_string() }),
-                            );
-                            return;
-                        }
-                    };
-                    match courses::install_structure(&conn, &paths, &cid, raw) {
-                        Ok(_) => json!({ "ok": true }),
-                        Err(e) => json!({ "ok": false, "error": e.to_string() }),
-                    }
-                }
-                Err(e) => json!({ "ok": false, "error": format!("sidecar payload: {e}") }),
+        // Durability: the planning agent can fail (timeout, bad JSON, transient
+        // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the
+        // live transcript. On final failure the UI offers retry / switch agent.
+        let result = retry_stage(
+            STAGE_MAX_ATTEMPTS,
+            |next, err| {
+                emit_progress_event(
+                    &app2,
+                    &cid,
+                    &cid,
+                    "structure",
+                    &format!("повтор {next}/{STAGE_MAX_ATTEMPTS}"),
+                    Some(err),
+                );
             },
-            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+            || {
+                let app4 = app2.clone();
+                let cid4 = cid.clone();
+                let cb = move |p: sidecar::ProgressPayload| {
+                    emit_progress_event(&app4, &cid4, &cid4, "structure", &p.label, p.detail.as_deref());
+                };
+                let v = sidecar
+                    .call_with_progress("build_structure", params.clone(), Duration::from_secs(4200), cb)
+                    .map_err(|e| e.to_string())?;
+                let raw = serde_json::from_value::<courses::SidecarTree>(v)
+                    .map_err(|e| format!("sidecar payload: {e}"))?;
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                courses::install_structure(&conn, &paths, &cid, raw).map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            },
+        );
+        let payload = match result {
+            Ok(()) => json!({ "ok": true }),
+            Err(e) => json!({ "ok": false, "error": e, "exhausted": true, "agent": agent }),
         };
         emit_job_event(&app2, &cid, "build_structure", payload);
     });
@@ -687,6 +701,53 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
     Ok((raw.reply, modules))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_next_queued_submodule(
+    app: &AppHandle,
+    db: Arc<Db>,
+    paths: Arc<AppPaths>,
+    sidecar: Arc<Sidecar>,
+    course: db::Course,
+    brave_api_key: Option<String>,
+    gemini_key: Option<String>,
+    writing_model: serde_json::Value,
+    tests_model: serde_json::Value,
+    gemini_image_model: String,
+    catalog_upload_token: Option<String>,
+) -> Result<Option<String>, String> {
+    let next = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if db::has_generating_submodule(&conn, &course.id).map_err(|e| e.to_string())? {
+            return Ok(None);
+        }
+        db::first_queued_submodule(&conn, &course.id).map_err(|e| e.to_string())?
+    };
+    let Some((_, sub_id)) = next else {
+        return Ok(None);
+    };
+    let started = spawn_generate_submodule(
+        app,
+        db,
+        paths,
+        sidecar,
+        course,
+        sub_id.clone(),
+        brave_api_key,
+        gemini_key,
+        writing_model,
+        tests_model,
+        gemini_image_model,
+        catalog_upload_token,
+        true,
+        true,
+    )?;
+    if started {
+        Ok(Some(sub_id))
+    } else {
+        Ok(None)
+    }
+}
+
 fn spawn_generate_submodule(
     app: &AppHandle,
     db: Arc<Db>,
@@ -701,6 +762,7 @@ fn spawn_generate_submodule(
     gemini_image_model: String,
     catalog_upload_token: Option<String>,
     course_serial: bool,
+    continue_queued: bool,
 ) -> Result<bool, String> {
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -742,6 +804,10 @@ fn spawn_generate_submodule(
     thread::spawn(move || {
         let is_podcast = course.course_format == "podcast_series";
         let total_started = Instant::now();
+        let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
+            Ok(conn) => course_space_context(&paths, &conn, &course),
+            Err(_) => (Vec::new(), Vec::new(), Vec::new(), true),
+        };
         let mut common = json!({
             "backend": course.agent,
             "topic": course.topic,
@@ -754,6 +820,10 @@ fn spawn_generate_submodule(
             "modulePath": { "title": module_title, "summary": module_summary },
             "submodulePath": { "title": sub_title, "summary": sub_summary },
             "modelConfig": writing_model,
+            "spaceSources": space_sources,
+            "spaceLinks": space_links,
+            "spaceDirs": space_dirs,
+            "spaceStrict": space_strict,
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
@@ -951,11 +1021,39 @@ fn spawn_generate_submodule(
                 let _ = db::touch_course(&c, &cid, now);
             }
         }
+        let queued_next = if continue_queued {
+            match spawn_next_queued_submodule(
+                &app2,
+                db.clone(),
+                paths.clone(),
+                sidecar.clone(),
+                course.clone(),
+                brave_api_key.clone(),
+                gemini_key.clone(),
+                writing_model.clone(),
+                tests_model.clone(),
+                gemini_image_model.clone(),
+                catalog_upload_token.clone(),
+            ) {
+                Ok(next) => next,
+                Err(e) => {
+                    eprintln!("[generate_submodule] continue queued failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         emit_job_event(
             &app2,
             &cid,
             "generate_submodule",
-            json!({ "ok": true, "submoduleId": sid, "enriching": !is_podcast }),
+            json!({
+                "ok": true,
+                "submoduleId": sid,
+                "enriching": !is_podcast,
+                "queuedNext": queued_next,
+            }),
         );
 
         // Stages 4 & 5 (background enrichment) are independent — illustration
@@ -1325,7 +1423,10 @@ fn illustrate_widgets(
     model_config: &serde_json::Value,
     gemini_image_model: &str,
 ) -> serde_json::Value {
-    let can_generate = gemini_key.is_some() || course.agent == "codex";
+    // User can disable AI image generation in Settings → search for real
+    // images only (never invent one).
+    let generate_images = app.state::<Arc<SettingsState>>().image_generation();
+    let can_generate = generate_images && (gemini_key.is_some() || course.agent == "codex");
     let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
     if brave_key.is_none() && !can_generate && !can_agent_search {
         return widgets;
@@ -1382,7 +1483,11 @@ fn illustrate_widgets(
                 return;
             }
             let alt = w.get("alt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let mode = w.get("mode").and_then(|v| v.as_str()).unwrap_or("search").to_string();
+            let mode = if generate_images {
+                w.get("mode").and_then(|v| v.as_str()).unwrap_or("search").to_string()
+            } else {
+                "search".to_string()
+            };
             let source = w
                 .get("source")
                 .and_then(|v| v.as_str())
@@ -1876,6 +1981,8 @@ struct SettingsStatus {
     tts_voice: String,
     gemini_image_model: String,
     gemini_tts_model: String,
+    debug_logging: bool,
+    image_generation: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1934,6 +2041,8 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         tts_voice: state.tts_voice(),
         gemini_image_model: state.gemini_image_model(),
         gemini_tts_model: state.gemini_tts_model(),
+        debug_logging: state.debug_logging(),
+        image_generation: state.image_generation(),
     }
 }
 
@@ -2162,8 +2271,10 @@ fn set_share_domains(
 }
 
 #[tauri::command]
-fn list_catalog_courses() -> Result<Vec<catalog::CatalogCourseSummary>, String> {
-    catalog::list_remote(catalog::DEFAULT_CATALOG_URL)
+fn list_catalog_courses(
+    query: Option<String>,
+) -> Result<Vec<catalog::CatalogCourseSummary>, String> {
+    catalog::list_remote(catalog::DEFAULT_CATALOG_URL, query.as_deref())
 }
 
 #[tauri::command]
@@ -2211,7 +2322,7 @@ fn get_catalog_update(
     db_state: tauri::State<'_, Arc<Db>>,
     course_id: String,
 ) -> Result<catalog::CatalogUpdateStatus, String> {
-    let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL)?;
+    let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL, None)?;
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
     let course = db::get_course(&conn, &course_id)
         .map_err(|e| e.to_string())?
@@ -2722,6 +2833,7 @@ fn start_generate_submodule(
         settings_state.gemini_image_model(),
         settings_state.catalog_upload_token(),
         false,
+        true,
     )
     .map(|_| ())
 }
@@ -2762,12 +2874,52 @@ fn start_first_pending_submodule(
         settings_state.gemini_image_model(),
         settings_state.catalog_upload_token(),
         true,
+        true,
     )?;
     if started {
         Ok(Some(sub_id))
     } else {
         Ok(None)
     }
+}
+
+#[tauri::command]
+fn start_full_course_generation(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<Option<String>, String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        let queued = db::queue_pending_submodules(&conn, &course_id).map_err(|e| e.to_string())?;
+        if queued > 0 {
+            if let Ok(now) = now_unix_secs() {
+                let _ = db::touch_course(&conn, &course_id, now);
+            }
+        }
+        course
+    };
+    let writing_model = settings_state.stage_model(&course.agent, "writing");
+    let tests_model = settings_state.stage_model(&course.agent, "tests");
+    spawn_next_queued_submodule(
+        &app,
+        db_state.inner().clone(),
+        paths_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        course,
+        settings_state.brave_api_key(),
+        settings_state.gemini_api_key(),
+        writing_model,
+        tests_model,
+        settings_state.gemini_image_model(),
+        settings_state.catalog_upload_token(),
+    )
 }
 
 #[tauri::command]
@@ -2853,11 +3005,1541 @@ fn sidecar_script_path(app: &AppHandle) -> PathBuf {
         .join("index.mjs")
 }
 
+// Path of the dev-only agent transcript log the sidecar writes (see
+// sidecar/src/lib/devlog.mjs). Mirrors that module's default location.
+fn dev_log_path(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = std::env::var("LEARN_ANYTHING_DEVLOG_DIR") {
+        return PathBuf::from(dir).join("agents.log");
+    }
+    let home = app
+        .path()
+        .home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    home.join(".learn-anything").join("devlogs").join("agents.log")
+}
+
+/// Presence of this file (a sibling of agents.log) tells the sidecar's devlog
+/// module that debug logging is on. Using a file rather than a spawn-time env
+/// var lets the Settings toggle take effect immediately, without an app restart.
+fn devlog_flag_path(app: &AppHandle) -> PathBuf {
+    dev_log_path(app).with_file_name("enabled")
+}
+
+/// Create/remove the devlog flag file to match the debug-logging setting.
+fn sync_devlog_flag(app: &AppHandle, enabled: bool) {
+    let path = devlog_flag_path(app);
+    if enabled {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, b"1");
+    } else {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Read the tail of the dev agent log for the in-app debug panel. Returns the
+/// last `max_bytes` (default 256 KiB), dropping a partial leading line. Empty
+/// string when the file doesn't exist yet (no agent calls, or release build).
+#[tauri::command]
+fn read_dev_log(app: AppHandle, max_bytes: Option<u64>) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = dev_log_path(&app);
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Ok(String::new()),
+    };
+    let max = max_bytes.unwrap_or(256 * 1024);
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let start = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let mut s = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        if let Some(idx) = s.find('\n') {
+            s = s[idx + 1..].to_string();
+        }
+    }
+    Ok(s)
+}
+
+/// Truncate the dev agent log (debug panel "clear" button).
+#[tauri::command]
+fn clear_dev_log(app: AppHandle) -> Result<(), String> {
+    let path = dev_log_path(&app);
+    if path.exists() {
+        std::fs::write(&path, b"").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Toggle debug logging (the agent transcript + in-app debug panel). Persists
+/// the choice and flips the runtime flag the sidecar checks — no restart needed.
+#[tauri::command]
+fn set_debug_logging(
+    app: AppHandle,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    settings_state.set_debug_logging(enabled).map_err(|e| e.to_string())?;
+    sync_devlog_flag(&app, enabled);
+    Ok(enabled)
+}
+
+/// Toggle AI image generation. When off, the illustration pipeline searches for
+/// real images only and never generates one.
+#[tauri::command]
+fn set_image_generation(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    settings_state.set_image_generation(enabled).map_err(|e| e.to_string())?;
+    Ok(enabled)
+}
+
+// ===== Course translation (linked copy in another language) =====
+
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Translate a batch of short strings via the sidecar; falls back to the
+/// originals on any error or length mismatch (never loses content).
+fn translate_strings_batch(
+    sidecar: &Sidecar,
+    backend: &str,
+    source_lang: &str,
+    target: &str,
+    model: &serde_json::Value,
+    strings: &[String],
+) -> Vec<String> {
+    if strings.is_empty() {
+        return Vec::new();
+    }
+    let params = json!({
+        "backend": backend,
+        "sourceLang": source_lang,
+        "targetLang": target,
+        "strings": strings,
+        "modelConfig": model,
+    });
+    match sidecar.call("translate_strings", params, Duration::from_secs(900)) {
+        Ok(v) => {
+            let arr = v
+                .get("translations")
+                .and_then(|a| a.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if arr.len() == strings.len() {
+                arr.iter()
+                    .map(|x| x.as_str().unwrap_or("").to_string())
+                    .collect()
+            } else {
+                strings.to_vec()
+            }
+        }
+        Err(_) => strings.to_vec(),
+    }
+}
+
+/// Create a linked translated copy of a course and translate its content in the
+/// background. Returns the new course id immediately.
+#[tauri::command]
+fn translate_course(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    target_language: String,
+) -> Result<String, String> {
+    let target = target_language.trim().to_string();
+    if target.is_empty() {
+        return Err("целевой язык обязателен".into());
+    }
+    let (source, structure) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let c = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        let s = courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?;
+        (c, s)
+    };
+    if source.language.trim().eq_ignore_ascii_case(&target) {
+        return Err("курс уже на этом языке".into());
+    }
+
+    let new_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+
+    // Remap module/submodule ids (modules.id is a global PK) and record which
+    // content dirs to copy.
+    let mut copy_jobs: Vec<(String, String, String, String)> = Vec::new();
+    let new_modules: Vec<courses::ModuleNode> = structure
+        .modules
+        .iter()
+        .map(|m| {
+            let new_mod_id = Uuid::new_v4().to_string();
+            let submodules = m
+                .submodules
+                .iter()
+                .map(|s| {
+                    let new_sub_id = Uuid::new_v4().to_string();
+                    copy_jobs.push((
+                        m.id.clone(),
+                        s.id.clone(),
+                        new_mod_id.clone(),
+                        new_sub_id.clone(),
+                    ));
+                    courses::ModuleNode {
+                        id: new_sub_id,
+                        title: s.title.clone(),
+                        summary: s.summary.clone(),
+                        generation_state: s.generation_state.clone(),
+                        test_passed: false,
+                        test_passed_at: None,
+                        submodules: vec![],
+                    }
+                })
+                .collect();
+            courses::ModuleNode {
+                id: new_mod_id,
+                title: m.title.clone(),
+                summary: m.summary.clone(),
+                generation_state: m.generation_state.clone(),
+                test_passed: false,
+                test_passed_at: None,
+                submodules,
+            }
+        })
+        .collect();
+    let file = courses::StructureFile {
+        course_id: new_id.clone(),
+        modules: new_modules,
+    };
+
+    // Persist the new course + structure rows.
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::insert_translated_course(&conn, &new_id, &source, &target, now)
+            .map_err(|e| e.to_string())?;
+        for (mp, m) in file.modules.iter().enumerate() {
+            db::insert_module(
+                &conn,
+                &m.id,
+                &new_id,
+                None,
+                mp as i64,
+                &m.title,
+                if m.summary.is_empty() { None } else { Some(m.summary.as_str()) },
+                &m.generation_state,
+            )
+            .map_err(|e| e.to_string())?;
+            for (sp, s) in m.submodules.iter().enumerate() {
+                db::insert_module(
+                    &conn,
+                    &s.id,
+                    &new_id,
+                    Some(&m.id),
+                    sp as i64,
+                    &s.title,
+                    if s.summary.is_empty() { None } else { Some(s.summary.as_str()) },
+                    &s.generation_state,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Copy files: structure.json, course.md, and each submodule's content dir.
+    let src_dir = paths_state.course_dir(&course_id);
+    let new_dir = paths_state.course_dir(&new_id);
+    std::fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
+    if let Ok(json) = serde_json::to_string_pretty(&file) {
+        let _ = std::fs::write(new_dir.join("structure.json"), json);
+    }
+    let _ = std::fs::copy(src_dir.join("course.md"), new_dir.join("course.md"));
+    for (old_mod, old_sub, new_mod, new_sub) in &copy_jobs {
+        let from = courses::submodule_dir(&paths_state, &course_id, old_mod, old_sub);
+        if from.is_dir() {
+            let to = courses::submodule_dir(&paths_state, &new_id, new_mod, new_sub);
+            let _ = copy_dir_all(&from, &to);
+        }
+    }
+
+    // Translate in the background.
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let model = settings_state.stage_model(&source.agent, "writing");
+    let gemini_key = settings_state.gemini_api_key();
+    let gemini_model = settings_state.gemini_image_model();
+    let image_gen = settings_state.image_generation();
+    let app2 = app.clone();
+    let new_id_ret = new_id.clone();
+    thread::spawn(move || {
+        translate_course_content(
+            &app2, &db, &paths, &sidecar, source, target, new_id, file, model, gemini_key,
+            gemini_model, image_gen,
+        );
+    });
+    Ok(new_id_ret)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translate_course_content(
+    app: &AppHandle,
+    db: &Arc<Db>,
+    paths: &Arc<AppPaths>,
+    sidecar: &Arc<Sidecar>,
+    source: db::Course,
+    target: String,
+    new_id: String,
+    mut file: courses::StructureFile,
+    model: serde_json::Value,
+    gemini_key: Option<String>,
+    gemini_model: String,
+    image_gen: bool,
+) {
+    let backend = source.agent.as_str();
+    let src_lang = source.language.as_str();
+
+    // ---- 1. Structure: course title + every module/submodule title & summary.
+    let mut strings: Vec<String> = Vec::new();
+    if let Some(title) = source.title.as_deref().filter(|t| !t.trim().is_empty()) {
+        strings.push(title.to_string());
+    }
+    for m in &file.modules {
+        strings.push(m.title.clone());
+        strings.push(m.summary.clone());
+        for s in &m.submodules {
+            strings.push(s.title.clone());
+            strings.push(s.summary.clone());
+        }
+    }
+    let translated = translate_strings_batch(sidecar, backend, src_lang, &target, &model, &strings);
+    if translated.len() == strings.len() {
+        let mut i = 0;
+        let new_title = if source.title.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false) {
+            let t = translated[i].clone();
+            i += 1;
+            Some(t)
+        } else {
+            None
+        };
+        for m in file.modules.iter_mut() {
+            m.title = translated[i].clone();
+            i += 1;
+            m.summary = translated[i].clone();
+            i += 1;
+            for s in m.submodules.iter_mut() {
+                s.title = translated[i].clone();
+                i += 1;
+                s.summary = translated[i].clone();
+                i += 1;
+            }
+        }
+        // Persist translated structure to DB + structure.json.
+        if let Ok(conn) = db.0.lock() {
+            if let Some(t) = new_title {
+                if let Ok(n) = now_unix_secs() {
+                    let _ = db::set_course_title(&conn, &new_id, &t, n);
+                }
+            }
+            for m in &file.modules {
+                let _ = db::update_module_text(&conn, &m.id, &m.title, &m.summary);
+                for s in &m.submodules {
+                    let _ = db::update_module_text(&conn, &s.id, &s.title, &s.summary);
+                }
+            }
+        }
+        let dir = paths.course_dir(&new_id);
+        if let Ok(json) = serde_json::to_string_pretty(&file) {
+            let _ = std::fs::write(dir.join("structure.json"), json);
+        }
+    }
+    // ---- 2. Per submodule: article, test, widget captions, image text.
+    let subs: Vec<(String, String)> = file
+        .modules
+        .iter()
+        .flat_map(|m| m.submodules.iter().map(move |s| (m.id.clone(), s.id.clone())))
+        .collect();
+    let total = subs.len();
+    // Tell the UI the structure is translated (reload titles live) + show status.
+    emit_job_event(
+        app,
+        &new_id,
+        "translate",
+        json!({ "ok": false, "phase": "structure", "done": 0, "total": total }),
+    );
+    for (idx, (mod_id, sub_id)) in subs.iter().enumerate() {
+        emit_progress_event(
+            app,
+            &new_id,
+            sub_id,
+            "translate",
+            &format!("раздел {}/{}", idx + 1, total),
+            None,
+        );
+        let dir = courses::submodule_dir(paths, &new_id, mod_id, sub_id);
+
+        // article.md
+        let article_path = dir.join("article.md");
+        if let Ok(article) = std::fs::read_to_string(&article_path) {
+            if !article.trim().is_empty() {
+                let params = json!({
+                    "backend": backend,
+                    "sourceLang": src_lang,
+                    "targetLang": target,
+                    "markdown": article,
+                    "modelConfig": model,
+                });
+                if let Ok(v) = sidecar.call("translate_markdown", params, Duration::from_secs(1800)) {
+                    if let Some(md) = v.get("markdown").and_then(|x| x.as_str()) {
+                        if !md.trim().is_empty() {
+                            let _ = std::fs::write(&article_path, md);
+                        }
+                    }
+                }
+            }
+        }
+
+        // test.json — translate question text + options.
+        let test_path = dir.join("test.json");
+        if let Ok(s) = std::fs::read_to_string(&test_path) {
+            if let Ok(mut test) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(arr) = test.as_array_mut() {
+                    let mut tstr: Vec<String> = Vec::new();
+                    for q in arr.iter() {
+                        if let Some(t) = q.get("text").and_then(|v| v.as_str()) {
+                            tstr.push(t.to_string());
+                        }
+                        if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
+                            for o in opts {
+                                if let Some(os) = o.as_str() {
+                                    tstr.push(os.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let tt = translate_strings_batch(sidecar, backend, src_lang, &target, &model, &tstr);
+                    if tt.len() == tstr.len() {
+                        let mut i = 0;
+                        for q in arr.iter_mut() {
+                            if q.get("text").and_then(|v| v.as_str()).is_some() {
+                                q["text"] = json!(tt[i]);
+                                i += 1;
+                            }
+                            if let Some(opts) = q.get_mut("options").and_then(|v| v.as_array_mut()) {
+                                for o in opts.iter_mut() {
+                                    if o.is_string() {
+                                        *o = json!(tt[i]);
+                                        i += 1;
+                                    }
+                                }
+                            }
+                        }
+                        let _ = std::fs::write(&test_path, serde_json::to_string_pretty(&test).unwrap_or(s));
+                    }
+                }
+            }
+        }
+
+        // widgets.json — translate captions, then re-generate any AI image whose
+        // baked-in text is in the source language.
+        let widgets_path = dir.join("widgets.json");
+        if let Ok(ws) = std::fs::read_to_string(&widgets_path) {
+            if let Ok(mut widgets) = serde_json::from_str::<serde_json::Value>(&ws) {
+                const CAPTION_FIELDS: [&str; 4] = ["description", "alt", "caption", "title"];
+                if let Some(obj) = widgets.as_object_mut() {
+                    let mut wstr: Vec<String> = Vec::new();
+                    let mut collect = |w: &serde_json::Value| {
+                        for f in CAPTION_FIELDS {
+                            if let Some(s) = w.get(f).and_then(|v| v.as_str()) {
+                                if !s.trim().is_empty() {
+                                    wstr.push(s.to_string());
+                                }
+                            }
+                        }
+                    };
+                    for (_k, w) in obj.iter() {
+                        collect(w);
+                        if let Some(items) = w.get("items").and_then(|v| v.as_array()) {
+                            for it in items {
+                                collect(it);
+                            }
+                        }
+                    }
+                    let wt = translate_strings_batch(sidecar, backend, src_lang, &target, &model, &wstr);
+                    if wt.len() == wstr.len() {
+                        let mut i = 0;
+                        let mut apply = |w: &mut serde_json::Value| {
+                            for f in CAPTION_FIELDS {
+                                let take = w
+                                    .get(f)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false);
+                                if take {
+                                    w[f] = json!(wt[i]);
+                                    i += 1;
+                                }
+                            }
+                        };
+                        for (_k, w) in obj.iter_mut() {
+                            apply(w);
+                            if let Some(items) = w.get_mut("items").and_then(|v| v.as_array_mut()) {
+                                for it in items.iter_mut() {
+                                    apply(it);
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::write(
+                    &widgets_path,
+                    serde_json::to_string_pretty(&widgets).unwrap_or_else(|_| ws.clone()),
+                );
+
+                // Vision-check generated images; regenerate with translated prompt.
+                if image_gen {
+                    let mut img_jobs: Vec<(String, String, String)> = Vec::new();
+                    let mut collect_img = |w: &serde_json::Value| {
+                        if !w.get("generated").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            return;
+                        }
+                        let url = w.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                        let path = url.strip_prefix("file://").unwrap_or(url);
+                        if !path.starts_with('/') {
+                            return;
+                        }
+                        let desc = w.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let alt = w.get("alt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        img_jobs.push((desc, alt, path.to_string()));
+                    };
+                    if let Some(obj) = widgets.as_object() {
+                        for (_k, w) in obj.iter() {
+                            match w.get("type").and_then(|v| v.as_str()) {
+                                Some("image") => collect_img(w),
+                                Some("gallery") => {
+                                    if let Some(items) = w.get("items").and_then(|v| v.as_array()) {
+                                        for it in items {
+                                            collect_img(it);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    for (desc, alt, path) in img_jobs {
+                        let detect = sidecar.call(
+                            "detect_image_text_language",
+                            json!({
+                                "backend": "claude",
+                                "imagePath": path,
+                                "sourceLang": src_lang,
+                                "targetLang": target,
+                                "modelConfig": model,
+                            }),
+                            Duration::from_secs(120),
+                        );
+                        let should = detect
+                            .ok()
+                            .and_then(|v| v.get("translate").and_then(|b| b.as_bool()))
+                            .unwrap_or(false);
+                        if should {
+                            if let Some(jpeg) = generate_image_bytes(
+                                app, &source, sidecar, sub_id, &desc, &alt, &gemini_key, &gemini_model,
+                            ) {
+                                let _ = media::save_bytes(&jpeg, std::path::Path::new(&path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        emit_job_event(
+            app,
+            &new_id,
+            "translate",
+            json!({ "ok": false, "phase": "submodule", "done": idx + 1, "total": total }),
+        );
+    }
+
+    emit_job_event(
+        app,
+        &new_id,
+        "translate",
+        json!({ "ok": true, "phase": "done", "done": total, "total": total }),
+    );
+}
+
+/// AI assistant: answer a learner question about the course, grounded in the
+/// course program, the current lesson, an optional highlighted fragment, and the
+/// space sources. Runs off the main thread.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn ask_course_assistant(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: Option<String>,
+    submodule_id: Option<String>,
+    question: String,
+    fragment: Option<String>,
+    image_path: Option<String>,
+    history: Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let q = question.trim().to_string();
+    if q.is_empty() && image_path.is_none() {
+        return Err("вопрос пуст".into());
+    }
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let (course, structure, space) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let c = db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?;
+            let s = courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?;
+            let sp = course_space_context(&paths, &conn, &c);
+            (c, s, sp)
+        };
+        let (docs, links, dirs, strict) = space;
+        let article = match (&module_id, &submodule_id) {
+            (Some(m), Some(s)) => courses::read_submodule_content(&paths, &course_id, m, s)
+                .ok()
+                .map(|c| c.article),
+            _ => None,
+        };
+        // Both agents do vision on a local image (Claude via base64, Codex via a
+        // local_image input item), so keep the course's own agent.
+        let model = settings.stage_model(&course.agent, "writing");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "structure": structure,
+            "article": article,
+            "fragment": fragment,
+            "imagePath": image_path,
+            "question": q,
+            "history": history,
+            "spaceSources": docs,
+            "spaceLinks": links,
+            "spaceDirs": dirs,
+            "spaceStrict": strict,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("course_assistant", params, Duration::from_secs(600))
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("answer").and_then(|x| x.as_str()).unwrap_or("").to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ===== Local notes (saved assistant chats with an optional fragment anchor) =====
+
+fn notes_path(paths: &AppPaths, course_id: &str) -> PathBuf {
+    paths.course_dir(course_id).join("notes.json")
+}
+
+fn read_notes(paths: &AppPaths, course_id: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(notes_path(paths, course_id))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_notes(paths: &AppPaths, course_id: &str, notes: &[serde_json::Value]) -> Result<(), String> {
+    let path = notes_path(paths, course_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&serde_json::Value::Array(notes.to_vec()))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_notes(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(read_notes(&paths_state, &course_id))
+}
+
+#[tauri::command]
+fn save_note(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    note: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let id = note
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "note id required".to_string())?
+        .to_string();
+    let mut notes = read_notes(&paths_state, &course_id);
+    notes.retain(|n| n.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+    notes.push(note.clone());
+    write_notes(&paths_state, &course_id, &notes)?;
+    Ok(note)
+}
+
+#[tauri::command]
+fn delete_note(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    note_id: String,
+) -> Result<(), String> {
+    let mut notes = read_notes(&paths_state, &course_id);
+    notes.retain(|n| n.get("id").and_then(|v| v.as_str()) != Some(note_id.as_str()));
+    write_notes(&paths_state, &course_id, &notes)
+}
+
+// ===== Per-widget image actions (retry search / pick / generate / remove) =====
+
+#[derive(serde::Serialize)]
+struct ImageCandidate {
+    url: String,
+    source: String,
+    title: String,
+    thumbnail: String,
+}
+
+fn widget_query_fields(widget: &serde_json::Value) -> (String, String, String) {
+    let field = |k: &str| {
+        widget
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let description = field("description");
+    let prompt = field("prompt");
+    let alt = field("alt");
+    let query_seed = if !prompt.is_empty() { prompt } else { description.clone() };
+    (query_seed, description, alt)
+}
+
+/// A short, search-friendly query (Brave rejects very long `q` with HTTP 422).
+/// Prefer the short caption/description over the long generation prompt.
+fn widget_search_query(widget: &serde_json::Value, topic: &str) -> String {
+    let (seed, description, _alt) = widget_query_fields(widget);
+    let base = if !description.is_empty() { description } else { seed };
+    let query = format!("{base} {topic}");
+    query.chars().take(160).collect::<String>().trim().to_string()
+}
+
+/// Search for image candidates for one placeholder widget, WITHOUT committing —
+/// the user picks one in the UI (which then calls set_widget_image). Runs off
+/// the main thread so the UI stays responsive.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn search_widget_candidates(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+) -> Result<Vec<ImageCandidate>, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ImageCandidate>, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let content =
+            courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+                .map_err(|e| e.to_string())?;
+        let widget = content
+            .widgets
+            .get(&widget_id)
+            .cloned()
+            .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+        let (_seed, description, alt) = widget_query_fields(&widget);
+        let query = widget_search_query(&widget, &course.topic);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let model_config = settings.stage_model(&course.agent, "writing");
+        let hits = if let Some(key) = settings.brave_api_key() {
+            media::brave_image_search(&key, &query, 12).map_err(|e| e.to_string())?
+        } else {
+            agent_image_search(
+                &app,
+                &course,
+                &submodule_id,
+                &sidecar,
+                &description,
+                &alt,
+                &query,
+                &model_config,
+            )
+            .0
+        };
+        let mut seen = std::collections::HashSet::<String>::new();
+        let candidates = hits
+            .into_iter()
+            .filter(|h| !h.url.is_empty() && seen.insert(h.url.clone()))
+            .map(|h| ImageCandidate {
+                url: h.url,
+                source: h.source,
+                title: h.title,
+                thumbnail: h.thumbnail,
+            })
+            .take(12)
+            .collect();
+        Ok(candidates)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn update_widget_in_place(
+    paths: &AppPaths,
+    course_id: &str,
+    module_id: &str,
+    submodule_id: &str,
+    widget_id: &str,
+    url: &str,
+    source: Option<&str>,
+    generated: bool,
+) -> Result<(), String> {
+    let content = courses::read_submodule_content(paths, course_id, module_id, submodule_id)
+        .map_err(|e| e.to_string())?;
+    let mut widgets = content.widgets;
+    let w = widgets
+        .get_mut(widget_id)
+        .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+    w["url"] = json!(url);
+    w["source"] = match source {
+        Some(s) if !s.is_empty() => json!(s),
+        _ => serde_json::Value::Null,
+    };
+    w["generated"] = json!(generated);
+    courses::write_submodule_widgets(paths, course_id, module_id, submodule_id, &widgets)
+        .map_err(|e| e.to_string())
+}
+
+/// Download a user-chosen candidate and attach it to the widget. Off-thread.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn set_widget_image(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+    url: String,
+    source: Option<String>,
+) -> Result<(), String> {
+    let paths = paths_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let images_dir =
+            media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
+        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+        let jpeg = media::download_resize_jpeg(&normalize_wikimedia_thumbnail_url(&url), 2000)
+            .map_err(|e| e.to_string())?;
+        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
+        update_widget_in_place(
+            &paths,
+            &course_id,
+            &module_id,
+            &submodule_id,
+            &widget_id,
+            &final_path.to_string_lossy(),
+            source.as_deref(),
+            false,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Generate an image for the widget (Gemini/Codex) and attach it. Off-thread.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn generate_widget_image(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+) -> Result<(), String> {
+    if !settings_state.image_generation() {
+        return Err("генерация изображений отключена в настройках".into());
+    }
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let gemini_key = settings_state.gemini_api_key();
+    let gemini_model = settings_state.gemini_image_model();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let content =
+            courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+                .map_err(|e| e.to_string())?;
+        let widget = content
+            .widgets
+            .get(&widget_id)
+            .cloned()
+            .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+        let (seed, description, alt) = widget_query_fields(&widget);
+        let desc = if seed.is_empty() { description } else { seed };
+        let jpeg = generate_image_bytes(
+            &app,
+            &course,
+            &sidecar,
+            &submodule_id,
+            &desc,
+            &alt,
+            &gemini_key,
+            &gemini_model,
+        )
+        .ok_or_else(|| "не удалось сгенерировать изображение".to_string())?;
+        let images_dir =
+            media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
+        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
+        update_widget_in_place(
+            &paths,
+            &course_id,
+            &module_id,
+            &submodule_id,
+            &widget_id,
+            &final_path.to_string_lossy(),
+            None,
+            true,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove a widget from the structure: drop it from widgets.json and strip its
+/// ::widget marker from the article so no placeholder remains.
+#[tauri::command]
+fn remove_widget(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+) -> Result<(), String> {
+    let content = courses::read_submodule_content(&paths_state, &course_id, &module_id, &submodule_id)
+        .map_err(|e| e.to_string())?;
+    let mut widgets = content.widgets;
+    if let Some(obj) = widgets.as_object_mut() {
+        obj.remove(&widget_id);
+    }
+    courses::write_submodule_widgets(&paths_state, &course_id, &module_id, &submodule_id, &widgets)
+        .map_err(|e| e.to_string())?;
+    let needle = format!("id=\"{widget_id}\"");
+    let kept: Vec<&str> = content
+        .article
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !(t.starts_with("::widget{") && t.contains(&needle))
+        })
+        .collect();
+    let new_article = kept.join("\n");
+    if new_article != content.article {
+        courses::write_submodule_article(&paths_state, &course_id, &module_id, &submodule_id, &new_article)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether the agent can generate images for this course (setting on + a model
+/// path available: Gemini key, or Codex which has its own image gen).
+#[tauri::command]
+fn image_generation_available(
+    db_state: tauri::State<'_, Arc<Db>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<bool, String> {
+    if !settings_state.image_generation() {
+        return Ok(false);
+    }
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let course = db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("course not found: {course_id}"))?;
+    Ok(settings_state.gemini_api_key().is_some() || course.agent == "codex")
+}
+
+// ===== Spaces: knowledge containers + their sources =====
+
+fn classify_source(ext: &str) -> &'static str {
+    match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" => "image",
+        "csv" | "tsv" | "xlsx" | "xls" => "table",
+        _ => "document",
+    }
+}
+
+/// Convert a document to Markdown. Plain text/markdown is read directly;
+/// everything else (PDF, Office, HTML, spreadsheets…) goes through Microsoft's
+/// MarkItDown — run via `uvx` so it is fetched on demand if not installed.
+fn document_to_markdown(input: &std::path::Path) -> Result<String, String> {
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if matches!(ext.as_str(), "md" | "markdown" | "txt" | "text") {
+        return std::fs::read_to_string(input).map_err(|e| e.to_string());
+    }
+    let path_env = sidecar::expanded_path();
+    let input_arg = input.to_string_lossy().to_string();
+    // Prefer a real markitdown on PATH; else uvx auto-fetches it; else a
+    // pip-installed module reachable via `python3 -m markitdown`.
+    let attempts: [(&str, Vec<String>); 3] = [
+        ("markitdown", vec![input_arg.clone()]),
+        ("uvx", vec!["markitdown".to_string(), input_arg.clone()]),
+        ("python3", vec!["-m".to_string(), "markitdown".to_string(), input_arg.clone()]),
+    ];
+    let mut last_err = String::new();
+    for (cmd, args) in attempts {
+        let bin = sidecar::command_path(cmd);
+        let out = std::process::Command::new(&bin)
+            .args(&args)
+            .env("PATH", &path_env)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let md = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !md.is_empty() {
+                    return Ok(md);
+                }
+                last_err = format!("{cmd}: produced empty output");
+            }
+            Ok(o) => {
+                last_err = format!("{cmd}: {}", String::from_utf8_lossy(&o.stderr).trim());
+            }
+            Err(e) => last_err = format!("{cmd}: {e}"),
+        }
+    }
+    Err(format!(
+        "не удалось конвертировать в Markdown ({last_err}). Установите MarkItDown: `uv tool install markitdown` или `pipx install markitdown`."
+    ))
+}
+
+const SPACE_DOC_CHAR_CAP: usize = 24_000;
+
+/// Build the grounding context for a space-scoped course: converted-markdown
+/// documents/tables (`spaceSources`) and site/repo links (`spaceLinks`), shaped
+/// for the sidecar prompt. Returns empty vecs when the space has no usable
+/// content. Each document is capped so one huge PDF can't blow the context.
+fn space_context(
+    paths: &AppPaths,
+    conn: &rusqlite::Connection,
+    space_id: &str,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, Vec<String>) {
+    let mut docs = Vec::new();
+    let mut links = Vec::new();
+    let mut dirs = Vec::new();
+    let Ok(sources) = db::list_space_sources(conn, space_id) else {
+        return (docs, links, dirs);
+    };
+    let dir = paths.space_sources_dir(space_id);
+    for s in sources {
+        match s.kind.as_str() {
+            "site" | "repo" => {
+                links.push(json!({ "kind": s.kind, "title": s.title, "url": s.r#ref }));
+            }
+            // A live directory on disk the agent may read/explore directly.
+            "directory" => {
+                if std::path::Path::new(&s.r#ref).is_dir() {
+                    dirs.push(s.r#ref);
+                }
+            }
+            _ => {
+                let Some(md) = s.md_path else { continue };
+                let Ok(mut content) = std::fs::read_to_string(dir.join(md)) else {
+                    continue;
+                };
+                if content.trim().is_empty() {
+                    continue;
+                }
+                if content.len() > SPACE_DOC_CHAR_CAP {
+                    content.truncate(SPACE_DOC_CHAR_CAP);
+                    content.push_str("\n\n…[обрезано]");
+                }
+                docs.push(json!({ "title": s.title, "kind": s.kind, "content": content }));
+            }
+        }
+    }
+    (docs, links, dirs)
+}
+
+/// Space grounding for a course: (documents, links, directories, strict). Empty
+/// + strict=true when the course isn't scoped to a space.
+fn course_space_context(
+    paths: &AppPaths,
+    conn: &rusqlite::Connection,
+    course: &db::Course,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, Vec<String>, bool) {
+    match course.space_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(space_id) => {
+            let (docs, links, dirs) = space_context(paths, conn, space_id);
+            // Per-course override wins; otherwise inherit the space default.
+            let strict = course.strict_sources.unwrap_or_else(|| {
+                db::get_space(conn, space_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.strict)
+                    .unwrap_or(true)
+            });
+            (docs, links, dirs, strict)
+        }
+        None => (Vec::new(), Vec::new(), Vec::new(), true),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MarkitdownStatus {
+    available: bool,
+    via: String,
+}
+
+/// Detect whether document → Markdown conversion can run: a markitdown CLI, uv
+/// (which auto-fetches it via uvx), or a pip-installed markitdown module.
+fn markitdown_probe() -> MarkitdownStatus {
+    if sidecar::command_path_if_found("markitdown").is_some() {
+        return MarkitdownStatus { available: true, via: "markitdown".into() };
+    }
+    if sidecar::command_path_if_found("uvx").is_some()
+        || sidecar::command_path_if_found("uv").is_some()
+    {
+        return MarkitdownStatus { available: true, via: "uvx".into() };
+    }
+    if sidecar::command_path_if_found("python3").is_some() {
+        let ok = std::process::Command::new(sidecar::command_path("python3"))
+            .args(["-c", "import markitdown"])
+            .env("PATH", sidecar::expanded_path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return MarkitdownStatus { available: true, via: "python".into() };
+        }
+    }
+    MarkitdownStatus { available: false, via: String::new() }
+}
+
+#[tauri::command]
+fn markitdown_status() -> MarkitdownStatus {
+    markitdown_probe()
+}
+
+/// Install MarkItDown so document conversion works. No-op when `uv` is present
+/// (uvx fetches it on demand). Otherwise installs via pipx, `uv tool`, or
+/// `pip --user`, whichever is available.
+#[tauri::command]
+async fn install_markitdown() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(install_markitdown_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn install_markitdown_blocking() -> Result<String, String> {
+    let status = markitdown_probe();
+    if status.available {
+        return Ok(format!("уже доступен ({})", status.via));
+    }
+    let path_env = sidecar::expanded_path();
+    let (bin, args): (PathBuf, Vec<String>) =
+        if let Some(p) = sidecar::command_path_if_found("uv") {
+            (p, vec!["tool".into(), "install".into(), "markitdown".into()])
+        } else if let Some(p) = sidecar::command_path_if_found("pipx") {
+            (p, vec!["install".into(), "markitdown".into()])
+        } else if let Some(p) = sidecar::command_path_if_found("python3") {
+            (
+                p,
+                vec![
+                    "-m".into(),
+                    "pip".into(),
+                    "install".into(),
+                    "--user".into(),
+                    "markitdown".into(),
+                ],
+            )
+        } else {
+            return Err(
+                "не найдены uv, pipx или python3 — установите Python 3 или uv, затем повторите."
+                    .into(),
+            );
+        };
+    let out = std::process::Command::new(&bin)
+        .args(&args)
+        .env("PATH", &path_env)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "установка не удалась: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+#[tauri::command]
+fn list_spaces(db_state: tauri::State<'_, Arc<Db>>) -> Result<Vec<db::Space>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::list_spaces(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_space(
+    db_state: tauri::State<'_, Arc<Db>>,
+    space_id: String,
+) -> Result<Option<db::Space>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::get_space(&conn, &space_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_space(
+    db_state: tauri::State<'_, Arc<Db>>,
+    name: String,
+    description: Option<String>,
+) -> Result<db::Space, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("название обязательно".into());
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::insert_space(&conn, &id, &name, description.as_deref().unwrap_or("").trim(), now)
+        .map_err(|e| e.to_string())?;
+    db::get_space(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "space not found after insert".to_string())
+}
+
+/// Toggle strict-sources mode for a space. Strict = courses may use ONLY the
+/// space's sources; non-strict = sources are the preferred base but can be
+/// supplemented.
+#[tauri::command]
+fn set_space_strict(
+    db_state: tauri::State<'_, Arc<Db>>,
+    space_id: String,
+    strict: bool,
+) -> Result<bool, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::set_space_strict(&conn, &space_id, strict, now).map_err(|e| e.to_string())?;
+    Ok(strict)
+}
+
+#[tauri::command]
+fn delete_space(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    space_id: String,
+) -> Result<(), String> {
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::delete_space(&conn, &space_id).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(paths_state.space_dir(&space_id));
+    Ok(())
+}
+
+#[tauri::command]
+fn list_space_sources(
+    db_state: tauri::State<'_, Arc<Db>>,
+    space_id: String,
+) -> Result<Vec<db::SpaceSource>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::list_space_sources(&conn, &space_id).map_err(|e| e.to_string())
+}
+
+/// Add a site or repository link (kind = "site" | "repo"). No conversion — the
+/// agent is told it may use these as allowed sources during research.
+#[tauri::command]
+fn add_space_link(
+    db_state: tauri::State<'_, Arc<Db>>,
+    space_id: String,
+    url: String,
+    title: Option<String>,
+    kind: String,
+) -> Result<db::SpaceSource, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("ссылка обязательна".into());
+    }
+    let kind = if kind == "repo" { "repo" } else { "site" };
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| url.clone());
+    let id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::insert_space_source(&conn, &id, &space_id, kind, &title, &url, "ready", None, now)
+        .map_err(|e| e.to_string())?;
+    let _ = db::touch_space(&conn, &space_id, now);
+    db::get_space_source(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "source not found after insert".to_string())
+}
+
+/// Add a local document/image/table. Documents and tables are converted to
+/// Markdown (MarkItDown); images are stored as-is. Conversion is blocking, so
+/// it runs off the main thread.
+#[tauri::command]
+async fn add_space_document(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    space_id: String,
+    file_path: String,
+) -> Result<db::SpaceSource, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<db::SpaceSource, String> {
+    let src = std::path::Path::new(&file_path);
+    if !src.is_file() {
+        return Err(format!("файл не найден: {file_path}"));
+    }
+    let orig_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let kind = classify_source(&ext);
+    let id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+
+    let dir = paths.space_sources_dir(&space_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stored = dir.join(if ext.is_empty() {
+        id.clone()
+    } else {
+        format!("{id}.{ext}")
+    });
+    std::fs::copy(src, &stored).map_err(|e| e.to_string())?;
+
+    let (status, md_path, error): (&str, Option<String>, Option<String>) = if kind == "image" {
+        ("ready", None, None)
+    } else {
+        match document_to_markdown(&stored) {
+            Ok(md) => {
+                let md_name = format!("{id}.md");
+                match std::fs::write(dir.join(&md_name), md) {
+                    Ok(()) => ("ready", Some(md_name), None),
+                    Err(e) => ("failed", None, Some(e.to_string())),
+                }
+            }
+            Err(e) => ("failed", None, Some(e)),
+        }
+    };
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    db::insert_space_source(
+        &conn,
+        &id,
+        &space_id,
+        kind,
+        &orig_name,
+        &orig_name,
+        status,
+        md_path.as_deref(),
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = error {
+        let _ = db::set_space_source_status(&conn, &id, "failed", None, Some(&err));
+    }
+    let _ = db::touch_space(&conn, &space_id, now);
+    db::get_space_source(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "source not found after insert".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Register a LIVE directory on disk as a space source. Nothing is copied — the
+/// path is stored and the agent is granted read access to explore it (read code,
+/// list/grep files) while generating a course grounded in the space.
+#[tauri::command]
+fn add_space_directory(
+    db_state: tauri::State<'_, Arc<Db>>,
+    space_id: String,
+    dir_path: String,
+) -> Result<db::SpaceSource, String> {
+    let root = std::path::Path::new(&dir_path);
+    if !root.is_dir() {
+        return Err(format!("папка не найдена: {dir_path}"));
+    }
+    let canonical = std::fs::canonicalize(root)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let title = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&canonical)
+        .to_string();
+    let id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::insert_space_source(
+        &conn, &id, &space_id, "directory", &title, &canonical, "ready", None, now,
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = db::touch_space(&conn, &space_id, now);
+    db::get_space_source(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "source not found after insert".to_string())
+}
+
+#[tauri::command]
+fn remove_space_source(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    source_id: String,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(src) = db::get_space_source(&conn, &source_id).map_err(|e| e.to_string())? {
+        let dir = paths_state.space_sources_dir(&src.space_id);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with(&format!("{source_id}.")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    db::delete_space_source(&conn, &source_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_space_source_md(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    source_id: String,
+) -> Result<String, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let src = db::get_space_source(&conn, &source_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "источник не найден".to_string())?;
+    let md = src.md_path.ok_or_else(|| "у источника нет markdown".to_string())?;
+    let path = paths_state.space_sources_dir(&src.space_id).join(md);
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+fn crash_log_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".learn-anything").join("crash.log")
+}
+
+/// Persist every panic (message + location + backtrace) to a crash log. The
+/// windowed release build has no console, so a panic during launch — e.g. in
+/// the Tauri `setup` hook, which runs inside macOS `applicationDidFinishLaunching`
+/// — otherwise aborts with no diagnosable message. This runs the hook BEFORE the
+/// abort, so the real cause is always recorded.
+fn install_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let bt = std::backtrace::Backtrace::force_capture();
+        let entry = format!(
+            "\n=== PANIC @ unix {ts} ===\nthread: {}\nlocation: {loc}\nmessage: {payload}\nbacktrace:\n{bt}\n",
+            std::thread::current().name().unwrap_or("<unnamed>"),
+        );
+        let path = crash_log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = f.write_all(entry.as_bytes());
+        }
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_logger();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -2879,9 +4561,14 @@ pub fn run() {
 
             app.manage(Arc::new(AppPaths {
                 courses_root: dir.join("courses"),
+                spaces_root: dir.join("spaces"),
             }));
 
-            app.manage(Arc::new(SettingsState::load(dir.clone())));
+            let settings = Arc::new(SettingsState::load(dir.clone()));
+            // Reflect the persisted debug-logging choice into the runtime flag
+            // the sidecar checks (defaults to on in dev builds).
+            sync_devlog_flag(&app.handle(), settings.debug_logging());
+            app.manage(settings);
 
             let sidecar = Sidecar::spawn(&sidecar_script_path(&app.handle())).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
@@ -2909,6 +4596,12 @@ pub fn run() {
             accept_structure_refinement,
             start_generate_submodule,
             start_first_pending_submodule,
+            start_full_course_generation,
+            translate_course,
+            ask_course_assistant,
+            list_notes,
+            save_note,
+            delete_note,
             read_submodule_article,
             read_submodule_error,
             submit_test_result,
@@ -2939,7 +4632,29 @@ pub fn run() {
             get_catalog_update,
             update_catalog_course,
             get_model_settings,
-            set_model_settings
+            set_model_settings,
+            read_dev_log,
+            clear_dev_log,
+            set_debug_logging,
+            set_image_generation,
+            search_widget_candidates,
+            set_widget_image,
+            generate_widget_image,
+            remove_widget,
+            image_generation_available,
+            list_spaces,
+            get_space,
+            create_space,
+            set_space_strict,
+            delete_space,
+            list_space_sources,
+            add_space_link,
+            add_space_document,
+            add_space_directory,
+            remove_space_source,
+            read_space_source_md,
+            markitdown_status,
+            install_markitdown
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -17,6 +17,7 @@ import process from "node:process";
 
 import * as claude from "./agents/claude.mjs";
 import * as codex from "./agents/codex.mjs";
+import * as devlog from "./lib/devlog.mjs";
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 const log = (...args) => process.stderr.write("[sidecar] " + args.join(" ") + "\n");
@@ -27,6 +28,21 @@ function pickAgent(params) {
   const name = params?.backend ?? "claude";
   if (!agents[name]) throw new Error(`unknown backend: ${name}`);
   return agents[name];
+}
+
+// Best-effort human-readable course/section labels for the dev log. Params
+// don't carry a courseId on the LLM stages, but topic + submodule title pin
+// down which course and section a call belongs to.
+function courseContext(params) {
+  const course =
+    params?.courseId || params?.topic || params?.course?.title || params?.course?.topic || "";
+  const section = params?.submodulePath?.title || params?.modulePath?.title || "";
+  return {
+    course: String(course).slice(0, 100),
+    section: String(section).slice(0, 100),
+    backend: params?.backend ?? "claude",
+    model: params?.modelConfig?.model || "",
+  };
 }
 
 const methods = {
@@ -48,6 +64,10 @@ const methods = {
   review_assignment: async (params, ctx) => pickAgent(params).reviewAssignment(params, ctx),
   list_models: async (params) => pickAgent(params).listModels(),
   generate_image: async (params, ctx) => pickAgent(params).generateImage(params, ctx),
+  translate_strings: async (params) => pickAgent(params).translateStrings(params),
+  translate_markdown: async (params) => pickAgent(params).translateMarkdown(params),
+  detect_image_text_language: async (params) => pickAgent(params).detectImageTextLanguage(params),
+  course_assistant: async (params, ctx) => pickAgent(params).courseAssistant(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };
@@ -97,7 +117,11 @@ rl.on("line", async (line) => {
     },
   };
   try {
-    const result = await handler(params ?? {}, ctx);
+    const meta = { method, ...courseContext(params) };
+    const result =
+      method === "ping"
+        ? await handler(params ?? {}, ctx)
+        : await devlog.runRequest(meta, () => handler(params ?? {}, ctx));
     send({ id, result });
   } catch (e) {
     log("handler error for", method, "—", e?.stack || String(e));

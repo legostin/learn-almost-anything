@@ -1,6 +1,6 @@
 [package]
 name = "learn-almost-anything"
-version = "0.1.10"
+version = "0.1.11"
 description = "Learn (Almost) Anything — local AI tutor"
 authors = ["you"]
 edition = "2021"
@@ -36,3 +36,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-dialog = "2.7.1"

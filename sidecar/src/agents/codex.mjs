@@ -18,6 +18,7 @@ import {
   rendererAvailable,
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
+import * as devlog from "../lib/devlog.mjs";
 import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
@@ -182,17 +183,33 @@ function threadOptions(opts) {
   if (typeof opts?.webSearchEnabled === "boolean") {
     overrides.webSearchEnabled = opts.webSearchEnabled;
   }
+  // Point Codex at a live space directory so its sandbox can explore it (read
+  // code, list/grep files). Pin sandboxMode to read-only so the user's files
+  // can never be modified, created, or deleted.
+  const dirs = Array.isArray(opts?.dirs) ? opts.dirs.filter(Boolean) : [];
+  if (dirs.length) {
+    overrides.workingDirectory = dirs[0];
+    overrides.sandboxMode = "read-only";
+  }
   return { ...baseThreadOptions, ...overrides, ...modelThreadOptions(opts?.modelConfig) };
 }
 
 async function runOnce(prompt, outputSchema, opts) {
-  const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
-  const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
-  return turn.finalResponse;
+  const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
+  try {
+    const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
+    const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
+    rec.end(turn.finalResponse);
+    return turn.finalResponse;
+  } catch (e) {
+    rec.error(e);
+    throw e;
+  }
 }
 
 async function runStreamed(prompt, outputSchema, onProgress, opts) {
   if (!onProgress) return await runOnce(prompt, outputSchema, opts);
+  const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
   const idleTimeoutMs = opts?.idleTimeoutMs ?? 0;
   const totalTimeoutMs = opts?.totalTimeoutMs ?? 0;
   const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
@@ -262,14 +279,24 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
         const item = ev.item;
         if (item?.type === "agent_message" && typeof item.text === "string") {
           final = item.text;
+        } else if (item?.type === "reasoning" && typeof item.text === "string" && item.text.trim()) {
+          rec.reasoning(item.text);
+        } else if (item?.type === "web_search") {
+          rec.tool("web_search", item.query || "");
+        } else if (item?.type === "command_execution" && item.command) {
+          rec.tool("command", String(item.command).slice(0, 200));
+        } else if (item?.type === "mcp_tool_call") {
+          rec.tool("mcp", `${item.server}.${item.tool}`);
         }
       } else if (ev.type === "error") {
         throw new Error(ev.message || "codex stream error");
       }
     }
     if (!final.trim()) throw new Error("Codex response missing final message");
+    rec.end(final);
     return final;
   } catch (e) {
+    rec.error(e);
     if (timeoutReason) throw new Error(timeoutReason);
     throw e;
   } finally {
@@ -558,6 +585,117 @@ const testSchema = {
 /**
  * @param {{topic:string, language:string, submodulePath:{title:string,summary:string}, article:string, braveApiKey?:string}} params
  */
+export async function translateStrings({ sourceLang, targetLang, strings, modelConfig }) {
+  const arr = Array.isArray(strings) ? strings : [];
+  if (!arr.length) return { translations: [] };
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { translations: { type: "array", items: { type: "string" } } },
+    required: ["translations"],
+  };
+  const prompt = `Translate each element of this JSON array of strings from language "${sourceLang || "auto"}" into language "${targetLang}".
+- Keep meaning and tone; use idiomatic, professional target-language terminology.
+- Do NOT translate code, identifiers, file paths, URLs, numbers, or {placeholders} — keep them verbatim.
+- Preserve order and array length exactly: translations[i] is the translation of input[i].
+Return { "translations": [...] }.
+
+${JSON.stringify(arr)}`;
+  const text = await runOnce(prompt, schema, { modelConfig });
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    /* leave empty */
+  }
+  const out = Array.isArray(parsed?.translations) ? parsed.translations : [];
+  return { translations: out.map((x) => String(x ?? "")) };
+}
+
+export async function translateMarkdown({ sourceLang, targetLang, markdown, modelConfig }) {
+  if (typeof markdown !== "string" || !markdown.trim()) return { markdown: markdown || "" };
+  const prompt = `Translate the following Markdown lesson from language "${sourceLang || "auto"}" into language "${targetLang}". Rules:
+- Translate ALL prose and headings into ${targetLang} with natural, professional wording.
+- Keep the Markdown structure identical (headings, lists, tables, blockquotes, emphasis).
+- Do NOT translate or alter fenced code blocks or inline code — keep code verbatim; you MAY translate code COMMENTS into ${targetLang}.
+- Keep LaTeX/math ($...$, $$...$$) intact.
+- Keep every ::widget{...} marker line EXACTLY as-is.
+- Keep URLs, identifiers, numbers and {placeholders} unchanged.
+Return ONLY the translated Markdown, nothing else.
+
+${markdown}`;
+  const text = await runOnce(prompt, undefined, { modelConfig });
+  return { markdown: (text || "").trim() || markdown };
+}
+
+export async function courseAssistant(
+  {
+    language,
+    topic,
+    structure,
+    article,
+    fragment,
+    question,
+    history,
+    spaceSources,
+    spaceLinks,
+    spaceDirs,
+    spaceStrict,
+    imagePath,
+    modelConfig,
+  },
+  ctx
+) {
+  const lang = (language || "en").trim();
+  const hist = Array.isArray(history) ? history.slice(-8) : [];
+  const histBlock = hist.length
+    ? `Conversation so far:\n${hist
+        .map((m) => `${m.role === "assistant" ? "Assistant" : "Learner"}: ${m.text}`)
+        .join("\n")}\n\n`
+    : "";
+  const fragBlock =
+    fragment && String(fragment).trim()
+      ? `The learner highlighted this fragment from the course material — focus your answer on it:\n<fragment>\n${fragment}\n</fragment>\n\n`
+      : "";
+  const articleBlock =
+    article && String(article).trim()
+      ? `The lesson the learner is currently reading:\n<lesson>\n${article}\n</lesson>\n\n`
+      : "";
+  const prompt = `You are a knowledgeable, friendly tutor for a learner taking a course on "${topic}". Answer the learner's question in language "${lang}".
+Ground your answer in the COURSE PROGRAM and the lesson material below; prefer the course's own framing and terminology. If the question is outside the course's scope, say so briefly and still help where you can.
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
+Course program (curriculum):
+<structure>
+${JSON.stringify(structure ?? {}, null, 2)}
+</structure>
+
+${articleBlock}${fragBlock}${histBlock}Learner's question: ${question}
+
+Answer in ${lang}, in Markdown. Be concise but complete; use examples or code where they help.`;
+  // Attached image → send it as a local_image input item so Codex can see it.
+  const input =
+    imagePath && String(imagePath).trim()
+      ? [
+          {
+            type: "text",
+            text: `${prompt}\n\nThe learner attached an image — examine it carefully and ground your answer in what it actually shows (e.g. judge whether something is drawn/done correctly).`,
+          },
+          { type: "local_image", path: imagePath },
+        ]
+      : prompt;
+  const text = await runStreamed(input, undefined, ctx?.progress, {
+    modelConfig,
+    dirs: spaceDirs,
+  });
+  return { answer: (text || "").trim() };
+}
+
+// Vision text-language detection is done via Claude (the Rust side forces
+// backend="claude"); this codex stub keeps the method present and safe.
+export async function detectImageTextLanguage() {
+  return { hasText: false, language: "", translate: false };
+}
+
 export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { questions: [] };
@@ -1043,6 +1181,46 @@ const draftSchema = {
   ],
 };
 
+// Renders the grounding block for a course scoped to a Space: curated reference
+// documents + allowed sites/repos. Empty string when the course has no space.
+function spaceContextBlock(spaceSources, spaceLinks, lang, strict = true, spaceDirs = []) {
+  const docs = Array.isArray(spaceSources) ? spaceSources : [];
+  const links = Array.isArray(spaceLinks) ? spaceLinks : [];
+  const dirs = Array.isArray(spaceDirs) ? spaceDirs : [];
+  if (!docs.length && !links.length && !dirs.length) return "";
+  let out = strict
+    ? `\n=== SCOPED COURSE — STRICT SOURCE RULE ===
+This course is built inside a SPACE: a closed knowledge base. The ONLY permitted source of information for this course is the material listed below — the attached documents and the explicitly allowed sites/repositories. Hard rules:
+- Use ONLY this material. Do NOT use your own background knowledge, do NOT invent facts, examples, names, numbers, dates or sources, and do NOT do general web research.
+- This OVERRIDES any instruction elsewhere in this prompt to research how the subject is taught, to web-search, or to consult universities, Context7, Wikipedia/MediaWiki, etc. Those do NOT apply here.
+- Build the curriculum and write every lesson EXCLUSIVELY from what this material actually contains. Cover what the sources cover, at the depth they cover it — no more.
+- If the brief asks for something the sources do not address, omit it or note it is out of scope. Never fill the gap from outside.
+- Write in language "${lang}".\n`
+    : `\n=== SCOPED COURSE — PRIMARY SOURCES ===
+This course is built inside a SPACE. Form the BASE of the course from the material listed below — it is the primary, authoritative source and the backbone of the curriculum and the lessons. You MAY supplement it with your own knowledge and targeted research to fill gaps, add depth, or clarify — but the space material must stay the foundation, the structure should follow it, and you must never contradict it. Write in language "${lang}".\n`;
+  if (links.length) {
+    out += strict
+      ? `\nAllowed external sources — you MAY fetch/read these, and ONLY these (no other URLs or searches):\n`
+      : `\nPreferred sources — start from these and favor them over the open web:\n`;
+    out += links.map((l) => `- [${l.kind}] ${l.title}: ${l.url}`).join("\n") + "\n";
+  }
+  if (dirs.length) {
+    out += `\nLocal directories you can READ and explore with your file tools (list, open, grep) — live source material such as a codebase. Read what you need to ground the course in the ACTUAL files; do not invent file contents:\n`;
+    out += dirs.map((d) => `- ${d}`).join("\n") + "\n";
+  }
+  if (docs.length) {
+    out += `\nSource documents (the authoritative material for this course):\n`;
+    out += docs
+      .map(
+        (d, i) =>
+          `\n<source ${i + 1} title="${String(d.title || "").replace(/"/g, "'")}" kind="${d.kind || "document"}">\n${d.content || ""}\n</source>`
+      )
+      .join("\n");
+    out += "\n";
+  }
+  return out + "\n";
+}
+
 async function draftArticleInternal(
   {
     topic,
@@ -1056,6 +1234,10 @@ async function draftArticleInternal(
     previousArticles,
     braveApiKey,
     modelConfig,
+    spaceSources,
+    spaceLinks,
+    spaceDirs,
+    spaceStrict,
   },
   onProgress
 ) {
@@ -1082,7 +1264,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -1098,7 +1280,19 @@ continuity. Never contradict them.
 
 For non-podcast formats, you may add visual-aid widgets where they meaningfully help. Be friendly to
 illustration count: on visual subjects, prefer several useful visuals over one
-token image. Mark insertion
+token image.
+
+For abstract software / programming concepts — code patterns and refactors,
+comparing two functions or approaches (e.g. duplicate functions like fetchUser
+vs getUserById), architecture or decision trade-offs, code smells, edge cases,
+before/after — do NOT use image or gallery widgets: a searched or generated
+picture of these is meaningless or hallucinated. Show them as real Markdown
+code blocks and concrete textual examples right in the prose. Reserve
+image/gallery widgets for genuinely visual subjects (real photographs, real UI
+screenshots found via search, real diagrams/charts of real data, physical
+objects).
+
+Mark insertion
 points with a single line, alone, with blank lines above and below:
 
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
@@ -1161,6 +1355,12 @@ For every image item, keep two fields separate:
     subject, style, composition, lighting, and important objects.
 
 Hard visual sourcing rules:
+  • NEVER generate a screenshot of ANY kind — app/program UI, website or web page,
+    terminal/console, dashboard, mobile screen, code editor, settings panel, error
+    dialog, or any on-screen interface. Screenshots may ONLY come from "search" for
+    a real one. If a real screenshot cannot be confidently found, SKIP the image
+    (or describe it in text / use a Mermaid diagram). Under no circumstances set
+    mode "generate" for a screenshot.
   • Famous artwork by a known artist -> ALWAYS "search", never "generate".
     Prefer museum, Wikimedia, official collection, archive, or other credible
     source pages. If the exact artwork cannot be found, skip the image rather
@@ -1175,6 +1375,14 @@ Hard visual sourcing rules:
   • Real map/plan/schema (e.g. Hermitage floor plan) -> search for the real
     image/source. If not found, do not hallucinate the plan. Use a textual
     explanation or high-level Mermaid diagram only if it is clearly conceptual.
+  • Technically precise or mechanically detailed subjects we cannot draw
+    correctly -> "search" only, NEVER "generate". Examples: a specific car's
+    engine, its belt-routing/serpentine diagram, a wiring or circuit schematic,
+    an anatomical chart, a chemical apparatus, an exploded parts view, or any
+    exact technical diagram. These are wrong the instant a single detail is off,
+    and a generated one only looks authoritative while being false. If a real
+    image cannot be found, SKIP the image — show nothing. Truthfulness over
+    completeness: a missing image beats a confident, wrong one.
   • Artist workspace, table setup, material layout, abstract workflow, or
     custom teaching scene -> usually "generate", because a perfectly matching
     real photo is unlikely.
@@ -1250,7 +1458,11 @@ Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
 
 ${languageStyleGuide(lang)}`;
   onProgress?.({ label: "thinking" });
-  const text = await runStreamed(prompt, draftSchema, onProgress, { braveApiKey, modelConfig });
+  const text = await runStreamed(prompt, draftSchema, onProgress, {
+    braveApiKey,
+    modelConfig,
+    dirs: spaceDirs,
+  });
   const parsed = JSON.parse(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
     throw new Error("Codex returned no article");
@@ -1925,7 +2137,20 @@ export async function refineStructure(params, ctx) {
 /**
  * @param {{ courseMd: string, topic: string, language: string, courseFormat?: string }} params
  */
-export async function buildStructure({ courseMd, topic, language, courseFormat, modelConfig }, ctx) {
+export async function buildStructure(
+  {
+    courseMd,
+    topic,
+    language,
+    courseFormat,
+    modelConfig,
+    spaceSources,
+    spaceLinks,
+    spaceDirs,
+    spaceStrict,
+  },
+  ctx
+) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
@@ -1943,7 +2168,7 @@ Below is the course brief — a markdown file with the wizard Q&A.
 <course-md>
 ${courseMd}
 </course-md>
-
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
 First generate a short display title for the whole course. It must NOT copy the
 learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
 written in language "${lang}", with no quotes and no "course about/on" wrapper.
@@ -2012,6 +2237,7 @@ ${languageStyleGuide(lang)}`;
 
   const text = await runStreamed(prompt, schema, ctx?.progress, {
     modelConfig,
+    dirs: spaceDirs,
     idleTimeoutMs: 180_000,
     totalTimeoutMs: 900_000,
   });
@@ -2019,21 +2245,26 @@ ${languageStyleGuide(lang)}`;
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
     throw new Error("Codex response missing non-empty 'modules' array");
   }
-  const modules = parsed.modules.map((m) => {
-    if (typeof m?.title !== "string" || !m.title.trim()) {
-      throw new Error("module missing title");
-    }
-    const submodules = Array.isArray(m.submodules) ? m.submodules : [];
-    return {
-      title: m.title.trim(),
-      summary: typeof m.summary === "string" ? m.summary.trim() : "",
-      submodules: submodules
-        .filter((s) => s && typeof s.title === "string" && s.title.trim())
-        .map((s) => ({
-          title: s.title.trim(),
-          summary: typeof s.summary === "string" ? s.summary.trim() : "",
-        })),
-    };
-  });
+  // Drop modules without a usable title instead of throwing away the whole
+  // (often otherwise-good) generation — same tolerance we already apply to
+  // submodules below. The model occasionally appends a stray/blank module.
+  const modules = parsed.modules
+    .filter((m) => m && typeof m.title === "string" && m.title.trim())
+    .map((m) => {
+      const submodules = Array.isArray(m.submodules) ? m.submodules : [];
+      return {
+        title: m.title.trim(),
+        summary: typeof m.summary === "string" ? m.summary.trim() : "",
+        submodules: submodules
+          .filter((s) => s && typeof s.title === "string" && s.title.trim())
+          .map((s) => ({
+            title: s.title.trim(),
+            summary: typeof s.summary === "string" ? s.summary.trim() : "",
+          })),
+      };
+    });
+  if (modules.length === 0) {
+    throw new Error("response had no modules with a title");
+  }
   return { title: normalizeCourseTitle(parsed?.title), modules };
 }

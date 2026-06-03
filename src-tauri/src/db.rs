@@ -28,7 +28,7 @@ pub fn open(path: &Path) -> Result<Db, DbError> {
     Ok(Db(Mutex::new(conn)))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Course {
     pub id: String,
     pub topic: String,
@@ -42,6 +42,9 @@ pub struct Course {
     pub catalog_origin_id: Option<String>,
     pub catalog_version: i64,
     pub catalog_synced_at: Option<i64>,
+    pub space_id: Option<String>,
+    pub strict_sources: Option<bool>,
+    pub translated_from: Option<String>,
 }
 
 pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
@@ -54,7 +57,7 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
     }
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at";
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -70,7 +73,39 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         catalog_origin_id: r.get(9)?,
         catalog_version: r.get(10)?,
         catalog_synced_at: r.get(11)?,
+        space_id: r.get(12)?,
+        strict_sources: r.get::<_, Option<i64>>(13)?.map(|v| v != 0),
+        translated_from: r.get(14)?,
     })
+}
+
+/// Insert a translated copy of `source` in `language`, linked via translated_from.
+pub fn insert_translated_course(
+    conn: &Connection,
+    id: &str,
+    source: &Course,
+    language: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO courses \
+         (id, topic, title, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, translated_from) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11)",
+        rusqlite::params![
+            id,
+            source.topic,
+            source.title,
+            language,
+            source.course_format,
+            source.status,
+            source.agent,
+            now,
+            source.space_id,
+            source.strict_sources.map(|b| b as i64),
+            source.id,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn list_courses(conn: &Connection) -> Result<Vec<Course>, rusqlite::Error> {
@@ -88,17 +123,21 @@ pub fn insert_course(
     course_format: &str,
     agent: &str,
     now: i64,
+    space_id: Option<&str>,
+    strict_sources: Option<bool>,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO courses (id, topic, language, course_format, status, agent, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, 'wizard', ?5, ?6, ?6)",
+        "INSERT INTO courses (id, topic, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources) \
+         VALUES (?1, ?2, ?3, ?4, 'wizard', ?5, ?6, ?6, ?7, ?8)",
         rusqlite::params![
             id,
             topic,
             language,
             normalize_course_format(Some(course_format)),
             agent,
-            now
+            now,
+            space_id,
+            strict_sources.map(|b| b as i64),
         ],
     )?;
     Ok(())
@@ -321,6 +360,20 @@ pub fn delete_modules_for_course(
     Ok(())
 }
 
+/// Update just a module's title + summary (used by translation).
+pub fn update_module_text(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    summary: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET title = ?2, summary = ?3 WHERE id = ?1",
+        rusqlite::params![id, title, if summary.is_empty() { None } else { Some(summary) }],
+    )?;
+    Ok(())
+}
+
 pub fn update_module(
     conn: &Connection,
     id: &str,
@@ -352,6 +405,20 @@ pub fn set_module_generation_state(
         rusqlite::params![id, state],
     )?;
     Ok(())
+}
+
+pub fn queue_pending_submodules(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules \
+         SET generation_state = 'queued' \
+         WHERE course_id = ?1 \
+           AND parent_id IS NOT NULL \
+           AND generation_state = 'pending'",
+        [course_id],
+    )
 }
 
 /// Reset any submodules left in 'generating' state from a previous app run.
@@ -438,6 +505,29 @@ pub fn first_pending_submodule(
     })
 }
 
+/// (module_id, submodule_id) of the first queued submodule in plan order.
+pub fn first_queued_submodule(
+    conn: &Connection,
+    course_id: &str,
+) -> Result<Option<(String, String)>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT m.parent_id, m.id FROM modules m \
+         JOIN modules p ON p.id = m.parent_id \
+         WHERE m.course_id = ?1 \
+           AND m.parent_id IS NOT NULL \
+           AND m.generation_state = 'queued' \
+         ORDER BY p.position, m.position \
+         LIMIT 1",
+        [course_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
+}
+
 pub fn has_generating_submodule(
     conn: &Connection,
     course_id: &str,
@@ -453,4 +543,179 @@ pub fn has_generating_submodule(
         |r| r.get::<_, i64>(0),
     )
     .map(|v| v != 0)
+}
+
+// ===== Spaces =====
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Space {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub strict: bool,
+    pub source_count: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SpaceSource {
+    pub id: String,
+    pub space_id: String,
+    pub kind: String,
+    pub title: String,
+    pub r#ref: String,
+    pub status: String,
+    pub md_path: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
+const SPACE_SELECT: &str = "SELECT s.id, s.name, s.description, s.created_at, s.updated_at, \
+    s.strict_sources, \
+    (SELECT COUNT(*) FROM space_sources ss WHERE ss.space_id = s.id) FROM spaces s";
+
+fn row_to_space(r: &rusqlite::Row) -> rusqlite::Result<Space> {
+    Ok(Space {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        description: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+        strict: r.get::<_, i64>(5)? != 0,
+        source_count: r.get(6)?,
+    })
+}
+
+pub fn list_spaces(conn: &Connection) -> Result<Vec<Space>, rusqlite::Error> {
+    let sql = format!("{SPACE_SELECT} ORDER BY s.updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_space)?;
+    rows.collect()
+}
+
+pub fn get_space(conn: &Connection, id: &str) -> Result<Option<Space>, rusqlite::Error> {
+    let sql = format!("{SPACE_SELECT} WHERE s.id = ?1");
+    conn.query_row(&sql, [id], row_to_space)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+pub fn insert_space(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO spaces (id, name, description, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        rusqlite::params![id, name, description, now],
+    )?;
+    Ok(())
+}
+
+pub fn touch_space(conn: &Connection, id: &str, now: i64) -> Result<(), rusqlite::Error> {
+    conn.execute("UPDATE spaces SET updated_at = ?2 WHERE id = ?1", rusqlite::params![id, now])?;
+    Ok(())
+}
+
+pub fn set_space_strict(
+    conn: &Connection,
+    id: &str,
+    strict: bool,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE spaces SET strict_sources = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, strict as i64, now],
+    )?;
+    Ok(())
+}
+
+pub fn delete_space(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM spaces WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+const SOURCE_COLS: &str =
+    "id, space_id, kind, title, ref, status, md_path, error, created_at";
+
+fn row_to_source(r: &rusqlite::Row) -> rusqlite::Result<SpaceSource> {
+    Ok(SpaceSource {
+        id: r.get(0)?,
+        space_id: r.get(1)?,
+        kind: r.get(2)?,
+        title: r.get(3)?,
+        r#ref: r.get(4)?,
+        status: r.get(5)?,
+        md_path: r.get(6)?,
+        error: r.get(7)?,
+        created_at: r.get(8)?,
+    })
+}
+
+pub fn list_space_sources(
+    conn: &Connection,
+    space_id: &str,
+) -> Result<Vec<SpaceSource>, rusqlite::Error> {
+    let sql = format!("SELECT {SOURCE_COLS} FROM space_sources WHERE space_id = ?1 ORDER BY created_at ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([space_id], row_to_source)?;
+    rows.collect()
+}
+
+pub fn get_space_source(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<SpaceSource>, rusqlite::Error> {
+    let sql = format!("SELECT {SOURCE_COLS} FROM space_sources WHERE id = ?1");
+    conn.query_row(&sql, [id], row_to_source)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_space_source(
+    conn: &Connection,
+    id: &str,
+    space_id: &str,
+    kind: &str,
+    title: &str,
+    reference: &str,
+    status: &str,
+    md_path: Option<&str>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO space_sources (id, space_id, kind, title, ref, status, md_path, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![id, space_id, kind, title, reference, status, md_path, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_space_source_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    md_path: Option<&str>,
+    error: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE space_sources SET status = ?2, md_path = ?3, error = ?4 WHERE id = ?1",
+        rusqlite::params![id, status, md_path, error],
+    )?;
+    Ok(())
+}
+
+pub fn delete_space_source(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM space_sources WHERE id = ?1", [id])?;
+    Ok(())
 }
