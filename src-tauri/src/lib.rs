@@ -4570,7 +4570,7 @@ pub fn run() {
             sync_devlog_flag(&app.handle(), settings.debug_logging());
             app.manage(settings);
 
-            let sidecar = Sidecar::spawn(&sidecar_script_path(&app.handle())).map_err(|e| {
+            let sidecar = Sidecar::spawn(&sidecar_script_path(&app.handle()), &dir).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
             })?;
             app.manage(Arc::new(sidecar));

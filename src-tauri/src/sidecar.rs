@@ -353,11 +353,17 @@ fn executable_exists(path: &Path) -> bool {
 }
 
 impl Sidecar {
-    pub fn spawn(script: &Path) -> Result<Self, SidecarError> {
+    pub fn spawn(script: &Path, cwd: &Path) -> Result<Self, SidecarError> {
         let expanded_path = expanded_path();
         let mut command = Command::new(command_path("node"));
         command
             .arg(script)
+            // Pin the working directory to an app-owned folder. Launched from
+            // Finder the app inherits cwd "/", which the spawned agent CLIs
+            // (claude/codex) also inherit; exploring the filesystem from root
+            // makes them touch macOS-protected ~/Desktop etc. and trip a TCC
+            // prompt. A neutral app dir keeps them out of the user's files.
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Pipe (don't inherit) stderr: in the release build
