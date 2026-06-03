@@ -824,6 +824,7 @@ fn spawn_generate_submodule(
             "spaceLinks": space_links,
             "spaceDirs": space_dirs,
             "spaceStrict": space_strict,
+            "category": course.category,
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);

@@ -45,6 +45,7 @@ pub struct Course {
     pub space_id: Option<String>,
     pub strict_sources: Option<bool>,
     pub translated_from: Option<String>,
+    pub category: Option<String>,
 }
 
 pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
@@ -57,7 +58,7 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
     }
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from";
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -76,6 +77,7 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         space_id: r.get(12)?,
         strict_sources: r.get::<_, Option<i64>>(13)?.map(|v| v != 0),
         translated_from: r.get(14)?,
+        category: r.get(15)?,
     })
 }
 
@@ -89,8 +91,8 @@ pub fn insert_translated_course(
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO courses \
-         (id, topic, title, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, translated_from) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11)",
+         (id, topic, title, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, translated_from, category) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             id,
             source.topic,
@@ -103,6 +105,7 @@ pub fn insert_translated_course(
             source.space_id,
             source.strict_sources.map(|b| b as i64),
             source.id,
+            source.category,
         ],
     )?;
     Ok(())
@@ -276,6 +279,42 @@ pub fn set_course_title(
     conn.execute(
         "UPDATE courses SET title = ?2, updated_at = ?3 WHERE id = ?1",
         rusqlite::params![id, title, now],
+    )?;
+    Ok(())
+}
+
+/// Valid course category ids. Keep in sync with sidecar/src/lib/categories.mjs
+/// (CATEGORY_IDS) and src/App.tsx (CATEGORY_LABELS).
+pub const CATEGORY_IDS: &[&str] = &[
+    "programming",
+    "data_ai",
+    "science_math",
+    "engineering",
+    "business",
+    "humanities",
+    "social_science",
+    "arts_design",
+    "music",
+    "language",
+    "health",
+    "lifestyle",
+    "general",
+];
+
+/// Lowercase/trim a value to a valid category id, or None.
+pub fn normalize_category(value: Option<&str>) -> Option<String> {
+    let v = value?.trim().to_lowercase();
+    CATEGORY_IDS.contains(&v.as_str()).then_some(v)
+}
+
+pub fn set_course_category(
+    conn: &Connection,
+    id: &str,
+    category: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET category = ?2 WHERE id = ?1",
+        rusqlite::params![id, category],
     )?;
     Ok(())
 }

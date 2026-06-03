@@ -20,6 +20,12 @@ import {
 import { braveStdioServer } from "../lib/brave.mjs";
 import * as devlog from "../lib/devlog.mjs";
 import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
+import {
+  categoryClassifyGuide,
+  categoryPreferredSourcesBlock,
+  normalizeCategory,
+  CATEGORY_IDS,
+} from "../lib/categories.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
@@ -1238,10 +1244,19 @@ async function draftArticleInternal(
     spaceLinks,
     spaceDirs,
     spaceStrict,
+    category,
   },
   onProgress
 ) {
   const lang = (language || "en").trim();
+  // Recommended sources for the course's category — but never when a strict
+  // space is in force (that course may use ONLY its space material).
+  const hasSpaceMaterial =
+    (Array.isArray(spaceSources) && spaceSources.length) ||
+    (Array.isArray(spaceLinks) && spaceLinks.length) ||
+    (Array.isArray(spaceDirs) && spaceDirs.length);
+  const categoryBlock =
+    spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
   const memoryBlock =
     memoryFiles && memoryFiles.length
       ? `Past user feedback (apply to tone and content):\n${memoryFiles
@@ -1264,7 +1279,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -2207,7 +2222,11 @@ Constraints:
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
 
-${languageStyleGuide(lang)}`;
+${languageStyleGuide(lang)}
+
+Also classify this course into exactly ONE category id from this fixed list
+(pick the single best fit; use "general" only when nothing else clearly fits):
+${categoryClassifyGuide()}`;
 
   const submoduleSchema = {
     type: "object",
@@ -2223,6 +2242,7 @@ ${languageStyleGuide(lang)}`;
     type: "object",
     additionalProperties: false,
     properties: {
+      category: { type: "string", enum: CATEGORY_IDS },
       title: { type: "string" },
       modules: {
         type: "array",
@@ -2245,7 +2265,7 @@ ${languageStyleGuide(lang)}`;
         },
       },
     },
-    required: ["title", "modules"],
+    required: ["category", "title", "modules"],
   };
 
   const text = await runStreamed(prompt, schema, ctx?.progress, {
@@ -2279,5 +2299,9 @@ ${languageStyleGuide(lang)}`;
   if (modules.length === 0) {
     throw new Error("response had no modules with a title");
   }
-  return { title: normalizeCourseTitle(parsed?.title), modules };
+  return {
+    title: normalizeCourseTitle(parsed?.title),
+    modules,
+    category: normalizeCategory(parsed?.category),
+  };
 }

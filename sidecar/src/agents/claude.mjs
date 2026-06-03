@@ -19,6 +19,11 @@ import {
 import { braveStdioServer } from "../lib/brave.mjs";
 import * as devlog from "../lib/devlog.mjs";
 import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
+import {
+  categoryClassifyGuide,
+  categoryPreferredSourcesBlock,
+  normalizeCategory,
+} from "../lib/categories.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
@@ -378,10 +383,19 @@ async function draftArticleInternal(
     spaceLinks,
     spaceDirs,
     spaceStrict,
+    category,
   },
   onProgress
 ) {
   const lang = (language || "en").trim();
+  // Recommended sources for the course's category — but never when a strict
+  // space is in force (that course may use ONLY its space material).
+  const hasSpaceMaterial =
+    (Array.isArray(spaceSources) && spaceSources.length) ||
+    (Array.isArray(spaceLinks) && spaceLinks.length) ||
+    (Array.isArray(spaceDirs) && spaceDirs.length);
+  const categoryBlock =
+    spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
   const memoryBlock =
     memoryFiles && memoryFiles.length
       ? `Past user feedback (apply to tone and content):\n${memoryFiles
@@ -404,7 +418,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -1356,9 +1370,13 @@ Constraints:
 
 ${languageStyleGuide(lang)}
 
+Also classify this course into exactly ONE category id from this fixed list
+(pick the single best fit; use "general" only when nothing else clearly fits):
+${categoryClassifyGuide()}
+
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
-{"title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
+{"category":"<one id from the list above>","title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
   const text = await runStreamed(prompt, ctx?.progress, {
     web: true,
     modelConfig,
@@ -1389,7 +1407,11 @@ Shape:
   if (modules.length === 0) {
     throw new Error("response had no modules with a title");
   }
-  return { title: normalizeCourseTitle(parsed?.title), modules };
+  return {
+    title: normalizeCourseTitle(parsed?.title),
+    modules,
+    category: normalizeCategory(parsed?.category),
+  };
 }
 
 /**

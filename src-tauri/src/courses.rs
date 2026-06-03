@@ -164,6 +164,8 @@ pub struct SidecarModule {
 pub struct SidecarTree {
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
     pub modules: Vec<SidecarModule>,
 }
 
@@ -199,6 +201,9 @@ pub fn install_structure(
 ) -> Result<StructureFile, CourseError> {
     if let Some(title) = raw.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         db::set_course_title(conn, course_id, title, now_secs()?)?;
+    }
+    if let Some(category) = db::normalize_category(raw.category.as_deref()) {
+        db::set_course_category(conn, course_id, &category)?;
     }
 
     // assign UUIDs in a single pass

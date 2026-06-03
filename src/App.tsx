@@ -77,7 +77,31 @@ type Course = {
   catalog_synced_at?: number | null;
   space_id?: string | null;
   translated_from?: string | null;
+  category?: string | null;
 };
+
+// Localized labels for the agent-assigned subject category. Keep the id set in
+// sync with sidecar/src/lib/categories.mjs and db.rs normalize_category.
+const CATEGORY_LABELS: Record<string, Record<Lang, string>> = {
+  programming: { en: "Programming", ru: "Программирование" },
+  data_ai: { en: "Data & AI", ru: "Данные и ИИ" },
+  science_math: { en: "Science & Math", ru: "Наука и математика" },
+  engineering: { en: "Engineering", ru: "Инженерия" },
+  business: { en: "Business & Finance", ru: "Бизнес и финансы" },
+  humanities: { en: "History & Humanities", ru: "История и гуманитарные" },
+  social_science: { en: "Social Sciences", ru: "Социальные науки" },
+  arts_design: { en: "Arts & Design", ru: "Искусство и дизайн" },
+  music: { en: "Music", ru: "Музыка" },
+  language: { en: "Languages", ru: "Языки" },
+  health: { en: "Health & Medicine", ru: "Здоровье и медицина" },
+  lifestyle: { en: "Lifestyle & Skills", ru: "Быт и навыки" },
+  general: { en: "General", ru: "Общее" },
+};
+
+function categoryLabel(cat: string | null | undefined, lang: Lang): string | null {
+  if (!cat) return null;
+  return CATEGORY_LABELS[cat]?.[lang] ?? null;
+}
 
 type CatalogCourse = {
   id: string;
@@ -1249,7 +1273,10 @@ function App() {
                   {hasRunning && <span className="spinner" title={t("generatingTitle")} />}
                 </div>
                 <div className="course-meta">
-                  {c.language} · {courseLifecycleStatusLabel(c.status, t)}
+                  {c.language}
+                  {categoryLabel(c.category, uiLang) && ` · ${categoryLabel(c.category, uiLang)}`}
+                  {" · "}
+                  {courseLifecycleStatusLabel(c.status, t)}
                 </div>
               </li>
             );
@@ -4144,6 +4171,7 @@ function CourseView({
   translateStatus?: { done: number; total: number; complete: boolean };
 }) {
   const t = useT();
+  const [uiLang] = useLang();
   const [translateOpen, setTranslateOpen] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -4237,6 +4265,9 @@ function CourseView({
       <CourseHeaderTitle course={course} />
       <div className="course-meta-full">
         <span className="lang-pill">{course.language}</span>
+        {categoryLabel(course.category, uiLang) && (
+          <span className="category-pill">{categoryLabel(course.category, uiLang)}</span>
+        )}
         <select
           className={`agent-pill agent-select agent-${course.agent}`}
           value={course.agent}
