@@ -38,7 +38,8 @@
     "build": "node scripts/copy-sidecar.mjs && node scripts/sign-sidecar-native.mjs && tsc && vite build && node scripts/verify-sidecar.mjs",
     "build:watch": "vite build --watch",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
