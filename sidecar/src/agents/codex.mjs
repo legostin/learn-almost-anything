@@ -1285,12 +1285,15 @@ token image.
 For abstract software / programming concepts — code patterns and refactors,
 comparing two functions or approaches (e.g. duplicate functions like fetchUser
 vs getUserById), architecture or decision trade-offs, code smells, edge cases,
-before/after — do NOT use image or gallery widgets: a searched or generated
-picture of these is meaningless or hallucinated. Show them as real Markdown
-code blocks and concrete textual examples right in the prose. Reserve
-image/gallery widgets for genuinely visual subjects (real photographs, real UI
-screenshots found via search, real diagrams/charts of real data, physical
-objects).
+before/after — and for AI / LLM material — prompts, system prompts, context
+windows, tool/function schemas, JSON or config payloads, command output, logs,
+or any other text/code artifact — do NOT use image or gallery widgets: a
+searched or generated picture of these is meaningless or hallucinated. Instead,
+write a concrete, self-authored example INLINE as a real Markdown fenced code
+block — invent a representative snippet rather than searching for or generating
+one as an image. Reserve image/gallery widgets for genuinely visual subjects
+(real photographs, real UI screenshots found via search, real diagrams/charts
+of real data, physical objects).
 
 Mark insertion
 points with a single line, alone, with blank lines above and below:
@@ -1646,13 +1649,22 @@ ${JSON.stringify(existingWidgets, null, 2)}
 
 Existing widget ids: ${existingIds.join(", ") || "(none)"}
 
-Do a silent paragraph-by-paragraph visual pass. For every paragraph, decide
-whether an image or gallery would make the learner understand faster. Add a
-visual only where it is genuinely useful: a concrete object, place, artwork,
-diagram-like visual reference, comparison set, setup, material layout, or
-example the learner should inspect. Be friendly to illustration count on visual
-subjects: several precise illustrations are better than one token image. Do not
-decorate every paragraph.
+Do a silent paragraph-by-paragraph pass. For every paragraph, decide ONE of:
+- nothing — the prose stands on its own; leave it unchanged.
+- a real image/gallery would help the learner understand faster — a concrete
+  object, place, artwork, diagram-like visual reference, comparison set, setup,
+  material layout, or example the learner should inspect. Insert a widget marker
+  and choose how to find it ("search" for a real existing thing, "generate" for
+  a conceptual teaching scene).
+- the point is really a code or AI/LLM / text artifact — a code pattern or
+  before/after, a prompt or system prompt, a context window, a tool/function
+  schema, a JSON or config payload, command output, or logs — where a searched
+  or generated picture would be meaningless or hallucinated. Do NOT add an image
+  here; instead write a concrete, self-authored Markdown fenced code block
+  INLINE right where it helps (invent a representative snippet).
+Be friendly to illustration count on genuinely visual subjects: several precise
+illustrations beat one token image. Do not decorate every paragraph, and do not
+add a snippet where the prose already shows one.
 
 Rules:
 - Preserve all existing widget marker lines and existing ids.
@@ -1662,9 +1674,10 @@ Rules:
 - New marker lines must be alone, with blank lines around them:
   ::widget{type="image" id="img-auto-1"}
   ::widget{type="gallery" id="gal-auto-1"}
-- Return the full article with only these marker-line insertions.
-- Do not add diagrams, videos, interactive widgets, headings, paragraphs, or
-  wording edits in this pass.
+- Return the full article with only these marker-line and fenced-code-block insertions.
+- Do not add diagrams, videos, interactive widgets, or headings, and do not
+  rewrite the existing prose. You MAY insert new Markdown fenced code blocks as
+  described above; otherwise keep the wording as-is.
 
 Image/gallery mode:
 - "search" for real, specific, existing things: named artworks, real people,
