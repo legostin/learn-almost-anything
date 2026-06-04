@@ -4647,6 +4647,14 @@ fn install_panic_logger() {
     }));
 }
 
+/// Reason the agent sidecar isn't running (e.g. Node.js missing), or null when
+/// it started normally. The UI shows this so a missing runtime is explained
+/// instead of silently failing every generation.
+#[tauri::command]
+fn sidecar_status(sidecar_state: tauri::State<'_, Arc<Sidecar>>) -> Option<String> {
+    sidecar_state.unavailable_reason().map(|s| s.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
@@ -4684,9 +4692,14 @@ pub fn run() {
             sync_devlog_flag(&app.handle(), settings.debug_logging());
             app.manage(settings);
 
-            let sidecar = Sidecar::spawn(&sidecar_script_path(&app.handle()), &dir).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("sidecar spawn failed: {e}"))
-            })?;
+            // A failed sidecar (e.g. Node.js not installed) must NOT abort
+            // launch — start in a "dead" state so the window opens and the UI
+            // can explain why generation won't work.
+            let sidecar = Sidecar::spawn(&sidecar_script_path(&app.handle()), &dir)
+                .unwrap_or_else(|e| {
+                    eprintln!("[startup] sidecar unavailable: {e}");
+                    Sidecar::dead(e.to_string())
+                });
             app.manage(Arc::new(sidecar));
 
             app.manage(Arc::new(ShareState::new()));
@@ -4697,6 +4710,7 @@ pub fn run() {
             list_courses,
             create_course,
             set_course_agent,
+            sidecar_status,
             sidecar_call,
             start_course_suggestion,
             get_wizard_questions,

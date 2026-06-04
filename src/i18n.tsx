@@ -19,6 +19,9 @@ const STRINGS = {
     settings: "Настройки",
 
     selectOrCreate: "Выберите курс или создайте новый",
+    runtimeMissingTitle: "Не удаётся запустить агента",
+    runtimeMissingBody:
+      "Для генерации курсов нужен установленный Node.js. Установите его с nodejs.org (LTS) и перезапустите приложение. Уже открытые курсы можно читать и без него.",
     noAgentsTitle: "Нет ни одного агента",
     noAgentsBody:
       "Чтобы генерировать курсы, нужен хотя бы один установленный и авторизованный CLI: claude (Pro/Max) или codex (ChatGPT Plus/Pro). Установите CLI, войдите в аккаунт и вернитесь сюда.",
@@ -488,6 +491,9 @@ const STRINGS = {
     settings: "Settings",
 
     selectOrCreate: "Select a course or create a new one",
+    runtimeMissingTitle: "The agent runtime can't start",
+    runtimeMissingBody:
+      "Course generation needs Node.js installed. Install it from nodejs.org (LTS) and restart the app. Courses you've already opened are still readable without it.",
     noAgentsTitle: "No agents installed",
     noAgentsBody:
       "To generate courses, install and sign in to at least one local CLI: claude (Pro/Max) or codex (ChatGPT Plus/Pro). Then come back here.",

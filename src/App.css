@@ -390,6 +390,11 @@ button {
 .banner-error .banner-body {
   color: #7a2828;
 }
+.banner-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+}
 .banner-warn {
   background: var(--accent-soft);
   color: #92400e;

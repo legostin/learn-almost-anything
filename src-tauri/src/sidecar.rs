@@ -24,6 +24,10 @@ pub enum SidecarError {
     Timeout,
     #[error("sidecar exited before responding")]
     Dropped,
+    #[error("Node.js is required but was not found on this system")]
+    NodeMissing,
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 #[derive(Serialize)]
@@ -102,10 +106,13 @@ static SHELL_PATH_DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 type Pending = Arc<Mutex<HashMap<String, mpsc::Sender<SidecarMsg>>>>;
 
 pub struct Sidecar {
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    child: Mutex<Option<Child>>,
+    stdin: Mutex<Option<ChildStdin>>,
     pending: Pending,
     next_id: AtomicU64,
+    // When set, the sidecar never started (e.g. Node.js missing). Calls fail
+    // fast with this reason instead of the app crashing at launch.
+    dead_reason: Option<String>,
 }
 
 pub fn expanded_path() -> OsString {
@@ -353,7 +360,29 @@ fn executable_exists(path: &Path) -> bool {
 }
 
 impl Sidecar {
+    /// A non-running sidecar that fails every call with `reason`. Lets the app
+    /// launch and explain itself instead of aborting when Node.js is missing.
+    pub fn dead(reason: impl Into<String>) -> Self {
+        Self {
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            pending: Pending::default(),
+            next_id: AtomicU64::new(1),
+            dead_reason: Some(reason.into()),
+        }
+    }
+
+    /// `None` when the sidecar is running, otherwise the reason it isn't.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        self.dead_reason.as_deref()
+    }
+
     pub fn spawn(script: &Path, cwd: &Path) -> Result<Self, SidecarError> {
+        // The sidecar is a Node process — surface a clear reason if Node is
+        // absent rather than letting the spawn fail opaquely.
+        if command_path_if_found("node").is_none() {
+            return Err(SidecarError::NodeMissing);
+        }
         let expanded_path = expanded_path();
         let mut command = Command::new(command_path("node"));
         command
@@ -438,10 +467,11 @@ impl Sidecar {
         });
 
         Ok(Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Mutex::new(Some(child)),
+            stdin: Mutex::new(Some(stdin)),
             pending,
             next_id: AtomicU64::new(1),
+            dead_reason: None,
         })
     }
 
@@ -464,6 +494,9 @@ impl Sidecar {
     where
         F: Fn(ProgressPayload),
     {
+        if let Some(reason) = &self.dead_reason {
+            return Err(SidecarError::Unavailable(reason.clone()));
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
@@ -475,7 +508,10 @@ impl Sidecar {
         };
         let line = serde_json::to_string(&req)?;
         {
-            let mut stdin = self.stdin.lock().unwrap();
+            let mut guard = self.stdin.lock().unwrap();
+            let stdin = guard
+                .as_mut()
+                .ok_or_else(|| SidecarError::Unavailable("sidecar not running".into()))?;
             stdin.write_all(line.as_bytes())?;
             stdin.write_all(b"\n")?;
             stdin.flush()?;
@@ -507,9 +543,11 @@ impl Sidecar {
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(child) = guard.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 }

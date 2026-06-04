@@ -757,6 +757,7 @@ function App() {
   const [enrichingSubs, setEnrichingSubs] = useState<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentAvail, setAgentAvail] = useState<AgentAvailability | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [braveConfigured, setBraveConfigured] = useState<boolean | null>(null);
   const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
   const [debugLogging, setDebugLogging] = useState(false);
@@ -821,14 +822,16 @@ function App() {
   }, [courses]);
 
   const refreshCapabilities = useCallback(async () => {
-    const [aa, ss, ms] = await Promise.allSettled([
+    const [aa, ss, ms, rt] = await Promise.allSettled([
       invoke<AgentAvailability>("check_agent_availability"),
       invoke<{ brave_configured: boolean; gemini_configured?: boolean; debug_logging?: boolean }>(
         "get_settings_status"
       ),
       invoke<ModelConfig>("get_model_settings"),
+      invoke<string | null>("sidecar_status"),
     ]);
     if (aa.status === "fulfilled") setAgentAvail(aa.value);
+    if (rt.status === "fulfilled") setRuntimeError(rt.value ?? null);
     if (ss.status === "fulfilled") {
       setBraveConfigured(ss.value.brave_configured);
       setGeminiConfigured(Boolean(ss.value.gemini_configured));
@@ -1317,6 +1320,7 @@ function App() {
         <div className={`main-inner ${view.kind === "empty" ? "home-main" : ""}`}>
         <CapabilityBanners
           agentAvail={agentAvail}
+          runtimeError={runtimeError}
           braveConfigured={braveConfigured}
           geminiConfigured={geminiConfigured}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -1890,11 +1894,13 @@ const CAPABILITY_SUGGESTION_DISMISSED_KEY = "learn.capabilitySuggestionDismissed
 
 function CapabilityBanners({
   agentAvail,
+  runtimeError,
   braveConfigured,
   geminiConfigured,
   onOpenSettings,
 }: {
   agentAvail: { claude: boolean; codex: boolean } | null;
+  runtimeError: string | null;
   braveConfigured: boolean | null;
   geminiConfigured: boolean | null;
   onOpenSettings: () => void;
@@ -1903,6 +1909,17 @@ function CapabilityBanners({
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem(CAPABILITY_SUGGESTION_DISMISSED_KEY) === "1"
   );
+  // Hard blocker: the agent runtime (Node.js sidecar) didn't start. Nothing can
+  // be generated until it's fixed, so surface it above everything else.
+  if (runtimeError) {
+    return (
+      <div className="banner banner-error" role="alert">
+        <div className="banner-title">{t("runtimeMissingTitle")}</div>
+        <div className="banner-body">{t("runtimeMissingBody")}</div>
+        <div className="banner-detail">{runtimeError}</div>
+      </div>
+    );
+  }
   if (!agentAvail) return null; // still loading
   // A real blocker — no agent CLI at all — stays a hard alert.
   const noAgents = !agentAvail.claude && !agentAvail.codex;
