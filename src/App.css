@@ -5360,6 +5360,27 @@ button.domain-chip {
 .space-add-link input {
   flex: 1;
 }
+/* Unify the three source-add buttons (link / document / folder) — otherwise the
+   form's submit renders as the macOS default (blue) while the others stay
+   native gray, which looks inconsistent. */
+.space-add button {
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.space-add button:hover:not(:disabled) {
+  border-color: var(--text);
+}
+.space-add button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .space-upload-note,
 .create-space-note {
   font-size: 12px;
