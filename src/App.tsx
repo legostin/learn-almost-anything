@@ -31,6 +31,7 @@ if (!hljs.getLanguage("mermaid")) {
 import QRCode from "qrcode";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { convertFileSrc, invoke, listen, isTauri } from "./transport";
 import { useLang, useT, type Lang } from "./i18n";
@@ -779,6 +780,21 @@ function App() {
       setSidebarLanguageFilter("all");
     }
   }, [sidebarLanguageFilter, sidebarLanguageOptions]);
+
+  // Open external http(s) links (course content + anywhere else) in the system
+  // browser instead of navigating the app's own webview away from the app.
+  useEffect(() => {
+    if (!isTauri) return;
+    const onClick = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement | null)?.closest?.("a");
+      const href = anchor?.getAttribute("href");
+      if (!href || !/^https?:\/\//i.test(href)) return;
+      e.preventDefault();
+      openUrl(href).catch(() => {});
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, []);
   // When viewing a space (or a course/submodule that belongs to one), scope the
   // sidebar to that space's courses.
   const activeSpaceId = useMemo(() => {
