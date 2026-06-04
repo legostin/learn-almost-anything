@@ -4318,90 +4318,113 @@ function CourseView({
     <div className="course-view">
       <CourseHeaderTitle course={course} />
       <div className="course-meta-full">
-        <span className="lang-pill">{course.language}</span>
-        {categoryLabel(course.category, uiLang) && (
-          <span className="category-pill">{categoryLabel(course.category, uiLang)}</span>
-        )}
-        <select
-          className={`agent-pill agent-select agent-${course.agent}`}
-          value={course.agent}
-          title={t("switchProvider")}
-          onChange={async (e) => {
-            await invoke("set_course_agent", { courseId: course.id, agent: e.target.value });
-            await onChanged();
-          }}
-        >
-          <option value="claude">claude</option>
-          <option value="codex">codex</option>
-        </select>
-        <span className={`status-pill status-${course.status}`}>
-          {courseLifecycleStatusLabel(course.status, t)}
-        </span>
-        {course.translated_from && (
-          <span className="translated-badge">🌐 {t("translatedBadge")}</span>
-        )}
-        <div className="translate-wrap">
-          <button
-            className="ghost translate-btn"
-            onClick={() => setTranslateOpen((v) => !v)}
-            disabled={translating}
+        <div className="course-meta-info">
+          <span className="lang-pill">{course.language}</span>
+          {categoryLabel(course.category, uiLang) && (
+            <span className="category-pill">{categoryLabel(course.category, uiLang)}</span>
+          )}
+          <span className={`status-pill status-${course.status}`}>
+            {courseLifecycleStatusLabel(course.status, t)}
+          </span>
+          {course.translated_from && (
+            <span className="translated-badge">🌐 {t("translatedBadge")}</span>
+          )}
+        </div>
+        <div className="course-meta-actions">
+          <select
+            className={`agent-pill agent-select agent-${course.agent}`}
+            value={course.agent}
+            title={t("switchProvider")}
+            onChange={async (e) => {
+              await invoke("set_course_agent", { courseId: course.id, agent: e.target.value });
+              await onChanged();
+            }}
           >
-            {translating ? t("translating") : t("translateButton")}
-          </button>
-          {translateOpen && (
-            <div className="translate-menu">
-              {COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
-                <button key={l.code} onClick={() => translateCourse(l.code)} disabled={translating}>
-                  {l.nativeName}
-                </button>
-              ))}
-            </div>
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+          </select>
+          <div className="translate-wrap">
+            <button
+              className="meta-action translate-btn"
+              onClick={() => setTranslateOpen((v) => !v)}
+              disabled={translating}
+            >
+              {translating ? t("translating") : t("translateButton")}
+            </button>
+            {translateOpen && (
+              <div className="translate-menu">
+                {COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
+                  <button key={l.code} onClick={() => translateCourse(l.code)} disabled={translating}>
+                    {l.nativeName}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {course.status === "ready" && (
+            <button className="meta-action" onClick={publishCourse} disabled={publishing}>
+              {publishing ? t("catalogPublishing") : t("catalogPublish")}
+            </button>
           )}
         </div>
       </div>
-      {translateStatus && (
-        <div className={`translate-status ${translateStatus.complete ? "done" : ""}`}>
-          {translateStatus.complete
-            ? `✓ ${t("translateDone")}`
-            : t("translateProgress", {
-                done: translateStatus.done,
-                total: translateStatus.total,
-              })}
-        </div>
-      )}
-      {course.status === "ready" && (
-        <div className="catalog-publish-row">
-          <button className="ghost" onClick={publishCourse} disabled={publishing}>
-            {publishing ? t("catalogPublishing") : t("catalogPublish")}
-          </button>
-          {publishUrl && (
-            <a href={publishUrl} target="_blank" rel="noreferrer">
-              {t("catalogPublished")}
-            </a>
-          )}
-          {publishError && (
-            <span className="catalog-publish-error">
-              {t("errorPrefix", { error: publishError })}
-            </span>
-          )}
-          {checkingUpdate && <span>{t("catalogCheckingUpdate")}</span>}
-          {updateStatus?.available && (
-            <button className="ghost" onClick={updateFromCatalog} disabled={updatingCatalog}>
-              {updatingCatalog
-                ? t("catalogUpdating")
-                : t("catalogUpdateAvailable", {
-                    count: updateStatus.remote_generated_lessons ?? 0,
+      {(translateStatus ||
+        (course.status === "ready" &&
+          (publishUrl ||
+            publishError ||
+            checkingUpdate ||
+            updateStatus?.available ||
+            (updateStatus?.catalog_id && !updateStatus.available && !checkingUpdate) ||
+            updateError))) && (
+        <div className="course-status-area">
+          {translateStatus && (
+            <div className={`translate-status ${translateStatus.complete ? "done" : ""}`}>
+              {translateStatus.complete
+                ? `✓ ${t("translateDone")}`
+                : t("translateProgress", {
+                    done: translateStatus.done,
+                    total: translateStatus.total,
                   })}
-            </button>
+            </div>
           )}
-          {updateStatus?.catalog_id && !updateStatus.available && !checkingUpdate && (
-            <span>{t("catalogUpToDate")}</span>
-          )}
-          {updateError && (
-            <span className="catalog-publish-error">
-              {t("errorPrefix", { error: updateError })}
-            </span>
-          )}
+          {course.status === "ready" &&
+            (publishUrl ||
+              publishError ||
+              checkingUpdate ||
+              updateStatus?.available ||
+              (updateStatus?.catalog_id && !updateStatus.available && !checkingUpdate) ||
+              updateError) && (
+              <div className="catalog-status-row">
+                {publishUrl && (
+                  <a href={publishUrl} target="_blank" rel="noreferrer">
+                    {t("catalogPublished")}
+                  </a>
+                )}
+                {publishError && (
+                  <span className="catalog-publish-error">
+                    {t("errorPrefix", { error: publishError })}
+                  </span>
+                )}
+                {checkingUpdate && <span>{t("catalogCheckingUpdate")}</span>}
+                {updateStatus?.available && (
+                  <button className="meta-action" onClick={updateFromCatalog} disabled={updatingCatalog}>
+                    {updatingCatalog
+                      ? t("catalogUpdating")
+                      : t("catalogUpdateAvailable", {
+                          count: updateStatus.remote_generated_lessons ?? 0,
+                        })}
+                  </button>
+                )}
+                {updateStatus?.catalog_id && !updateStatus.available && !checkingUpdate && (
+                  <span>{t("catalogUpToDate")}</span>
+                )}
+                {updateError && (
+                  <span className="catalog-publish-error">
+                    {t("errorPrefix", { error: updateError })}
+                  </span>
+                )}
+              </div>
+            )}
         </div>
       )}
       {course.status === "wizard" && (

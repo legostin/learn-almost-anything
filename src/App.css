@@ -1488,41 +1488,69 @@ button {
 }
 .course-meta-full {
   display: flex;
-  gap: 12px;
+  gap: 12px 16px;
   align-items: center;
-  margin-bottom: 28px;
-  padding-bottom: 22px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--text-muted);
 }
-.catalog-publish-row {
+.course-meta-info {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   flex-wrap: wrap;
-  margin: -12px 0 24px;
+  min-width: 0;
 }
-.catalog-publish-row .ghost {
-  padding: 7px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
+.course-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+/* Shared neat pill-button for header actions (translate / publish / update). */
+.meta-action {
+  padding: 4px 13px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
   background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   cursor: pointer;
 }
-.catalog-publish-row .ghost:disabled {
+.meta-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.meta-action:disabled {
   opacity: 0.55;
   cursor: default;
 }
-.catalog-publish-row a {
+/* Status area below the meta bar: translation progress, publish/catalog state. */
+.course-status-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 24px;
+}
+.catalog-status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.catalog-status-row a {
   color: var(--accent);
   font-size: 13px;
   text-decoration: none;
 }
-.catalog-publish-row a:hover {
+.catalog-status-row a:hover {
   text-decoration: underline;
 }
 .catalog-publish-error {
@@ -5731,10 +5759,6 @@ button.domain-chip {
   position: relative;
   display: inline-flex;
 }
-.translate-btn {
-  font-size: 12px;
-  padding: 3px 10px;
-}
 .translate-menu {
   position: absolute;
   top: calc(100% + 4px);
@@ -5774,8 +5798,8 @@ button.domain-chip {
 
 /* Translation status banner */
 .translate-status {
-  margin: 6px 0;
-  padding: 6px 12px;
+  margin: 0;
+  padding: 7px 12px;
   font-size: 13px;
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
