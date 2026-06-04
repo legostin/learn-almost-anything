@@ -4990,8 +4990,9 @@ button.domain-chip {
  * ============================================================ */
 .devlog-fab {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  right: 18px;
+  /* Sit above the assistant pill (bottom-right) so they don't overlap. */
+  bottom: 68px;
   z-index: 9999;
   width: 38px;
   height: 38px;
