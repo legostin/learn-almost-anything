@@ -2000,7 +2000,13 @@ async function repairInteractiveCodex(widget, errorMsg, braveApiKey, modelConfig
 }
 
 function mermaidIssue(source) {
-  const s = (source || "").trim();
+  let s = (source || "").trim();
+  if (!s) return "empty source";
+  // Skip a leading init directive (%%{...}%%) and/or YAML front matter
+  // (---\n…\n---) so a valid diagram that opens with one isn't misread.
+  s = s.replace(/^%%\{[\s\S]*?\}%%\s*/, "");
+  s = s.replace(/^---\s*[\s\S]*?\n---\s*/, "");
+  s = s.replace(/^%%\{[\s\S]*?\}%%\s*/, "").trim();
   if (!s) return "empty source";
   const KNOWN = new Set([
     "graph", "flowchart", "sequenceDiagram", "classDiagram",
@@ -2011,10 +2017,10 @@ function mermaidIssue(source) {
   ]);
   const first = s.split(/\s+/, 1)[0];
   if (!KNOWN.has(first)) return `unknown diagram type "${first}"`;
-  const counts = (re) => (s.match(re) || []).length;
-  if (counts(/\[/g) !== counts(/\]/g)) return "unbalanced square brackets";
-  if (counts(/\{/g) !== counts(/\}/g)) return "unbalanced curly brackets";
-  if (counts(/\(/g) !== counts(/\)/g)) return "unbalanced parentheses";
+  // Bracket balance is intentionally NOT checked: valid node labels (and a
+  // course ABOUT Mermaid) legitimately contain [, ], (, ), { or }, which made
+  // the naive count flag good diagrams. The client renders with the real
+  // Mermaid parser and surfaces any genuine syntax/truncation error.
   return null;
 }
 

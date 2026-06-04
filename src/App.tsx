@@ -8315,7 +8315,7 @@ function DiagramWidget({
 }) {
   const t = useT();
   const [svg, setSvg] = useState<string | null>(null);
-  const [renderError, setRenderError] = useState<string | null>(widget.error ?? null);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [zoomed, setZoomed] = useState(false);
   const [scale, setScale] = useState(1);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -8324,10 +8324,10 @@ function DiagramWidget({
   const pinchRef = useRef<{ dist: number; scale: number } | null>(null);
 
   useEffect(() => {
-    if (widget.error) {
-      setRenderError(widget.error);
-      return;
-    }
+    // Always render with the real Mermaid parser — it is the source of truth.
+    // A stored `widget.error` (from the generation-time heuristic) is used only
+    // as a fallback message if the real render also fails, so a diagram that was
+    // wrongly flagged still renders.
     let cancelled = false;
     setRenderError(null);
     (async () => {
@@ -8347,7 +8347,7 @@ function DiagramWidget({
         const { svg } = await mermaid.render(renderId, widget.source);
         if (!cancelled) setSvg(svg);
       } catch (e: any) {
-        if (!cancelled) setRenderError(String(e?.message ?? e));
+        if (!cancelled) setRenderError(String(e?.message ?? e) || widget.error || "render failed");
       }
     })();
     return () => {
