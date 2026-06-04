@@ -416,10 +416,10 @@ const STRINGS = {
     catalogUpdating: "Обновляю…",
     catalogUpToDate: "Каталог синхронизирован",
     catalogSettingsTitle: "Публикация в каталог",
-    catalogTokenPlaceholder: "секретный токен",
+    catalogTokenPlaceholder: "токен авторизации",
     catalogTokenConfigured: "Токен сохранён",
     catalogSettingsNote:
-      "Токен нужен только для публикации курсов на catalog.almost-anything.io. Просмотр и скачивание каталога работают без него.",
+      "Токен авторизации генерируется на id.almost-anything.io и нужен только для публикации курсов. Просмотр и скачивание каталога работают без него.",
     mcpTitle: "MCP",
     mcpEmpty: "Добавленных MCP пока нет.",
     mcpNote:
@@ -885,10 +885,10 @@ const STRINGS = {
     catalogUpdating: "Updating…",
     catalogUpToDate: "Catalog is synced",
     catalogSettingsTitle: "Catalog publishing",
-    catalogTokenPlaceholder: "secret token",
+    catalogTokenPlaceholder: "authorization token",
     catalogTokenConfigured: "Token saved",
     catalogSettingsNote:
-      "The token is only needed to publish courses to catalog.almost-anything.io. Catalog browsing and downloads work without it.",
+      "Generate the authorization token on id.almost-anything.io. It is only needed for publishing courses; catalog browsing and downloads work without it.",
     mcpTitle: "MCP",
     mcpEmpty: "No added MCP servers yet.",
     mcpNote:
