@@ -27,6 +27,10 @@ const STRINGS = {
     braveMissingWarning:
       "Brave Search не настроен. Агент будет генерировать только по своей памяти — без актуальных источников, изображений и видео. Откройте настройки и добавьте ключ.",
     openSettings: "Открыть настройки",
+    qualitySuggestionTitle: "Подключения для качества — по желанию",
+    qualitySuggestionBody:
+      "Подключите {services}, чтобы улучшить курсы: актуальные источники из веба, изображения и озвучка. Без них генерация работает, просто качество ниже.",
+    qualityDismiss: "Больше не показывать",
     homeTitle: "Главная",
     homeTitleTapHint: "Сменить шрифт и придумать следующий курс",
     homeSuggestionWorking: "Подбираю тему…",
@@ -488,6 +492,10 @@ const STRINGS = {
     braveMissingWarning:
       "Brave Search is not configured. The agent will write only from its own memory — without live sources, images, or videos. Open settings to add a key.",
     openSettings: "Open settings",
+    qualitySuggestionTitle: "Optional quality boosters",
+    qualitySuggestionBody:
+      "Add {services} to improve your courses: live web sources, images, and narration. They're optional — generation still works without them, just at lower quality.",
+    qualityDismiss: "Don't show again",
     homeTitle: "Home",
     homeTitleTapHint: "Change the font and suggest the next course",
     homeSuggestionWorking: "Picking a topic…",

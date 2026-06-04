@@ -1293,6 +1293,7 @@ function App() {
         <CapabilityBanners
           agentAvail={agentAvail}
           braveConfigured={braveConfigured}
+          geminiConfigured={geminiConfigured}
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <AppUpdateBanner />
@@ -1860,17 +1861,25 @@ function DevLogPanel() {
   );
 }
 
+const CAPABILITY_SUGGESTION_DISMISSED_KEY = "learn.capabilitySuggestionDismissed";
+
 function CapabilityBanners({
   agentAvail,
   braveConfigured,
+  geminiConfigured,
   onOpenSettings,
 }: {
   agentAvail: { claude: boolean; codex: boolean } | null;
   braveConfigured: boolean | null;
+  geminiConfigured: boolean | null;
   onOpenSettings: () => void;
 }) {
   const t = useT();
+  const [dismissed, setDismissed] = useState(
+    () => localStorage.getItem(CAPABILITY_SUGGESTION_DISMISSED_KEY) === "1"
+  );
   if (!agentAvail) return null; // still loading
+  // A real blocker — no agent CLI at all — stays a hard alert.
   const noAgents = !agentAvail.claude && !agentAvail.codex;
   if (noAgents) {
     return (
@@ -1880,17 +1889,37 @@ function CapabilityBanners({
       </div>
     );
   }
-  if (braveConfigured === false) {
-    return (
-      <div className="banner banner-warn">
-        <div className="banner-body">{t("braveMissingWarning")}</div>
+  // Brave/Gemini are optional quality boosters — show a soft, permanently
+  // dismissible suggestion, never an alert.
+  if (dismissed) return null;
+  const missing: string[] = [];
+  if (braveConfigured === false) missing.push("Brave Search");
+  if (geminiConfigured === false) missing.push("Gemini");
+  if (missing.length === 0) return null;
+  return (
+    <div className="banner banner-suggest">
+      <div className="banner-main">
+        <div className="banner-title">{t("qualitySuggestionTitle")}</div>
+        <div className="banner-body">
+          {t("qualitySuggestionBody", { services: missing.join(", ") })}
+        </div>
+      </div>
+      <div className="banner-actions">
         <button className="banner-action" onClick={onOpenSettings}>
           {t("openSettings")}
         </button>
+        <button
+          className="banner-dismiss"
+          onClick={() => {
+            localStorage.setItem(CAPABILITY_SUGGESTION_DISMISSED_KEY, "1");
+            setDismissed(true);
+          }}
+        >
+          {t("qualityDismiss")}
+        </button>
       </div>
-    );
-  }
-  return null;
+    </div>
+  );
 }
 
 function AppUpdateBanner() {

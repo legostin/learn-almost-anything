@@ -394,6 +394,34 @@ button {
   background: var(--accent-soft);
   color: #92400e;
 }
+.banner-suggest {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.banner-suggest .banner-main {
+  flex: 1;
+}
+.banner-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: center;
+}
+.banner-dismiss {
+  padding: 4px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: underline;
+}
+.banner-dismiss:hover {
+  color: var(--text);
+}
 .banner-update {
   background: var(--surface-2);
   color: var(--text);
