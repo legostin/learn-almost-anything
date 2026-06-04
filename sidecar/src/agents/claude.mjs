@@ -1466,6 +1466,48 @@ ${markdown}`;
   return { markdown: (text || "").trim() || markdown };
 }
 
+// Translate the human-readable labels inside a Mermaid diagram, preserving all
+// syntax, node IDs, keywords, directions and arrows so it still renders.
+export async function translateDiagram({ sourceLang, targetLang, source, modelConfig }) {
+  if (typeof source !== "string" || !source.trim()) return { source: source || "" };
+  const prompt = `Translate the human-readable labels in this Mermaid diagram from "${sourceLang || "auto"}" into "${targetLang}". Rules:
+- Translate ONLY visible label text: words inside [ ], ( ), { }, (( )), [[ ]], >] shapes, quoted "..." labels, and the message text after ':' in sequence/class diagrams.
+- Do NOT change anything else: the diagram-type keyword (flowchart, sequenceDiagram, classDiagram, stateDiagram, erDiagram, gantt, pie, mindmap, ...), directions (LR/TD/TB/RL/BT), node IDs, arrows and links (-->, ---, -.->, ==>, ->>, --x, etc.), %% comments, %%{ ... }%% directives, class/style lines, and all punctuation/syntax.
+- Keep node IDs identical so edges still connect, and keep the line structure.
+Return ONLY the Mermaid source — no code fences, no commentary.
+
+${source}`;
+  const text = await runOnce(prompt, { modelConfig });
+  return { source: (text || "").trim() || source };
+}
+
+// Localize the visible UI text of an interactive widget (HTML/CSS/JS), keeping
+// all code, markup structure, identifiers and logic intact.
+export async function translateInteractive({ sourceLang, targetLang, html, css, js, modelConfig }) {
+  const prompt = `Localize a tiny self-contained web widget from "${sourceLang || "auto"}" into "${targetLang}". You get its HTML body, CSS and JS.
+Translate ONLY human-visible UI text into ${targetLang}:
+- visible text nodes in the HTML; button/label/option text; the VALUES of placeholder, title, aria-label and alt attributes; and string literals in the JS that are shown to the user (labels, on-screen messages).
+Do NOT translate or modify anything else: tag names, attribute NAMES, element ids/classes, data-* keys, CSS (selectors, properties, values), JS code, variable/function/property names, object keys, URLs, numbers, or any logic or structure. Preserve everything except the translated visible text.
+Return ONLY a single-line JSON object: {"html":"...","css":"...","js":"..."}.
+
+<html>
+${html || ""}
+</html>
+<css>
+${css || ""}
+</css>
+<js>
+${js || ""}
+</js>`;
+  const text = await runOnce(prompt, { modelConfig });
+  const parsed = extractJson(text);
+  return {
+    html: typeof parsed?.html === "string" ? parsed.html : html || "",
+    css: typeof parsed?.css === "string" ? parsed.css : css || "",
+    js: typeof parsed?.js === "string" ? parsed.js : js || "",
+  };
+}
+
 // AI assistant: answer a learner's question grounded in the course program,
 // the current lesson, an optionally-quoted fragment, and the space sources.
 export async function courseAssistant(

@@ -66,6 +66,8 @@ const methods = {
   generate_image: async (params, ctx) => pickAgent(params).generateImage(params, ctx),
   translate_strings: async (params) => pickAgent(params).translateStrings(params),
   translate_markdown: async (params) => pickAgent(params).translateMarkdown(params),
+  translate_diagram: async (params) => pickAgent(params).translateDiagram(params),
+  translate_interactive: async (params) => pickAgent(params).translateInteractive(params),
   detect_image_text_language: async (params) => pickAgent(params).detectImageTextLanguage(params),
   course_assistant: async (params, ctx) => pickAgent(params).courseAssistant(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).

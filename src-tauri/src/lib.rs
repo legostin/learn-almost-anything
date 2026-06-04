@@ -3463,7 +3463,7 @@ fn translate_course_content(
         let widgets_path = dir.join("widgets.json");
         if let Ok(ws) = std::fs::read_to_string(&widgets_path) {
             if let Ok(mut widgets) = serde_json::from_str::<serde_json::Value>(&ws) {
-                const CAPTION_FIELDS: [&str; 4] = ["description", "alt", "caption", "title"];
+                const CAPTION_FIELDS: [&str; 5] = ["description", "alt", "caption", "title", "why"];
                 if let Some(obj) = widgets.as_object_mut() {
                     let mut wstr: Vec<String> = Vec::new();
                     let mut collect = |w: &serde_json::Value| {
@@ -3506,6 +3506,75 @@ fn translate_course_content(
                                     apply(it);
                                 }
                             }
+                        }
+                    }
+                    // Diagram & interactive widgets carry text the caption pass
+                    // doesn't reach: translate the Mermaid labels and the visible
+                    // UI text, both with syntax/structure preserved.
+                    for (_k, w) in obj.iter_mut() {
+                        match w.get("type").and_then(|v| v.as_str()) {
+                            Some("diagram") => {
+                                let src = w
+                                    .get("source")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .filter(|s| !s.trim().is_empty());
+                                if let Some(src) = src {
+                                    if let Ok(v) = sidecar.call(
+                                        "translate_diagram",
+                                        json!({
+                                            "backend": backend,
+                                            "sourceLang": src_lang,
+                                            "targetLang": target,
+                                            "source": src,
+                                            "modelConfig": model,
+                                        }),
+                                        Duration::from_secs(600),
+                                    ) {
+                                        if let Some(tt) = v
+                                            .get("source")
+                                            .and_then(|x| x.as_str())
+                                            .filter(|s| !s.trim().is_empty())
+                                        {
+                                            w["source"] = json!(tt);
+                                        }
+                                    }
+                                }
+                            }
+                            Some("interactive") => {
+                                let html =
+                                    w.get("html").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let css =
+                                    w.get("css").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let js =
+                                    w.get("js").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                if !html.trim().is_empty() || !js.trim().is_empty() {
+                                    if let Ok(v) = sidecar.call(
+                                        "translate_interactive",
+                                        json!({
+                                            "backend": backend,
+                                            "sourceLang": src_lang,
+                                            "targetLang": target,
+                                            "html": html,
+                                            "css": css,
+                                            "js": js,
+                                            "modelConfig": model,
+                                        }),
+                                        Duration::from_secs(600),
+                                    ) {
+                                        if let Some(tt) = v.get("html").and_then(|x| x.as_str()) {
+                                            w["html"] = json!(tt);
+                                        }
+                                        if let Some(tt) = v.get("css").and_then(|x| x.as_str()) {
+                                            w["css"] = json!(tt);
+                                        }
+                                        if let Some(tt) = v.get("js").and_then(|x| x.as_str()) {
+                                            w["js"] = json!(tt);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -3567,6 +3636,50 @@ fn translate_course_content(
                             ) {
                                 let _ = media::save_bytes(&jpeg, std::path::Path::new(&path));
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // assignments.json — translate the homework definition (title/prompt/criteria).
+        let assignments_path = dir.join("assignments.json");
+        if let Ok(s) = std::fs::read_to_string(&assignments_path) {
+            if let Ok(mut assignments) = serde_json::from_str::<serde_json::Value>(&s) {
+                const ASSIGN_FIELDS: [&str; 3] = ["title", "prompt", "criteria"];
+                if let Some(arr) = assignments.as_array_mut() {
+                    let mut astr: Vec<String> = Vec::new();
+                    for a in arr.iter() {
+                        for f in ASSIGN_FIELDS {
+                            if let Some(v) = a.get(f).and_then(|x| x.as_str()) {
+                                if !v.trim().is_empty() {
+                                    astr.push(v.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if !astr.is_empty() {
+                        let at =
+                            translate_strings_batch(sidecar, backend, src_lang, &target, &model, &astr);
+                        if at.len() == astr.len() {
+                            let mut i = 0;
+                            for a in arr.iter_mut() {
+                                for f in ASSIGN_FIELDS {
+                                    let take = a
+                                        .get(f)
+                                        .and_then(|x| x.as_str())
+                                        .map(|s| !s.trim().is_empty())
+                                        .unwrap_or(false);
+                                    if take {
+                                        a[f] = json!(at[i]);
+                                        i += 1;
+                                    }
+                                }
+                            }
+                            let _ = std::fs::write(
+                                &assignments_path,
+                                serde_json::to_string_pretty(&assignments).unwrap_or(s),
+                            );
                         }
                     }
                 }
