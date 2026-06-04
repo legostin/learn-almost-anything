@@ -1,7 +1,7 @@
 {
   "name": "learn-almost-anything",
   "private": true,
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "Local desktop AI tutor that designs personalized courses on any topic — articles, interactive widgets, tests, homework with agent review, and TTS lectures. Uses your Claude Pro/Max or ChatGPT Plus/Pro subscription.",
   "keywords": [
     "ai-tutor",
