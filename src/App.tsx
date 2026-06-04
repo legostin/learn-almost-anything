@@ -8168,6 +8168,7 @@ function ImagePlaceholder({
     "idle"
   );
   const [candidates, setCandidates] = useState<ImageCandidate[]>([]);
+  const [preview, setPreview] = useState<ImageCandidate | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   useEffect(() => {
     setImageFailed(false);
@@ -8244,7 +8245,10 @@ function ImagePlaceholder({
         <button
           type="button"
           className="widget-remove"
-          onClick={remove}
+          onClick={(e) => {
+            e.stopPropagation();
+            remove();
+          }}
           disabled={phase === "busy"}
           title={t("widgetRemove")}
           aria-label={t("widgetRemove")}
@@ -8283,15 +8287,28 @@ function ImagePlaceholder({
                 <div className="widget-candidates">
                   <div className="widget-candidates-grid">
                     {candidates.map((c, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        className="widget-candidate"
-                        onClick={() => pick(c)}
-                        title={c.title || c.source}
-                      >
-                        <img src={c.thumbnail || c.url} alt="" loading="lazy" />
-                      </button>
+                      <div key={i} className="widget-candidate-cell">
+                        <button
+                          type="button"
+                          className="widget-candidate"
+                          onClick={() => pick(c)}
+                          title={c.title || c.source}
+                        >
+                          <img src={c.thumbnail || c.url} alt="" loading="lazy" />
+                        </button>
+                        <button
+                          type="button"
+                          className="widget-candidate-zoom"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPreview(c);
+                          }}
+                          title={t("widgetCandidateZoom")}
+                          aria-label={t("widgetCandidateZoom")}
+                        >
+                          🔍
+                        </button>
+                      </div>
                     ))}
                   </div>
                   <button type="button" className="widget-action-link" onClick={() => setPhase("idle")}>
@@ -8327,6 +8344,42 @@ function ImagePlaceholder({
         generated={widget.generated}
         sourceHref={sourceHref}
       />
+      {preview && (
+        <div
+          className="image-lightbox"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setPreview(null)}
+        >
+          <div className="image-lightbox-stage" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="image-lightbox-close"
+              onClick={() => setPreview(null)}
+              aria-label={t("widgetImageLightboxClose")}
+            >
+              {t("widgetImageLightboxClose")}
+            </button>
+            <div className="image-lightbox-media">
+              <img src={preview.url} alt={preview.title || ""} />
+            </div>
+            <div className="image-lightbox-caption">
+              <button
+                type="button"
+                className="widget-candidate-use"
+                onClick={() => {
+                  const chosen = preview;
+                  setPreview(null);
+                  pick(chosen);
+                }}
+              >
+                {t("widgetCandidateUse")}
+              </button>
+              {preview.source && <span className="widget-candidate-source">{preview.source}</span>}
+            </div>
+          </div>
+        </div>
+      )}
     </figure>
   );
 }

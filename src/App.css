@@ -5648,6 +5648,54 @@ button.domain-chip {
   object-fit: cover;
   display: block;
 }
+.widget-candidate-cell {
+  position: relative;
+}
+.widget-candidate-zoom {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.widget-candidate-cell:hover .widget-candidate-zoom,
+.widget-candidate-zoom:focus-visible {
+  opacity: 1;
+}
+/* Touch devices have no hover — keep the zoom affordance visible. */
+@media (hover: none) {
+  .widget-candidate-zoom {
+    opacity: 0.9;
+  }
+}
+.widget-candidate-use {
+  padding: 7px 14px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.widget-candidate-source {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 
 /* Copy button for code snippets */
 .reader .code-block {
