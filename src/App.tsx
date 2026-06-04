@@ -17,8 +17,35 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
+import hljs from "highlight.js";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github.css";
+
+// highlight.js ships no Mermaid grammar — register a compact one so the diagram
+// "code" view gets real syntax highlighting (keywords, strings, comments,
+// arrows). Guarded so hot-reload doesn't re-register.
+if (!hljs.getLanguage("mermaid")) {
+  hljs.registerLanguage("mermaid", () => ({
+    name: "Mermaid",
+    case_insensitive: false,
+    keywords: {
+      keyword:
+        "graph flowchart sequenceDiagram classDiagram stateDiagram stateDiagram-v2 " +
+        "erDiagram journey gantt pie gitGraph mindmap timeline quadrantChart " +
+        "requirementDiagram C4Context subgraph end participant actor note loop alt " +
+        "else opt par and rect activate deactivate class click direction section " +
+        "title dateFormat axisFormat",
+      literal: "TD TB BT RL LR",
+    },
+    contains: [
+      { className: "comment", begin: "%%", end: "$" },
+      { className: "string", begin: '"', end: '"' },
+      { className: "number", begin: "\\b\\d+(\\.\\d+)?\\b" },
+      // links / arrows: --> --- -.-> ==> === --x --o <--> :::
+      { className: "operator", begin: "<?[-=.]{2,3}[->ox|]*|:::" },
+    ],
+  }));
+}
 import QRCode from "qrcode";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -8316,6 +8343,14 @@ function DiagramWidget({
   const t = useT();
   const [svg, setSvg] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"diagram" | "code">("diagram");
+  const highlightedSource = useMemo(() => {
+    try {
+      return hljs.highlight(widget.source, { language: "mermaid" }).value;
+    } catch {
+      return null;
+    }
+  }, [widget.source]);
   const [zoomed, setZoomed] = useState(false);
   const [scale, setScale] = useState(1);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -8410,19 +8445,54 @@ function DiagramWidget({
           </details>
         </div>
       ) : (
-        <div
-          className="widget-diagram-box"
-          role="button"
-          tabIndex={0}
-          title={t("diagramZoom")}
-          onClick={() => {
-            if (svg) {
-              setScale(1);
-              setZoomed(true);
-            }
-          }}
-          dangerouslySetInnerHTML={{ __html: svg ?? "" }}
-        />
+        <>
+          <div className="widget-diagram-toolbar" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "diagram"}
+              className={mode === "diagram" ? "active" : ""}
+              onClick={() => setMode("diagram")}
+            >
+              {t("diagramViewDiagram")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "code"}
+              className={mode === "code" ? "active" : ""}
+              onClick={() => setMode("code")}
+            >
+              {t("diagramViewCode")}
+            </button>
+          </div>
+          {mode === "code" ? (
+            <pre className="widget-diagram-code">
+              {highlightedSource ? (
+                <code
+                  className="hljs language-mermaid"
+                  dangerouslySetInnerHTML={{ __html: highlightedSource }}
+                />
+              ) : (
+                <code className="hljs language-mermaid">{widget.source}</code>
+              )}
+            </pre>
+          ) : (
+            <div
+              className="widget-diagram-box"
+              role="button"
+              tabIndex={0}
+              title={t("diagramZoom")}
+              onClick={() => {
+                if (svg) {
+                  setScale(1);
+                  setZoomed(true);
+                }
+              }}
+              dangerouslySetInnerHTML={{ __html: svg ?? "" }}
+            />
+          )}
+        </>
       )}
       {widget.caption && <figcaption>{widget.caption}</figcaption>}
       {zoomed && svg && (

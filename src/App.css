@@ -2587,6 +2587,48 @@ button {
   flex-direction: column;
   align-items: center;
 }
+.widget-diagram-toolbar {
+  align-self: flex-end;
+  display: inline-flex;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.widget-diagram-toolbar button {
+  border: none;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.widget-diagram-toolbar button + button {
+  border-left: 1px solid var(--border);
+}
+.widget-diagram-toolbar button.active {
+  background: var(--surface-2, var(--accent-soft));
+  color: var(--text);
+  font-weight: 600;
+}
+.widget-diagram-code {
+  width: 100%;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.widget-diagram-code code.hljs {
+  background: transparent;
+  padding: 0;
+}
 .widget-diagram-box {
   width: 100%;
   background: var(--surface);
