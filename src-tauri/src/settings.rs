@@ -41,6 +41,10 @@ pub struct Settings {
     /// real images only. `None` means the default (enabled).
     #[serde(default)]
     pub image_generation: Option<bool>,
+    /// Global default generation cost/quality profile (tier + knobs). Courses can
+    /// override per-course; default == today's behavior.
+    #[serde(default)]
+    pub generation_profile: GenerationProfile,
 }
 
 /// Per-backend model + reasoning choices for each kind of task. Empty
@@ -86,6 +90,140 @@ impl StageModel {
             .map(str::trim)
             .filter(|s| !s.is_empty());
         serde_json::json!({ "model": model, "reasoning": reasoning })
+    }
+}
+
+/// Generation cost/quality profile. One object that bundles the cost tier with
+/// orthogonal knobs; blank knobs are resolved from the active tier's preset, so
+/// the default (tier "balanced", all knobs unset) reproduces today's behavior.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct GenerationProfile {
+    /// "quick" | "balanced" | "premium" (blank => balanced).
+    #[serde(default)]
+    pub tier: String,
+    /// "lean" | "standard" | "max" — how much pedagogy scaffolding to apply.
+    #[serde(default)]
+    pub pedagogy_intensity: Option<String>,
+    /// "light" | "normal" | "deep" — research turns + web during planning/draft.
+    #[serde(default)]
+    pub research_depth: Option<String>,
+    /// "off" | "search" | "full" — illustration pass behavior.
+    #[serde(default)]
+    pub illustration_mode: Option<String>,
+    #[serde(default)]
+    pub skip_tests: Option<bool>,
+    #[serde(default)]
+    pub skip_assignments: Option<bool>,
+}
+
+/// Resolved defaults for one cost tier. The model/reasoning cascade is added
+/// later once the sidecar's accepted reasoning values are confirmed; for now a
+/// tier only tunes non-model knobs, so adding this changes nothing at runtime
+/// until `lib.rs` reads the resolved knobs.
+pub struct TierPreset {
+    pub pedagogy_intensity: &'static str,
+    pub research_depth: &'static str,
+    pub illustration_mode: &'static str,
+    pub skip_assignments: bool,
+    pub max_test_questions: u8,
+}
+
+/// Categories where accuracy matters most — the cheap-tier safety floor forbids
+/// dropping web research below "normal" here regardless of tier.
+pub const ACCURACY_CRITICAL_CATEGORIES: &[&str] =
+    &["science_math", "health", "business"];
+
+pub fn normalize_gen_tier(value: Option<&str>) -> &'static str {
+    match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("quick") => "quick",
+        Some("premium") => "premium",
+        _ => "balanced",
+    }
+}
+
+pub fn tier_preset(tier: &str) -> TierPreset {
+    match normalize_gen_tier(Some(tier)) {
+        "quick" => TierPreset {
+            pedagogy_intensity: "lean",
+            research_depth: "light",
+            illustration_mode: "search",
+            skip_assignments: true,
+            max_test_questions: 5,
+        },
+        "premium" => TierPreset {
+            pedagogy_intensity: "max",
+            research_depth: "deep",
+            illustration_mode: "full",
+            skip_assignments: false,
+            max_test_questions: 8,
+        },
+        // balanced (default) == today's behavior
+        _ => TierPreset {
+            pedagogy_intensity: "standard",
+            research_depth: "normal",
+            illustration_mode: "full",
+            skip_assignments: false,
+            max_test_questions: 6,
+        },
+    }
+}
+
+fn nonblank(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+impl GenerationProfile {
+    pub fn tier(&self) -> &'static str {
+        normalize_gen_tier(Some(&self.tier))
+    }
+
+    pub fn pedagogy_intensity(&self) -> String {
+        nonblank(&self.pedagogy_intensity)
+            .map(str::to_string)
+            .unwrap_or_else(|| tier_preset(self.tier()).pedagogy_intensity.to_string())
+    }
+
+    /// Research depth, honoring the cheap-tier safety floor for accuracy-critical
+    /// categories: never below "normal" there.
+    pub fn research_depth(&self, category: Option<&str>) -> String {
+        let mut depth = nonblank(&self.research_depth)
+            .map(str::to_string)
+            .unwrap_or_else(|| tier_preset(self.tier()).research_depth.to_string());
+        let critical = category
+            .map(|c| ACCURACY_CRITICAL_CATEGORIES.contains(&c))
+            .unwrap_or(false);
+        if critical && depth == "light" {
+            depth = "normal".to_string();
+        }
+        depth
+    }
+
+    /// Planning/draft research turn budget derived from the resolved depth.
+    pub fn research_max_turns(&self, category: Option<&str>) -> u32 {
+        match self.research_depth(category).as_str() {
+            "light" => 4,
+            "deep" => 16,
+            _ => 10,
+        }
+    }
+
+    pub fn illustration_mode(&self) -> String {
+        nonblank(&self.illustration_mode)
+            .map(str::to_string)
+            .unwrap_or_else(|| tier_preset(self.tier()).illustration_mode.to_string())
+    }
+
+    pub fn skip_tests(&self) -> bool {
+        self.skip_tests.unwrap_or(false)
+    }
+
+    pub fn skip_assignments(&self) -> bool {
+        self.skip_assignments
+            .unwrap_or_else(|| tier_preset(self.tier()).skip_assignments)
+    }
+
+    pub fn max_test_questions(&self) -> u8 {
+        tier_preset(self.tier()).max_test_questions
     }
 }
 
@@ -307,6 +445,22 @@ impl SettingsState {
         {
             let mut guard = self.inner.lock().expect("settings lock");
             guard.models = models;
+        }
+        self.persist()
+    }
+
+    /// Global default generation profile.
+    pub fn generation_profile(&self) -> GenerationProfile {
+        self.inner
+            .lock()
+            .map(|s| s.generation_profile.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_generation_profile(&self, profile: GenerationProfile) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.generation_profile = profile;
         }
         self.persist()
     }
