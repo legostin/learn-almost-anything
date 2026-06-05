@@ -20,7 +20,7 @@ mod sidecar;
 use courses::{AppPaths, QnA};
 use db::{Course, Db};
 use events::event_hub;
-use settings::{ModelConfig, SettingsState};
+use settings::{GenerationProfile, ModelConfig, SettingsState};
 use share::ShareState;
 use sidecar::Sidecar;
 
@@ -4655,6 +4655,43 @@ fn sidecar_status(sidecar_state: tauri::State<'_, Arc<Sidecar>>) -> Option<Strin
     sidecar_state.unavailable_reason().map(|s| s.to_string())
 }
 
+/// The effective generation profile for a course: its own stored profile if set,
+/// otherwise the global default. Blank knobs inside it resolve from the tier
+/// preset (see settings.rs), so this is always fully usable.
+fn resolve_course_profile(settings: &SettingsState, course: &db::Course) -> GenerationProfile {
+    course
+        .generation_profile
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_else(|| settings.generation_profile())
+}
+
+#[tauri::command]
+fn get_course_profile(
+    db_state: tauri::State<'_, Arc<Db>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<GenerationProfile, String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    Ok(resolve_course_profile(&settings_state, &course))
+}
+
+#[tauri::command]
+fn set_course_profile(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    profile: GenerationProfile,
+) -> Result<(), String> {
+    let json = serde_json::to_string(&profile).map_err(|e| e.to_string())?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::set_course_generation_profile(&conn, &course_id, Some(&json)).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
@@ -4711,6 +4748,8 @@ pub fn run() {
             create_course,
             set_course_agent,
             sidecar_status,
+            get_course_profile,
+            set_course_profile,
             sidecar_call,
             start_course_suggestion,
             get_wizard_questions,

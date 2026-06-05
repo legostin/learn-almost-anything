@@ -46,6 +46,8 @@ pub struct Course {
     pub strict_sources: Option<bool>,
     pub translated_from: Option<String>,
     pub category: Option<String>,
+    /// Per-course generation profile (JSON), or None to use the global default.
+    pub generation_profile: Option<serde_json::Value>,
 }
 
 pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
@@ -58,7 +60,7 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
     }
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category";
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category, generation_profile";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -78,6 +80,9 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         strict_sources: r.get::<_, Option<i64>>(13)?.map(|v| v != 0),
         translated_from: r.get(14)?,
         category: r.get(15)?,
+        generation_profile: r
+            .get::<_, Option<String>>(16)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -91,8 +96,8 @@ pub fn insert_translated_course(
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO courses \
-         (id, topic, title, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, translated_from, category) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12)",
+         (id, topic, title, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, translated_from, category, generation_profile) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             id,
             source.topic,
@@ -106,7 +111,21 @@ pub fn insert_translated_course(
             source.strict_sources.map(|b| b as i64),
             source.id,
             source.category,
+            source.generation_profile.as_ref().map(|v| v.to_string()),
         ],
+    )?;
+    Ok(())
+}
+
+/// Persist the per-course generation profile as a JSON string (or clear it).
+pub fn set_course_generation_profile(
+    conn: &Connection,
+    id: &str,
+    profile_json: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET generation_profile = ?2 WHERE id = ?1",
+        rusqlite::params![id, profile_json],
     )?;
     Ok(())
 }
