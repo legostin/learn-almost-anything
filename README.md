@@ -31,6 +31,55 @@ You choose a topic, language, format, and agent. The app asks clarifying questio
 
 The app writes the selected course language into prompts for wizard questions, plans, lesson text, tests, assignments, and review. Mixed-language libraries are expected, not an edge case.
 
+### How Generation Works
+
+You pick one agent (Claude or Codex) when creating the course; every LLM step then runs through it via a local Node sidecar. The pipeline is:
+
+1. **Wizard** — the agent asks a few clarifying questions; your answers become the course brief.
+2. **Plan** — the agent researches the topic (web / Context7 / MediaWiki, plus any Space material), designs the module/submodule curriculum, and classifies the course into a subject category (which adds a few reputable preferred sources for the writing stage).
+3. **Per-submodule generation** (sequential, with retries) — three stages per lesson: draft (article + widgets) → editor/fact-check review → widget validation. Then each lesson is enriched with illustrations (a per-block choice between a real image and an inline code snippet), a comprehension test, and practical homework.
+
+```mermaid
+flowchart TD
+  U["Topic, language, format, agent, space"] --> CC["create_course (status: wizard)"]
+  CC --> AGENT{"Chosen agent<br/>(every LLM call)"}
+  AGENT -->|claude| SC[["Node sidecar"]]
+  AGENT -->|codex| SC
+
+  SC --> WQ["wizard_questions"]
+  WQ --> ANS["User answers → course brief"]
+  ANS --> BS["build_structure"]
+
+  subgraph PLAN["Planning"]
+    BS --> R1["Research: web / Context7 / MediaWiki + Space material"]
+    R1 --> R2["Curriculum: modules → submodules"]
+    R2 --> R3["Classify course category"]
+    R3 --> R4["install_structure → structure.json + category"]
+  end
+
+  R4 --> LOOP{"For each submodule<br/>(sequential, with retries)"}
+
+  subgraph GEN["Submodule generation"]
+    LOOP --> D1["Stage 1 — submodule_draft:<br/>article + draft widgets + category sources"]
+    D1 --> D2["Stage 2 — submodule_review:<br/>editor + fact-check"]
+    D2 --> D3["Stage 3 — submodule_annotate:<br/>validate Mermaid, repair interactive"]
+    D3 --> ILL["plan_illustrations — per block:<br/>image vs inline code snippet"]
+    ILL --> IMG["search / generate images (+ vision check)"]
+    D3 --> TST["generate_test"]
+    D3 --> HW["generate_assignments"]
+  end
+
+  IMG --> RDY["Lesson ready"]
+  TST --> RDY
+  HW --> RDY
+  RDY --> LOOP
+  LOOP -->|all done| FIN(["Course ready"])
+
+  D1 -. "error / timeout → retry, else switch agent" .-> D1
+```
+
+Translating a course re-runs translation over the structure, articles, tests, homework, widget captions, Mermaid diagram labels, and interactive widget text, and regenerates AI images whose baked-in text was in the source language.
+
 ## Agents And Billing
 
 The app itself is free and does not run a paid backend for generation. Costs and limits come from the external accounts you connect.
