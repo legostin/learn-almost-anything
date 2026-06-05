@@ -7838,6 +7838,10 @@ function VideoWidget({
             src={embed}
             title={widget.title || `video ${id}`}
             allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            // YouTube returns "Error 153" when the embed gets no acceptable HTTP
+            // Referer (the app's custom-scheme origin). Force the origin to be
+            // sent so the player loads inside the webview.
+            referrerPolicy="strict-origin-when-cross-origin"
             allowFullScreen
           />
         </div>
@@ -7853,6 +7857,11 @@ function VideoWidget({
       )}
       <figcaption>
         {widget.title && <div className="widget-video-title">{widget.title}</div>}
+        {embed && (
+          <a className="widget-video-open" href={widget.url} target="_blank" rel="noreferrer">
+            {t("widgetVideoOpen")} ↗
+          </a>
+        )}
         {widget.why && <div className="widget-video-why">{widget.why}</div>}
         {widget.recommended_by && (
           <div className="widget-video-rec">
