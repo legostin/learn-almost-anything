@@ -124,6 +124,18 @@ const STRINGS = {
     courseFormatPodcastTitle: "Серия подкастов",
     courseFormatPodcastDesc:
       "План как сезоны и эпизоды, материалы пишутся как сценарии для прослушивания.",
+    tierLabel: "Качество и стоимость генерации",
+    tierNote:
+      "Влияет на глубину исследования, объём материалов, иллюстрации и задания. Можно изменить для каждого курса.",
+    tierQuickTitle: "Быстро",
+    tierQuickDesc:
+      "Дешевле и быстрее: меньше исследований, без домашних заданий, картинки только из поиска. Тесты остаются.",
+    tierBalancedTitle: "Сбалансированно",
+    tierBalancedDesc:
+      "Поведение по умолчанию: полноценные статьи, тесты, задания и иллюстрации.",
+    tierPremiumTitle: "Максимум",
+    tierPremiumDesc:
+      "Глубокое исследование и максимум проработки: больше вопросов, полный набор иллюстраций и сценариев обучения.",
     topicLabel: "Что хотите изучить?",
     topicPlaceholder: "например: хочу с нуля разобраться в академической живописи",
     courseLanguageLabel: "Язык курса",
@@ -596,6 +608,18 @@ const STRINGS = {
     courseFormatPodcastTitle: "Podcast series",
     courseFormatPodcastDesc:
       "A season/episode plan with materials written as listenable scripts.",
+    tierLabel: "Generation quality & cost",
+    tierNote:
+      "Controls research depth, amount of material, illustrations and homework. Can be changed per course.",
+    tierQuickTitle: "Quick",
+    tierQuickDesc:
+      "Cheaper and faster: less research, no homework, images from search only. Tests stay on.",
+    tierBalancedTitle: "Balanced",
+    tierBalancedDesc:
+      "Default behavior: full articles, tests, assignments and illustrations.",
+    tierPremiumTitle: "Premium",
+    tierPremiumDesc:
+      "Deep research and maximum scaffolding: more questions, full illustrations and learning aids.",
     topicLabel: "What do you want to learn?",
     topicPlaceholder: "e.g. I want to learn academic painting from scratch",
     courseLanguageLabel: "Course language",

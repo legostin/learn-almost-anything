@@ -72,6 +72,20 @@ const COURSE_FORMATS = [
     | "courseFormatPodcastDesc";
 }>;
 
+// Generation cost/quality tier chosen at course creation; mirrors the Rust
+// GenerationProfile tier (settings.rs). Blank knobs resolve from the tier preset.
+type GenerationTier = "quick" | "balanced" | "premium";
+const DEFAULT_GENERATION_TIER: GenerationTier = "balanced";
+const GENERATION_TIERS = [
+  { value: "quick", titleKey: "tierQuickTitle", descKey: "tierQuickDesc" },
+  { value: "balanced", titleKey: "tierBalancedTitle", descKey: "tierBalancedDesc" },
+  { value: "premium", titleKey: "tierPremiumTitle", descKey: "tierPremiumDesc" },
+] as const satisfies ReadonlyArray<{
+  value: GenerationTier;
+  titleKey: "tierQuickTitle" | "tierBalancedTitle" | "tierPremiumTitle";
+  descKey: "tierQuickDesc" | "tierBalancedDesc" | "tierPremiumDesc";
+}>;
+
 type Course = {
   id: string;
   topic: string;
@@ -3912,6 +3926,7 @@ function CreateCourse({
   const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
   const [topic, setTopic] = useState("");
   const [courseFormat, setCourseFormat] = useState<CourseFormat>(DEFAULT_COURSE_FORMAT);
+  const [tier, setTier] = useState<GenerationTier>(DEFAULT_GENERATION_TIER);
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
@@ -3947,6 +3962,9 @@ function CreateCourse({
       spaceId: selectedSpace || null,
       strict: selectedSpace ? strict : null,
     });
+    // Record the chosen cost/quality tier on the course (drives stage gating
+    // and the sidecar depth/pedagogy knobs during generation).
+    await invoke("set_course_profile", { courseId: id, profile: { tier } }).catch(() => {});
     onCreated(id);
   }
 
@@ -3985,6 +4003,30 @@ function CreateCourse({
           ))}
         </div>
         <span className="field-note">{t("courseFormatNote")}</span>
+      </label>
+      <label>
+        {t("tierLabel")}
+        <div className="format-picker">
+          {GENERATION_TIERS.map((item) => (
+            <label
+              key={item.value}
+              className={`format-option ${tier === item.value ? "selected" : ""}`}
+            >
+              <input
+                type="radio"
+                name="generation-tier"
+                value={item.value}
+                checked={tier === item.value}
+                onChange={() => setTier(item.value)}
+              />
+              <div className="format-meta">
+                <div className="format-title">{t(item.titleKey)}</div>
+                <div className="format-desc">{t(item.descKey)}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <span className="field-note">{t("tierNote")}</span>
       </label>
       <label>
         {t("courseLanguageLabel")}
