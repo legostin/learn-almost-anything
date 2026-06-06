@@ -251,7 +251,17 @@ type View =
   | { kind: "spaces" }
   | { kind: "space"; id: string }
   | { kind: "course"; id: string }
+  | { kind: "review" }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
+
+type DueReview = {
+  course_id: string;
+  module_id: string;
+  submodule_id: string;
+  course_title: string;
+  submodule_title: string;
+  due_at: number;
+};
 
 type Space = {
   id: string;
@@ -757,6 +767,7 @@ function App() {
   const [uiLang] = useLang();
   const [courses, setCourses] = useState<Course[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
+  const [reviewDueTotal, setReviewDueTotal] = useState(0);
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
   const [translateStatus, setTranslateStatus] = useState<
     Map<string, { done: number; total: number; complete: boolean }>
@@ -864,9 +875,24 @@ function App() {
     setCourses(list);
   }, []);
 
+  const refreshReviewDue = useCallback(async () => {
+    try {
+      const counts = await invoke<Record<string, number>>("due_review_counts");
+      setReviewDueTotal(Object.values(counts).reduce((a, b) => a + b, 0));
+    } catch {
+      setReviewDueTotal(0);
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Refresh the due-review badge when the course set changes or we leave the
+  // review screen (so a finished session updates the count).
+  useEffect(() => {
+    refreshReviewDue();
+  }, [refreshReviewDue, courses, view.kind]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1249,6 +1275,14 @@ function App() {
           {t("newCourse")}
         </button>
         <div className="sidebar-links">
+          {reviewDueTotal > 0 && (
+            <button
+              className={`sidebar-link ${view.kind === "review" ? "active" : ""}`}
+              onClick={() => setView({ kind: "review" })}
+            >
+              {t("reviewNav")} <span className="review-due-badge">{reviewDueTotal}</span>
+            </button>
+          )}
           <button
             className={`sidebar-link ${view.kind === "spaces" || view.kind === "space" ? "active" : ""}`}
             onClick={() => setView({ kind: "spaces" })}
@@ -1418,6 +1452,12 @@ function App() {
               openCourse(id);
             }}
             onCancel={() => setView({ kind: "empty" })}
+          />
+        )}
+        {view.kind === "review" && (
+          <ReviewView
+            onClose={() => setView({ kind: "empty" })}
+            onGraded={refreshReviewDue}
           />
         )}
         {view.kind === "catalog" && (
@@ -2134,9 +2174,19 @@ function CourseDashboard({
           return [course.id, emptyProgress()] as const;
         }
       })
-    ).then((entries) => {
+    ).then(async (entries) => {
       if (cancelled) return;
-      setProgressById(new Map(entries));
+      const map = new Map(entries);
+      try {
+        const counts = await invoke<Record<string, number>>("due_review_counts");
+        for (const [cid, n] of Object.entries(counts)) {
+          const p = map.get(cid);
+          if (p) p.reviewDue = n;
+        }
+      } catch {
+        /* leave reviewDue at 0 */
+      }
+      if (!cancelled) setProgressById(new Map(map));
     });
     return () => {
       cancelled = true;
@@ -8042,6 +8092,187 @@ function TestSection({
             {t("testRetake")}
           </button>
         </div>
+      )}
+    </section>
+  );
+}
+
+// Spaced-repetition Review screen: steps through due submodule MCQ sets,
+// re-quizzes, and grades each via SM-2 (grade_review).
+function ReviewView({
+  onClose,
+  onGraded,
+}: {
+  onClose: () => void;
+  onGraded: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [due, setDue] = useState<DueReview[] | null>(null);
+  const [idx, setIdx] = useState(0);
+
+  useEffect(() => {
+    invoke<DueReview[]>("get_due_reviews", { courseId: null })
+      .then((d) => setDue(d))
+      .catch(() => setDue([]));
+  }, []);
+
+  if (due === null) {
+    return <div className="placeholder">{t("loadingStructure")}</div>;
+  }
+  if (idx >= due.length) {
+    return (
+      <div className="review-done">
+        <div className="review-done-icon">✓</div>
+        <div className="review-done-title">{t("reviewAllDone")}</div>
+        <button className="test-start" onClick={onClose}>
+          {t("reviewBackHome")}
+        </button>
+      </div>
+    );
+  }
+  const item = due[idx];
+  return (
+    <ReviewCard
+      key={item.submodule_id}
+      item={item}
+      index={idx}
+      total={due.length}
+      onGraded={onGraded}
+      onNext={() => setIdx((i) => i + 1)}
+    />
+  );
+}
+
+function ReviewCard({
+  item,
+  index,
+  total,
+  onGraded,
+  onNext,
+}: {
+  item: DueReview;
+  index: number;
+  total: number;
+  onGraded: () => void | Promise<void>;
+  onNext: () => void;
+}) {
+  const t = useT();
+  const [questions, setQuestions] = useState<TestQuestion[] | null>(null);
+  const [answers, setAnswers] = useState<(number | null)[]>([]);
+  const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    invoke<SubmoduleContent>("read_submodule_article", {
+      courseId: item.course_id,
+      moduleId: item.module_id,
+      submoduleId: item.submodule_id,
+    })
+      .then((c) => {
+        const qs = ((c.test as TestQuestion[]) ?? []).filter(
+          (q) => q && Array.isArray(q.options) && q.options.length > 0
+        );
+        setQuestions(qs);
+        setAnswers(qs.map(() => null));
+        // No test to re-quiz — deschedule so it doesn't stay due forever.
+        if (qs.length === 0) {
+          invoke("grade_review", { submoduleId: item.submodule_id, ratio: 1 })
+            .then(() => onGraded())
+            .catch(() => {});
+        }
+      })
+      .catch(() => setQuestions([]));
+  }, [item.submodule_id, item.course_id, item.module_id]);
+
+  if (questions === null) {
+    return <div className="placeholder">{t("loadingStructure")}</div>;
+  }
+
+  const correctCount = questions.reduce(
+    (n, q, i) => (answers[i] === q.correct ? n + 1 : n),
+    0
+  );
+  const ratio = questions.length > 0 ? correctCount / questions.length : 1;
+  const allAnswered = answers.every((a) => a !== null);
+  const passed = ratio >= TEST_PASS_THRESHOLD;
+
+  async function check() {
+    setSubmitted(true);
+    try {
+      await invoke("grade_review", { submoduleId: item.submodule_id, ratio });
+    } catch {
+      /* ignore */
+    }
+    await onGraded();
+  }
+
+  return (
+    <section className="review-card test">
+      <div className="review-progress">
+        {t("reviewProgress", { current: index + 1, total })}
+      </div>
+      <h3 className="test-title">
+        {item.course_title} · {item.submodule_title}
+      </h3>
+      {questions.length === 0 ? (
+        <>
+          <div className="review-empty">{t("reviewNoTest")}</div>
+          <button className="test-start" onClick={onNext}>
+            {t("reviewNext")} →
+          </button>
+        </>
+      ) : (
+        <>
+          <ol className="test-questions">
+            {questions.map((q, i) => (
+              <li key={i} className="test-q">
+                <div className="test-q-text">{q.text}</div>
+                <div className="test-options">
+                  {q.options.map((opt, j) => {
+                    const chosen = answers[i] === j;
+                    let cls = "test-option";
+                    if (submitted) {
+                      if (j === q.correct) cls += " correct";
+                      else if (chosen) cls += " wrong";
+                    } else if (chosen) {
+                      cls += " chosen";
+                    }
+                    return (
+                      <label key={j} className={cls}>
+                        <input
+                          type="radio"
+                          name={`rev-${item.submodule_id}-${i}`}
+                          checked={chosen}
+                          disabled={submitted}
+                          onChange={() =>
+                            setAnswers((prev) => prev.map((a, k) => (k === i ? j : a)))
+                          }
+                        />
+                        <span>{opt}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {submitted && q.explanation && (
+                  <div className="test-explanation">{q.explanation}</div>
+                )}
+              </li>
+            ))}
+          </ol>
+          {!submitted ? (
+            <button className="test-start" onClick={check} disabled={!allAnswered}>
+              {t("testSubmit")}
+            </button>
+          ) : (
+            <div className={`test-result ${passed ? "pass" : "fail"}`}>
+              <div className="test-result-score">
+                {t("testScore", { correct: correctCount, total: questions.length })}
+              </div>
+              <button className="test-start" onClick={onNext}>
+                {t("reviewNext")} →
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   );
