@@ -525,6 +525,32 @@ pub fn write_refinement_memory(
     Ok(())
 }
 
+/// Persist a weak-spot diagnosis to course memory. One stable file per submodule
+/// (overwritten on each new diagnosis) so the memory dir reflects the latest
+/// struggle without piling up. Read back by `read_memory_files` into every draft,
+/// so a targeted redraft (or any future generation) emphasizes these concepts.
+pub fn write_weakspot_memory(
+    paths: &AppPaths,
+    course_id: &str,
+    submodule_id: &str,
+    submodule_title: &str,
+    concepts: &[String],
+) -> Result<(), CourseError> {
+    let dir = paths.course_dir(course_id).join("memory");
+    fs::create_dir_all(&dir)?;
+    let ts = now_secs()?;
+    let bullets = concepts
+        .iter()
+        .map(|c| format!("- {c}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "---\nscope: course\ncreated_at: {ts}\ntrigger: \"Weak-spot diagnosis\"\n---\n\n## Learner weak spots\nOn submodule \"{submodule_title}\", the learner answered these concepts incorrectly on the FIRST test attempt:\n{bullets}\n\nWhen (re)generating material that touches these concepts, give them more attention: add clearer worked examples, explicitly address the common misconception behind each, and add an active comprehension check. Write in the course language.\n"
+    );
+    fs::write(dir.join(format!("weakspot-{submodule_id}.md")), content)?;
+    Ok(())
+}
+
 pub fn delete_course_dir(paths: &AppPaths, course_id: &str) -> Result<(), CourseError> {
     let dir = paths.course_dir(course_id);
     if dir.exists() {

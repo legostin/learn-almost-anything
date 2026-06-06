@@ -2438,19 +2438,59 @@ fn ratio_to_quality(ratio: f64) -> u8 {
 #[tauri::command]
 fn submit_test_result(
     db_state: tauri::State<'_, Arc<Db>>,
+    paths: tauri::State<'_, Arc<AppPaths>>,
     submodule_id: String,
     ratio: f64,
     results: Vec<bool>,
     passed: bool,
+    weak_concepts: Option<Vec<String>>,
 ) -> Result<(), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs() as i64;
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    // Detect the FIRST attempt before recording: weak-spot diagnosis must reflect
+    // honest first-attempt struggles, not a brute-forced retake.
+    let is_first_attempt = db::first_attempt_ratio(&conn, &submodule_id)
+        .map_err(|e| e.to_string())?
+        .is_none();
     // Always record the attempt (even failures) so spaced review and weak-spot
     // diagnosis see honest first-attempt performance; pass also gates progress.
     db::record_test_attempt(&conn, &submodule_id, ratio, &results, now).map_err(|e| e.to_string())?;
+    // On the first attempt, persist the concepts missed so a targeted redraft (or
+    // any future generation) emphasizes them. Cheap: writes one course-memory file.
+    if is_first_attempt {
+        if let Some(weak) = weak_concepts.as_ref() {
+            let weak: Vec<String> = weak
+                .iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            if !weak.is_empty() {
+                if let Some(course_id) =
+                    db::course_id_for_submodule(&conn, &submodule_id).map_err(|e| e.to_string())?
+                {
+                    let title = courses::load_structure(&conn, &course_id)
+                        .ok()
+                        .and_then(|s| {
+                            courses::find_submodule_path(&s, &submodule_id)
+                                .map(|(_, sub)| sub.title.clone())
+                        })
+                        .unwrap_or_else(|| submodule_id.clone());
+                    if let Err(e) = courses::write_weakspot_memory(
+                        &paths,
+                        &course_id,
+                        &submodule_id,
+                        &title,
+                        &weak,
+                    ) {
+                        eprintln!("weak-spot memory write failed: {e}");
+                    }
+                }
+            }
+        }
+    }
     if passed {
         db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())?;
         // Seed spaced review on first pass, graded by the honest FIRST-attempt

@@ -6190,12 +6190,13 @@ function SubmoduleView({
                 <TestSection
                   questions={content.test}
                   alreadyPassed={!!sub.test_passed}
-                  onResult={async (ratio, results, passed) => {
+                  onResult={async (ratio, results, passed, weakConcepts) => {
                     await invoke("submit_test_result", {
                       submoduleId,
                       ratio,
                       results,
                       passed,
+                      weakConcepts,
                     });
                     if (passed) await reloadTree();
                   }}
@@ -8015,7 +8016,12 @@ function TestSection({
 }: {
   questions: TestQuestion[];
   alreadyPassed: boolean;
-  onResult: (ratio: number, results: boolean[], passed: boolean) => void | Promise<void>;
+  onResult: (
+    ratio: number,
+    results: boolean[],
+    passed: boolean,
+    weakConcepts: string[]
+  ) => void | Promise<void>;
 }) {
   const t = useT();
   const [started, setStarted] = useState(false);
@@ -8048,7 +8054,16 @@ function TestSection({
     // Send the real per-question result every attempt so the backend can grade
     // honestly (first attempt drives spaced review); pass also gates progress.
     const results = shown.map((q, i) => answers[i] === q.correct);
-    await onResult(ratio, results, passed);
+    // Concepts the learner missed — drives the first-attempt weak-spot note.
+    const weakConcepts = Array.from(
+      new Set(
+        shown
+          .filter((q, i) => answers[i] !== q.correct)
+          .map((q) => (q.concept || "").trim())
+          .filter(Boolean)
+      )
+    );
+    await onResult(ratio, results, passed, weakConcepts);
   }
 
   function retake() {

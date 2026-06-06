@@ -325,7 +325,23 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().map(|x| x.as_bool().unwrap_or(false)).collect::<Vec<bool>>())
                 .unwrap_or_default();
-            crate::submit_test_result(app.state(), req("submoduleId")?, ratio, results, passed)?;
+            let weak_concepts = a
+                .get("weakConcepts")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                });
+            crate::submit_test_result(
+                app.state(),
+                app.state(),
+                req("submoduleId")?,
+                ratio,
+                results,
+                passed,
+                weak_concepts,
+            )?;
             Ok(Value::Null)
         }
         "delete_course" => {
