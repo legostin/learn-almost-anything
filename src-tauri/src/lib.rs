@@ -691,6 +691,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
             generation_state: "pending".to_string(),
             test_passed: false,
             test_passed_at: None,
+            prereqs: vec![],
             submodules: m
                 .submodules
                 .into_iter()
@@ -701,6 +702,7 @@ fn parse_refine(v: serde_json::Value) -> Result<(String, Vec<courses::ModuleNode
                     generation_state: "pending".to_string(),
                     test_passed: false,
                     test_passed_at: None,
+                    prereqs: s.prereqs,
                     submodules: vec![],
                 })
                 .collect(),
@@ -3365,6 +3367,7 @@ fn translate_course(
                         generation_state: s.generation_state.clone(),
                         test_passed: false,
                         test_passed_at: None,
+                        prereqs: s.prereqs.clone(),
                         submodules: vec![],
                     }
                 })
@@ -3376,6 +3379,7 @@ fn translate_course(
                 generation_state: m.generation_state.clone(),
                 test_passed: false,
                 test_passed_at: None,
+                prereqs: m.prereqs.clone(),
                 submodules,
             }
         })
@@ -3414,6 +3418,10 @@ fn translate_course(
                     &s.generation_state,
                 )
                 .map_err(|e| e.to_string())?;
+                if !s.prereqs.is_empty() {
+                    let json = serde_json::to_string(&s.prereqs).unwrap_or_default();
+                    db::set_module_prereqs(&conn, &s.id, Some(&json)).map_err(|e| e.to_string())?;
+                }
             }
         }
     }

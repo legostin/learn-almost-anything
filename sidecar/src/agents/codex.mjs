@@ -2297,6 +2297,7 @@ Constraints:
 - Skip modules irrelevant to those goals; do not produce a generic textbook.
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
+- For NON-LINEAR subjects, if a submodule genuinely requires understanding an EARLIER submodule first, list those earlier submodule titles verbatim in its "prereqs". For linear/sequential courses where each part simply follows the previous, leave "prereqs" empty. Never list a later submodule and never create cycles.
 
 ${languageStyleGuide(lang)}
 
@@ -2310,8 +2311,14 @@ ${categoryClassifyGuide()}`;
     properties: {
       title: { type: "string" },
       summary: { type: "string" },
+      prereqs: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Titles of EARLIER submodules this one depends on (non-linear courses only); empty for linear/sequential courses.",
+      },
     },
-    required: ["title", "summary"],
+    required: ["title", "summary", "prereqs"],
   };
 
   const schema = {
@@ -2369,6 +2376,9 @@ ${categoryClassifyGuide()}`;
           .map((s) => ({
             title: s.title.trim(),
             summary: typeof s.summary === "string" ? s.summary.trim() : "",
+            prereqs: Array.isArray(s.prereqs)
+              ? s.prereqs.filter((p) => typeof p === "string" && p.trim()).map((p) => p.trim())
+              : [],
           })),
       };
     });

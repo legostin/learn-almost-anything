@@ -371,6 +371,7 @@ pub struct Module {
     pub title: String,
     pub summary: Option<String>,
     pub generation_state: String,
+    pub prereqs: Option<String>,
 }
 
 pub fn insert_module(
@@ -391,9 +392,23 @@ pub fn insert_module(
     Ok(())
 }
 
+/// Store a submodule's soft prerequisites (JSON array of earlier submodule
+/// titles). Called after insert_module; NULL when there are none.
+pub fn set_module_prereqs(
+    conn: &Connection,
+    id: &str,
+    prereqs_json: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET prereqs = ?2 WHERE id = ?1",
+        rusqlite::params![id, prereqs_json],
+    )?;
+    Ok(())
+}
+
 pub fn list_modules(conn: &Connection, course_id: &str) -> Result<Vec<Module>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, course_id, parent_id, position, title, summary, generation_state \
+        "SELECT id, course_id, parent_id, position, title, summary, generation_state, prereqs \
          FROM modules WHERE course_id = ?1 ORDER BY parent_id IS NULL DESC, position",
     )?;
     let rows = stmt.query_map([course_id], |r| {
@@ -405,6 +420,7 @@ pub fn list_modules(conn: &Connection, course_id: &str) -> Result<Vec<Module>, r
             title: r.get(4)?,
             summary: r.get(5)?,
             generation_state: r.get(6)?,
+            prereqs: r.get(7)?,
         })
     })?;
     rows.collect()

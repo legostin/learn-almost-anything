@@ -149,6 +149,8 @@ pub struct SidecarSubmodule {
     pub title: String,
     #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub prereqs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +186,8 @@ pub struct ModuleNode {
     pub test_passed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_passed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prereqs: Vec<String>,
     pub submodules: Vec<ModuleNode>,
 }
 
@@ -217,6 +221,7 @@ pub fn install_structure(
             generation_state: default_pending(),
             test_passed: false,
             test_passed_at: None,
+            prereqs: vec![],
             submodules: m
                 .submodules
                 .into_iter()
@@ -227,6 +232,7 @@ pub fn install_structure(
                     generation_state: default_pending(),
                     test_passed: false,
                     test_passed_at: None,
+                    prereqs: s.prereqs,
                     submodules: vec![],
                 })
                 .collect(),
@@ -268,6 +274,10 @@ pub fn install_structure(
                 if s.summary.is_empty() { None } else { Some(&s.summary) },
                 "pending",
             )?;
+            if !s.prereqs.is_empty() {
+                let json = serde_json::to_string(&s.prereqs).unwrap_or_default();
+                db::set_module_prereqs(conn, &s.id, Some(&json))?;
+            }
         }
     }
 
@@ -380,6 +390,7 @@ pub fn save_structure(
                 generation_state: default_pending(),
                 test_passed: false,
                 test_passed_at: None,
+                prereqs: vec![],
                 submodules: vec![],
             });
         }
@@ -390,6 +401,7 @@ pub fn save_structure(
             generation_state: default_pending(),
             test_passed: false,
             test_passed_at: None,
+            prereqs: vec![],
             submodules: out_subs,
         });
     }
@@ -1034,6 +1046,11 @@ pub fn load_structure(
 
     for m in rows {
         let test_passed_at = passed.get(&m.id).copied();
+        let prereqs = m
+            .prereqs
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .unwrap_or_default();
         let node = ModuleNode {
             test_passed: test_passed_at.is_some(),
             test_passed_at,
@@ -1041,6 +1058,7 @@ pub fn load_structure(
             title: m.title,
             summary: m.summary.unwrap_or_default(),
             generation_state: m.generation_state,
+            prereqs,
             submodules: vec![],
         };
         match m.parent_id {

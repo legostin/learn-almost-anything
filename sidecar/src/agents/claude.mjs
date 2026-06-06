@@ -1397,6 +1397,7 @@ Constraints:
 - Skip modules irrelevant to those goals; do not produce a generic textbook outline.
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
+- For NON-LINEAR subjects, if a submodule genuinely requires understanding an EARLIER submodule first, list those earlier submodule titles verbatim in its "prereqs" array. For linear/sequential courses where each part simply follows the previous, use an empty "prereqs" array. Never list a later submodule and never create cycles.
 
 ${languageStyleGuide(lang)}
 
@@ -1406,7 +1407,7 @@ ${categoryClassifyGuide()}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
-{"category":"<one id from the list above>","title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"..."}]}]}`;
+{"category":"<one id from the list above>","title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"...","prereqs":[]}]}]}`;
   const text = await runStreamed(prompt, ctx?.progress, {
     web: true,
     modelConfig,
@@ -1432,6 +1433,9 @@ Shape:
           .map((s) => ({
             title: s.title.trim(),
             summary: typeof s.summary === "string" ? s.summary.trim() : "",
+            prereqs: Array.isArray(s.prereqs)
+              ? s.prereqs.filter((p) => typeof p === "string" && p.trim()).map((p) => p.trim())
+              : [],
           })),
       };
     });

@@ -2101,6 +2101,30 @@ button {
   margin-bottom: 28px;
 }
 
+.sub-prereq-hint {
+  margin: -14px 0 28px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-muted, rgba(127, 127, 127, 0.06));
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.sub-prereq-label {
+  font-weight: 600;
+}
+
+.sub-prereq-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent, #2563eb);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .sub-empty {
   padding: 28px 0;
   background: transparent;

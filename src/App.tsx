@@ -187,6 +187,7 @@ type ModuleNode = {
   generation_state: GenState;
   test_passed?: boolean;
   test_passed_at?: number | null;
+  prereqs?: string[];
   submodules: ModuleNode[];
 };
 
@@ -6026,6 +6027,23 @@ function SubmoduleView({
     tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
   const isPodcast = course.course_format === "podcast_series";
   const unresolvedImages = !isPodcast && content ? countUnresolvedImageWidgets(content.widgets) : 0;
+  // Soft prerequisites (non-linear courses): unmet earlier submodules, matched by
+  // title across the tree. Non-blocking — a hint with links, never a hard lock.
+  const prereqLinks = (sub.prereqs ?? [])
+    .map((title) => {
+      const norm = title.trim().toLowerCase();
+      for (const m of tree!.modules) {
+        for (const s of m.submodules) {
+          if (s.id !== submoduleId && s.title.trim().toLowerCase() === norm) {
+            return { moduleId: m.id, submoduleId: s.id, title: s.title, passed: !!s.test_passed };
+          }
+        }
+      }
+      return null;
+    })
+    .filter((x): x is { moduleId: string; submoduleId: string; title: string; passed: boolean } =>
+      !!x && !x.passed
+    );
 
   async function retryImages() {
     if (!course) return;
@@ -6059,6 +6077,22 @@ function SubmoduleView({
       </div>
       <h1 className="sub-h1">{sub.title}</h1>
       {sub.summary && <div className="sub-lead">{sub.summary}</div>}
+      {prereqLinks.length > 0 && (
+        <div className="sub-prereq-hint">
+          <span className="sub-prereq-label">{t("prereqHint")}</span>{" "}
+          {prereqLinks.map((p, i) => (
+            <span key={p.submoduleId}>
+              {i > 0 && ", "}
+              <button
+                className="sub-prereq-link"
+                onClick={() => onOpenSubmodule(p.moduleId, p.submoduleId)}
+              >
+                {p.title}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {(state === "pending" || state === "queued" || state === "failed") && (
         <div className="sub-empty">
