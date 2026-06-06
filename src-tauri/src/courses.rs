@@ -293,6 +293,8 @@ pub struct ModuleUpdate {
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
+    pub prereqs: Vec<String>,
+    #[serde(default)]
     pub submodules: Vec<ModuleUpdate>,
 }
 
@@ -355,6 +357,13 @@ pub fn save_structure(
                 Some(sub_summary.as_str())
             };
 
+            let sub_prereqs: Vec<String> = s
+                .prereqs
+                .iter()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+
             let (sub_id, sub_is_existing) = if !s.id.is_empty() && existing_ids.contains(&s.id) {
                 (s.id.clone(), true)
             } else {
@@ -383,6 +392,13 @@ pub fn save_structure(
                     "pending",
                 )?;
             }
+            // Persist prereqs (clear when none, so an edit that removes them sticks).
+            let prereqs_json = if sub_prereqs.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&sub_prereqs).unwrap_or_default())
+            };
+            db::set_module_prereqs(&tx, &sub_id, prereqs_json.as_deref())?;
             out_subs.push(ModuleNode {
                 id: sub_id,
                 title: sub_title,
@@ -390,7 +406,7 @@ pub fn save_structure(
                 generation_state: default_pending(),
                 test_passed: false,
                 test_passed_at: None,
-                prereqs: vec![],
+                prereqs: sub_prereqs,
                 submodules: vec![],
             });
         }
@@ -1044,6 +1060,7 @@ pub fn tree_to_updates(modules: &[ModuleNode]) -> Vec<ModuleUpdate> {
             id: String::new(),
             title: m.title.clone(),
             summary: m.summary.clone(),
+            prereqs: m.prereqs.clone(),
             submodules: m
                 .submodules
                 .iter()
@@ -1051,6 +1068,7 @@ pub fn tree_to_updates(modules: &[ModuleNode]) -> Vec<ModuleUpdate> {
                     id: String::new(),
                     title: s.title.clone(),
                     summary: s.summary.clone(),
+                    prereqs: s.prereqs.clone(),
                     submodules: vec![],
                 })
                 .collect(),

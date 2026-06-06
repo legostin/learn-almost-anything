@@ -8125,7 +8125,9 @@ function FlashcardDeck({ cards }: { cards: Flashcard[] }) {
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   if (!cards.length) return null;
-  const card = cards[idx];
+  // Clamp: a shorter deck (e.g. regenerated mid-view) must not index past the end.
+  const safeIdx = Math.min(idx, cards.length - 1);
+  const card = cards[safeIdx];
   function go(delta: number) {
     setIdx((i) => Math.min(cards.length - 1, Math.max(0, i + delta)));
     setFlipped(false);
@@ -8157,7 +8159,7 @@ function FlashcardDeck({ cards }: { cards: Flashcard[] }) {
       <div className="flashcards-header">
         <h3 className="flashcards-title">{t("flashcardsTitle")}</h3>
         <span className="flashcards-progress">
-          {idx + 1} / {cards.length}
+          {safeIdx + 1} / {cards.length}
         </span>
       </div>
       <button
@@ -8170,10 +8172,10 @@ function FlashcardDeck({ cards }: { cards: Flashcard[] }) {
         </div>
       </button>
       <div className="flashcards-nav">
-        <button disabled={idx === 0} onClick={() => go(-1)}>
+        <button disabled={safeIdx === 0} onClick={() => go(-1)}>
           {t("flashcardsPrev")}
         </button>
-        <button disabled={idx >= cards.length - 1} onClick={() => go(1)}>
+        <button disabled={safeIdx >= cards.length - 1} onClick={() => go(1)}>
           {t("flashcardsNext")}
         </button>
       </div>
