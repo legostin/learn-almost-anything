@@ -548,6 +548,184 @@ pub fn record_test_attempt(
     Ok(())
 }
 
+// ===== Spaced repetition (SM-2) =====
+
+const REVIEW_DAY_SECS: i64 = 86_400;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewState {
+    pub submodule_id: String,
+    pub course_id: String,
+    pub due_at: i64,
+    pub interval_days: f64,
+    pub ease: f64,
+    pub reps: i64,
+    pub lapses: i64,
+    pub last_reviewed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DueReview {
+    pub course_id: String,
+    pub module_id: String,
+    pub submodule_id: String,
+    pub course_title: String,
+    pub submodule_title: String,
+    pub due_at: i64,
+}
+
+fn none_on_no_rows<T>(r: Result<T, rusqlite::Error>) -> Result<Option<T>, rusqlite::Error> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn course_id_for_submodule(
+    conn: &Connection,
+    submodule_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    none_on_no_rows(conn.query_row(
+        "SELECT course_id FROM modules WHERE id = ?1",
+        [submodule_id],
+        |r| r.get::<_, String>(0),
+    ))
+}
+
+pub fn first_attempt_ratio(
+    conn: &Connection,
+    module_id: &str,
+) -> Result<Option<f64>, rusqlite::Error> {
+    Ok(none_on_no_rows(conn.query_row(
+        "SELECT first_attempt_ratio FROM progress WHERE module_id = ?1",
+        [module_id],
+        |r| r.get::<_, Option<f64>>(0),
+    ))?
+    .flatten())
+}
+
+pub fn get_review(
+    conn: &Connection,
+    submodule_id: &str,
+) -> Result<Option<ReviewState>, rusqlite::Error> {
+    none_on_no_rows(conn.query_row(
+        "SELECT submodule_id, course_id, due_at, interval_days, ease, reps, lapses, last_reviewed_at \
+         FROM reviews WHERE submodule_id = ?1",
+        [submodule_id],
+        |r| {
+            Ok(ReviewState {
+                submodule_id: r.get(0)?,
+                course_id: r.get(1)?,
+                due_at: r.get(2)?,
+                interval_days: r.get(3)?,
+                ease: r.get(4)?,
+                reps: r.get(5)?,
+                lapses: r.get(6)?,
+                last_reviewed_at: r.get(7)?,
+            })
+        },
+    ))
+}
+
+/// Apply one SM-2 grade (quality 0..=5) and upsert the review row.
+pub fn apply_review_grade(
+    conn: &Connection,
+    submodule_id: &str,
+    course_id: &str,
+    quality: u8,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    let prev = get_review(conn, submodule_id)?;
+    let mut ease = prev.as_ref().map(|s| s.ease).unwrap_or(2.5);
+    let prev_interval = prev.as_ref().map(|s| s.interval_days).unwrap_or(0.0);
+    let prev_reps = prev.as_ref().map(|s| s.reps).unwrap_or(0);
+    let mut lapses = prev.as_ref().map(|s| s.lapses).unwrap_or(0);
+    let q = quality.min(5);
+    let (reps, interval_days) = if q < 3 {
+        if prev_reps > 0 {
+            lapses += 1;
+        }
+        (0_i64, 1.0_f64)
+    } else {
+        let reps = prev_reps + 1;
+        let interval = match reps {
+            1 => 1.0,
+            2 => 6.0,
+            _ => (prev_interval.max(1.0) * ease).round().max(1.0),
+        };
+        (reps, interval)
+    };
+    let qf = q as f64;
+    ease = (ease + (0.1 - (5.0 - qf) * (0.08 + (5.0 - qf) * 0.02))).max(1.3);
+    let due_at = now + (interval_days * REVIEW_DAY_SECS as f64) as i64;
+    conn.execute(
+        "INSERT INTO reviews (submodule_id, course_id, due_at, interval_days, ease, reps, lapses, last_reviewed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         ON CONFLICT(submodule_id) DO UPDATE SET \
+            course_id = ?2, due_at = ?3, interval_days = ?4, ease = ?5, reps = ?6, lapses = ?7, last_reviewed_at = ?8",
+        rusqlite::params![submodule_id, course_id, due_at, interval_days, ease, reps, lapses, now],
+    )?;
+    Ok(())
+}
+
+/// Count of due reviews per course (course_id -> count).
+pub fn due_review_counts(
+    conn: &Connection,
+    now: i64,
+) -> Result<std::collections::HashMap<String, i64>, rusqlite::Error> {
+    let mut stmt =
+        conn.prepare("SELECT course_id, COUNT(*) FROM reviews WHERE due_at <= ?1 GROUP BY course_id")?;
+    let rows = stmt.query_map([now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    rows.collect()
+}
+
+/// Due reviews (optionally course-scoped), soonest first, capped at `limit`.
+pub fn get_due_reviews(
+    conn: &Connection,
+    course_id: Option<&str>,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<DueReview>, rusqlite::Error> {
+    let base = "SELECT r.course_id, m.parent_id, r.submodule_id, COALESCE(c.title, c.topic), m.title, r.due_at \
+                FROM reviews r \
+                JOIN modules m ON m.id = r.submodule_id \
+                JOIN courses c ON c.id = r.course_id \
+                WHERE r.due_at <= ?1";
+    match course_id {
+        Some(cid) => {
+            let sql = format!("{base} AND r.course_id = ?2 ORDER BY r.due_at ASC LIMIT ?3");
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![now, cid, limit], |r| {
+                Ok(DueReview {
+                    course_id: r.get(0)?,
+                    module_id: r.get(1)?,
+                    submodule_id: r.get(2)?,
+                    course_title: r.get(3)?,
+                    submodule_title: r.get(4)?,
+                    due_at: r.get(5)?,
+                })
+            })?;
+            rows.collect()
+        }
+        None => {
+            let sql = format!("{base} ORDER BY r.due_at ASC LIMIT ?2");
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![now, limit], |r| {
+                Ok(DueReview {
+                    course_id: r.get(0)?,
+                    module_id: r.get(1)?,
+                    submodule_id: r.get(2)?,
+                    course_title: r.get(3)?,
+                    submodule_title: r.get(4)?,
+                    due_at: r.get(5)?,
+                })
+            })?;
+            rows.collect()
+        }
+    }
+}
+
 pub fn passed_submodules(
     conn: &Connection,
     course_id: &str,

@@ -2408,6 +2408,21 @@ fn read_submodule_error(
     courses::read_submodule_error(&paths, &course_id, &module_id, &submodule_id)
 }
 
+/// Map a 0..1 test ratio to an SM-2 quality grade (0..5).
+fn ratio_to_quality(ratio: f64) -> u8 {
+    if ratio >= 0.95 {
+        5
+    } else if ratio >= 0.85 {
+        4
+    } else if ratio >= 0.7 {
+        3
+    } else if ratio >= 0.5 {
+        2
+    } else {
+        1
+    }
+}
+
 #[tauri::command]
 fn submit_test_result(
     db_state: tauri::State<'_, Arc<Db>>,
@@ -2426,8 +2441,64 @@ fn submit_test_result(
     db::record_test_attempt(&conn, &submodule_id, ratio, &results, now).map_err(|e| e.to_string())?;
     if passed {
         db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())?;
+        // Seed spaced review on first pass, graded by the honest FIRST-attempt
+        // ratio (so brute-forcing the retake can't win a long interval).
+        if db::get_review(&conn, &submodule_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            if let Some(course_id) =
+                db::course_id_for_submodule(&conn, &submodule_id).map_err(|e| e.to_string())?
+            {
+                let seed_ratio = db::first_attempt_ratio(&conn, &submodule_id)
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(ratio);
+                db::apply_review_grade(
+                    &conn,
+                    &submodule_id,
+                    &course_id,
+                    ratio_to_quality(seed_ratio),
+                    now,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
     }
     Ok(())
+}
+
+#[tauri::command]
+fn get_due_reviews(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: Option<String>,
+) -> Result<Vec<db::DueReview>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::get_due_reviews(&conn, course_id.as_deref(), now, 100).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn due_review_counts(
+    db_state: tauri::State<'_, Arc<Db>>,
+) -> Result<std::collections::HashMap<String, i64>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::due_review_counts(&conn, now).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn grade_review(
+    db_state: tauri::State<'_, Arc<Db>>,
+    submodule_id: String,
+    ratio: f64,
+) -> Result<(), String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let course_id = db::course_id_for_submodule(&conn, &submodule_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("submodule not found: {submodule_id}"))?;
+    db::apply_review_grade(&conn, &submodule_id, &course_id, ratio_to_quality(ratio), now)
+        .map_err(|e| e.to_string())
 }
 
 fn now_ms() -> i64 {
@@ -4799,6 +4870,9 @@ pub fn run() {
             read_submodule_article,
             read_submodule_error,
             submit_test_result,
+            get_due_reviews,
+            due_review_counts,
+            grade_review,
             get_assignments,
             submit_assignment,
             start_generate_assignments,
