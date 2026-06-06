@@ -1837,6 +1837,8 @@ Tasks, in order:
    shown below. If there are contradictions (terminology, facts, level
    assumptions, etc.), resolve them in favor of what's already established.
 5. Light polish for flow — do NOT rewrite the voice or restructure.
+6. Preserve every ::widget{...} marker line EXACTLY as-is — never remove, move,
+   merge, reword, or translate them, and keep the blank lines around them.
 
 ${prevArticlesBlock(previousArticles, lang)}Article to review:
 <article>

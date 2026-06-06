@@ -218,6 +218,7 @@ async function runStreamed(prompt, onProgress, opts) {
   // With web/Brave tools the agent may take several turns (search, read,
   // write); buildClaudeOptions picks the turn budget from the enabled tools.
   const options = buildClaudeOptions({
+    maxTurns: opts?.maxTurns,
     web: opts?.web,
     braveApiKey: opts?.braveApiKey,
     modelConfig: opts?.modelConfig,
@@ -917,6 +918,8 @@ Tasks, in order:
    shown below. If there are contradictions (terminology, facts, level
    assumptions, etc.), resolve them in favor of what's already established.
 5. Light polish for flow — do NOT rewrite the voice or restructure.
+6. Preserve every ::widget{...} marker line EXACTLY as-is — never remove, move,
+   merge, reword, or translate them, and keep the blank lines around them.
 
 ${prevArticlesBlock(previousArticles, lang)}Article to review:
 <article>
