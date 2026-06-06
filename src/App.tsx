@@ -1418,6 +1418,15 @@ function App() {
             )}
           </nav>
         )}
+        {view.kind === "empty" && reviewDueTotal > 0 && (
+          <button className="review-banner" onClick={() => setView({ kind: "review" })}>
+            <span className="review-banner-icon">🔁</span>
+            <span className="review-banner-text">
+              {t("reviewBannerBody", { count: reviewDueTotal })}
+            </span>
+            <span className="review-banner-cta">{t("reviewBannerCta")} →</span>
+          </button>
+        )}
         {view.kind === "empty" && (
           <CourseDashboard
             courses={courses}

@@ -2976,6 +2976,37 @@ button {
   font-size: 11px;
   font-weight: 700;
 }
+.review-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 24px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.review-banner:hover {
+  border-color: var(--accent);
+}
+.review-banner-icon {
+  font-size: 18px;
+}
+.review-banner-text {
+  flex: 1;
+  font-size: 14px;
+}
+.review-banner-cta {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
 .review-card {
   margin-top: 0;
   border-top: none;
