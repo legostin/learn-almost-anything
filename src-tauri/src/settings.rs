@@ -126,6 +126,13 @@ pub struct TierPreset {
     pub illustration_mode: &'static str,
     pub skip_assignments: bool,
     pub max_test_questions: u8,
+    // Reasoning-effort cascade per stage. None == leave the agent default
+    // (balanced). Model NAMES are deliberately not set — they're dynamic per the
+    // user's CLI install, so reasoning effort is the safe cost lever (mirrors
+    // fast_model_config in lib.rs). Both agents accept off/low/medium/high/...
+    pub planning_reasoning: Option<&'static str>,
+    pub writing_reasoning: Option<&'static str>,
+    pub tests_reasoning: Option<&'static str>,
 }
 
 /// Categories where accuracy matters most — the cheap-tier safety floor forbids
@@ -149,6 +156,10 @@ pub fn tier_preset(tier: &str) -> TierPreset {
             illustration_mode: "search",
             skip_assignments: true,
             max_test_questions: 5,
+            // Trim thinking; keep the dominant draft (writing) at a usable level.
+            planning_reasoning: Some("low"),
+            writing_reasoning: Some("medium"),
+            tests_reasoning: Some("low"),
         },
         "premium" => TierPreset {
             pedagogy_intensity: "max",
@@ -156,14 +167,20 @@ pub fn tier_preset(tier: &str) -> TierPreset {
             illustration_mode: "full",
             skip_assignments: false,
             max_test_questions: 8,
+            planning_reasoning: Some("high"),
+            writing_reasoning: Some("high"),
+            tests_reasoning: Some("medium"),
         },
-        // balanced (default) == today's behavior
+        // balanced (default) == today's behavior (no reasoning override)
         _ => TierPreset {
             pedagogy_intensity: "standard",
             research_depth: "normal",
             illustration_mode: "full",
             skip_assignments: false,
             max_test_questions: 6,
+            planning_reasoning: None,
+            writing_reasoning: None,
+            tests_reasoning: None,
         },
     }
 }
@@ -224,6 +241,17 @@ impl GenerationProfile {
 
     pub fn max_test_questions(&self) -> u8 {
         tier_preset(self.tier()).max_test_questions
+    }
+
+    /// Reasoning-effort override for a stage ("planning" | "writing" | "tests"),
+    /// or None to leave the agent default (balanced tier).
+    pub fn stage_reasoning(&self, stage: &str) -> Option<&'static str> {
+        let p = tier_preset(self.tier());
+        match stage {
+            "planning" => p.planning_reasoning,
+            "tests" => p.tests_reasoning,
+            _ => p.writing_reasoning,
+        }
     }
 }
 

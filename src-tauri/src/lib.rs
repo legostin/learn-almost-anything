@@ -467,13 +467,17 @@ fn start_build_structure(
     let db = db_state.inner().clone();
     let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
-    let model_config = settings_state.stage_model(&course.agent, "planning");
+    // Resolve the profile so the tier tunes planning research depth + reasoning.
+    let profile = resolve_course_profile(&settings_state, &course);
+    let model_config = apply_tier_reasoning(
+        settings_state.stage_model(&course.agent, "planning"),
+        &profile,
+        "planning",
+    );
     let app2 = app.clone();
     let cid = course_id.clone();
     let agent = course.agent.clone();
-    // Resolve the profile so research depth (maxTurns) tunes planning cost.
-    let gen_profile =
-        gen_profile_json(&resolve_course_profile(&settings_state, &course), course.category.as_deref());
+    let gen_profile = gen_profile_json(&profile, course.category.as_deref());
 
     thread::spawn(move || {
         let params = json!({
@@ -818,6 +822,10 @@ fn spawn_generate_submodule(
         let skip_assignments = profile.skip_assignments();
         let illustration_off = profile.illustration_mode() == "off";
         let gen_profile = gen_profile_json(&profile, course.category.as_deref());
+        // Tier reasoning cascade: trim/raise thinking on the dominant draft
+        // (writing) and the test/assignment (tests) stages by tier.
+        let writing_model = apply_tier_reasoning(writing_model, &profile, "writing");
+        let tests_model = apply_tier_reasoning(tests_model, &profile, "tests");
         let total_started = Instant::now();
         let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
             Ok(conn) => course_space_context(&paths, &conn, &course),
@@ -3384,7 +3392,13 @@ fn translate_course(
     let db = db_state.inner().clone();
     let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
-    let model = settings_state.stage_model(&source.agent, "writing");
+    // Tier-route translation through the source course's writing reasoning so a
+    // cheap-tier course translates cheaply too.
+    let model = apply_tier_reasoning(
+        settings_state.stage_model(&source.agent, "writing"),
+        &resolve_course_profile(&settings_state, &source),
+        "writing",
+    );
     let gemini_key = settings_state.gemini_api_key();
     let gemini_model = settings_state.gemini_image_model();
     let image_gen = settings_state.image_generation();
@@ -4759,6 +4773,30 @@ fn sidecar_status(sidecar_state: tauri::State<'_, Arc<Sidecar>>) -> Option<Strin
 /// The effective generation profile for a course: its own stored profile if set,
 /// otherwise the global default. Blank knobs inside it resolve from the tier
 /// preset (see settings.rs), so this is always fully usable.
+/// Fill blank `reasoning` in a stage model config from the tier preset (the
+/// model name stays the agent default — model routing is unsafe with dynamic
+/// CLI catalogs; a user-set reasoning is respected). `stage` is
+/// "planning" | "writing" | "tests".
+fn apply_tier_reasoning(
+    mut model_config: serde_json::Value,
+    profile: &GenerationProfile,
+    stage: &str,
+) -> serde_json::Value {
+    let has_reasoning = model_config
+        .get("reasoning")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_reasoning {
+        if let Some(r) = profile.stage_reasoning(stage) {
+            if let serde_json::Value::Object(map) = &mut model_config {
+                map.insert("reasoning".to_string(), json!(r));
+            }
+        }
+    }
+    model_config
+}
+
 /// The genProfile object passed to the sidecar so stages can tune depth,
 /// illustration, pedagogy and assessment by tier.
 fn gen_profile_json(profile: &GenerationProfile, category: Option<&str>) -> serde_json::Value {
