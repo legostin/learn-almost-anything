@@ -471,6 +471,9 @@ fn start_build_structure(
     let app2 = app.clone();
     let cid = course_id.clone();
     let agent = course.agent.clone();
+    // Resolve the profile so research depth (maxTurns) tunes planning cost.
+    let gen_profile =
+        gen_profile_json(&resolve_course_profile(&settings_state, &course), course.category.as_deref());
 
     thread::spawn(move || {
         let params = json!({
@@ -484,6 +487,7 @@ fn start_build_structure(
             "spaceLinks": space_links,
             "spaceDirs": space_dirs,
             "spaceStrict": space_strict,
+            "genProfile": gen_profile,
         });
         // Durability: the planning agent can fail (timeout, bad JSON, transient
         // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the
@@ -813,14 +817,7 @@ fn spawn_generate_submodule(
         let skip_tests = profile.skip_tests();
         let skip_assignments = profile.skip_assignments();
         let illustration_off = profile.illustration_mode() == "off";
-        let gen_profile = json!({
-            "tier": profile.tier(),
-            "pedagogyIntensity": profile.pedagogy_intensity(),
-            "researchDepth": profile.research_depth(course.category.as_deref()),
-            "researchMaxTurns": profile.research_max_turns(course.category.as_deref()),
-            "illustrationMode": profile.illustration_mode(),
-            "maxTestQuestions": profile.max_test_questions(),
-        });
+        let gen_profile = gen_profile_json(&profile, course.category.as_deref());
         let total_started = Instant::now();
         let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
             Ok(conn) => course_space_context(&paths, &conn, &course),
@@ -1225,6 +1222,7 @@ fn spawn_generate_submodule(
                 &gemini_key,
                 &writing_model,
                 &gemini_image_model,
+                profile.illustration_mode() == "full",
             );
             log_timing(&app2, &cid, &sid, "illustrate", illustrate_started);
             w
@@ -1445,10 +1443,13 @@ fn illustrate_widgets(
     gemini_key: &Option<String>,
     model_config: &serde_json::Value,
     gemini_image_model: &str,
+    illustration_full: bool,
 ) -> serde_json::Value {
-    // User can disable AI image generation in Settings → search for real
-    // images only (never invent one).
-    let generate_images = app.state::<Arc<SettingsState>>().image_generation();
+    // AI image generation requires BOTH the global Settings toggle and the
+    // course's illustration tier being "full"; "search" tiers find real images
+    // only (no Gemini spend), "off" skips the pass upstream.
+    let generate_images =
+        illustration_full && app.state::<Arc<SettingsState>>().image_generation();
     let can_generate = generate_images && (gemini_key.is_some() || course.agent == "codex");
     let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
     if brave_key.is_none() && !can_generate && !can_agent_search {
@@ -2875,6 +2876,7 @@ fn start_illustrate_submodule(
             &gemini_key,
             &writing_model,
             &gemini_image_model,
+            true, // explicit "illustrate now" action — allow generation
         );
         log_timing(&app2, &course_id, &submodule_id, "illustrate", started);
         if let Err(e) = courses::write_submodule_widgets(
@@ -4756,6 +4758,19 @@ fn sidecar_status(sidecar_state: tauri::State<'_, Arc<Sidecar>>) -> Option<Strin
 /// The effective generation profile for a course: its own stored profile if set,
 /// otherwise the global default. Blank knobs inside it resolve from the tier
 /// preset (see settings.rs), so this is always fully usable.
+/// The genProfile object passed to the sidecar so stages can tune depth,
+/// illustration, pedagogy and assessment by tier.
+fn gen_profile_json(profile: &GenerationProfile, category: Option<&str>) -> serde_json::Value {
+    json!({
+        "tier": profile.tier(),
+        "pedagogyIntensity": profile.pedagogy_intensity(),
+        "researchDepth": profile.research_depth(category),
+        "researchMaxTurns": profile.research_max_turns(category),
+        "illustrationMode": profile.illustration_mode(),
+        "maxTestQuestions": profile.max_test_questions(),
+    })
+}
+
 fn resolve_course_profile(settings: &SettingsState, course: &db::Course) -> GenerationProfile {
     course
         .generation_profile

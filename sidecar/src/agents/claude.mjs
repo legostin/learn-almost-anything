@@ -384,6 +384,7 @@ async function draftArticleInternal(
     spaceDirs,
     spaceStrict,
     category,
+    genProfile,
   },
   onProgress
 ) {
@@ -640,6 +641,7 @@ If no widgets, use []. If no sources, use [].`;
     braveApiKey,
     modelConfig,
     dirs: spaceDirs,
+    maxTurns: genProfile?.researchMaxTurns,
   });
   const parsed = extractJson(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
@@ -1324,6 +1326,7 @@ export async function buildStructure(
     spaceLinks,
     spaceDirs,
     spaceStrict,
+    genProfile,
   },
   ctx
 ) {
@@ -1386,6 +1389,7 @@ Shape:
     web: true,
     modelConfig,
     dirs: spaceDirs,
+    maxTurns: genProfile?.researchMaxTurns,
   });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
