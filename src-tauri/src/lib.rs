@@ -803,6 +803,24 @@ fn spawn_generate_submodule(
 
     thread::spawn(move || {
         let is_podcast = course.course_format == "podcast_series";
+        // Resolved generation profile (per-course override else balanced default).
+        // Drives stage gating + is passed to the sidecar for depth/pedagogy.
+        let profile: GenerationProfile = course
+            .generation_profile
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let skip_tests = profile.skip_tests();
+        let skip_assignments = profile.skip_assignments();
+        let illustration_off = profile.illustration_mode() == "off";
+        let gen_profile = json!({
+            "tier": profile.tier(),
+            "pedagogyIntensity": profile.pedagogy_intensity(),
+            "researchDepth": profile.research_depth(course.category.as_deref()),
+            "researchMaxTurns": profile.research_max_turns(course.category.as_deref()),
+            "illustrationMode": profile.illustration_mode(),
+            "maxTestQuestions": profile.max_test_questions(),
+        });
         let total_started = Instant::now();
         let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
             Ok(conn) => course_space_context(&paths, &conn, &course),
@@ -825,6 +843,7 @@ fn spawn_generate_submodule(
             "spaceDirs": space_dirs,
             "spaceStrict": space_strict,
             "category": course.category,
+            "genProfile": gen_profile.clone(),
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
@@ -1061,7 +1080,7 @@ fn spawn_generate_submodule(
         // works on the widgets, the test on the final article — so run them
         // concurrently. Test goes on its own thread; illustration runs here.
         // Both soft-fail; the submodule is already readable.
-        let test_handle = if is_podcast {
+        let test_handle = if is_podcast || skip_tests {
             None
         } else {
             let sidecar = sidecar.clone();
@@ -1076,6 +1095,7 @@ fn spawn_generate_submodule(
                 "submodulePath": { "title": sub_title, "summary": sub_summary },
                 "article": final_article,
                 "modelConfig": tests_model,
+                "genProfile": gen_profile.clone(),
             });
             Some(thread::spawn(move || {
                 let test_started = Instant::now();
@@ -1113,7 +1133,7 @@ fn spawn_generate_submodule(
         };
 
         // Background — design the homework assignment chain for this submodule.
-        let assignments_handle = if is_podcast {
+        let assignments_handle = if is_podcast || skip_assignments {
             None
         } else {
             let sidecar = sidecar.clone();
@@ -1128,6 +1148,7 @@ fn spawn_generate_submodule(
                 "submodulePath": { "title": sub_title, "summary": sub_summary },
                 "article": final_article,
                 "modelConfig": tests_model,
+                "genProfile": gen_profile.clone(),
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -1168,6 +1189,7 @@ fn spawn_generate_submodule(
         // flagged, search via Brave when configured, or ask the selected agent
         // to find public source pages when Brave is not.
         let can_illustrate = !is_podcast
+            && !illustration_off
             && (brave_api_key.is_some()
                 || gemini_key.is_some()
                 || matches!(course.agent.as_str(), "claude" | "codex"));
