@@ -5013,6 +5013,93 @@ fn resolve_course_profile(settings: &SettingsState, course: &db::Course) -> Gene
         .unwrap_or_else(|| settings.generation_profile())
 }
 
+#[derive(serde::Serialize)]
+struct GenEstimate {
+    submodules: u32,
+    pending: u32,
+    low_minutes: u32,
+    high_minutes: u32,
+}
+
+/// Heuristic wall-clock estimate (minutes) for generating `pending` submodules
+/// under a profile. There is no persisted per-stage timing history, so this
+/// models the stage set the profile actually runs — draft/review/annotate always,
+/// with illustration, tests, assignments and flashcards gated by the profile —
+/// and returns an approximate ±range. Presented as "~" in the UI, never exact.
+fn estimate_generation_minutes(
+    profile: &GenerationProfile,
+    category: Option<&str>,
+    pending: u32,
+) -> (u32, u32) {
+    if pending == 0 {
+        return (0, 0);
+    }
+    // Per-submodule seconds, summed across the stages that will run.
+    let draft: u32 = match profile.stage_reasoning("writing") {
+        Some("high") | Some("xhigh") | Some("max") => 120,
+        Some("low") | Some("off") => 55,
+        _ => 80,
+    };
+    let research: u32 = match profile.research_max_turns(category) {
+        t if t >= 16 => 50,
+        t if t >= 10 => 20,
+        _ => 5,
+    };
+    let mut per: u32 = draft + research + 40 /* review */ + 30 /* annotate */;
+    match profile.illustration_mode().as_str() {
+        "off" => {}
+        "full" => per += 90,
+        _ => per += 55,
+    }
+    if !profile.skip_tests() {
+        per += 40;
+    }
+    if !profile.skip_assignments() {
+        per += 55;
+    }
+    if profile.pedagogy_intensity() != "lean" {
+        per += 30; // flashcards
+    }
+    let total = (per.saturating_mul(pending)) as f64;
+    let low = ((total * 0.7) / 60.0).ceil() as u32;
+    let high = ((total * 1.4) / 60.0).ceil() as u32;
+    (low.max(1), high.max(low.max(1)))
+}
+
+#[tauri::command]
+fn estimate_course_generation(
+    db_state: tauri::State<'_, Arc<Db>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<GenEstimate, String> {
+    let (course, structure) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        let structure = courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?;
+        (course, structure)
+    };
+    let mut submodules = 0u32;
+    let mut pending = 0u32;
+    for m in &structure.modules {
+        for s in &m.submodules {
+            submodules += 1;
+            if s.generation_state != "ready" {
+                pending += 1;
+            }
+        }
+    }
+    let profile = resolve_course_profile(&settings_state, &course);
+    let (low, high) = estimate_generation_minutes(&profile, course.category.as_deref(), pending);
+    Ok(GenEstimate {
+        submodules,
+        pending,
+        low_minutes: low,
+        high_minutes: high,
+    })
+}
+
 #[tauri::command]
 fn get_course_profile(
     db_state: tauri::State<'_, Arc<Db>>,
@@ -5126,6 +5213,7 @@ pub fn run() {
             submit_assignment,
             start_generate_assignments,
             start_generate_flashcards,
+            estimate_course_generation,
             start_illustrate_submodule,
             delete_course,
             get_settings_status,

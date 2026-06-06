@@ -4909,6 +4909,43 @@ function Structure({
   const [accepting, setAccepting] = useState<string | null>(null);
   const [showRefine, setShowRefine] = useState(false);
   const [startingFull, setStartingFull] = useState(false);
+  const [estimate, setEstimate] = useState<{
+    pending: number;
+    lowMinutes: number;
+    highMinutes: number;
+  } | null>(null);
+
+  // Heuristic wall-clock estimate for the remaining (not-ready) lessons under
+  // this course's tier — refreshed whenever the tree changes.
+  useEffect(() => {
+    if (!tree) {
+      setEstimate(null);
+      return;
+    }
+    const pending = tree.modules.reduce(
+      (n, m) => n + m.submodules.filter((s) => s.generation_state !== "ready").length,
+      0
+    );
+    if (pending === 0) {
+      setEstimate(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<{ pending: number; low_minutes: number; high_minutes: number }>(
+      "estimate_course_generation",
+      { courseId: course.id }
+    )
+      .then((r) => {
+        if (!cancelled)
+          setEstimate({ pending: r.pending, lowMinutes: r.low_minutes, highMinutes: r.high_minutes });
+      })
+      .catch(() => {
+        if (!cancelled) setEstimate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tree, course.id]);
 
   async function reloadChat() {
     try {
@@ -5054,6 +5091,15 @@ function Structure({
             {progress.queued > 0 && (
               <span className="toolbar-note">
                 {t("fullCourseQueueStatus", { count: progress.queued })}
+              </span>
+            )}
+            {estimate && estimate.pending > 0 && (
+              <span className="toolbar-note">
+                {t("genEstimate", {
+                  low: estimate.lowMinutes,
+                  high: estimate.highMinutes,
+                  count: estimate.pending,
+                })}
               </span>
             )}
           </div>
