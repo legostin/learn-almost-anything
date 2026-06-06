@@ -1076,7 +1076,7 @@ fn spawn_generate_submodule(
             json!({
                 "ok": true,
                 "submoduleId": sid,
-                "enriching": !is_podcast,
+                "enriching": !is_podcast || !skip_tests,
                 "queuedNext": queued_next,
             }),
         );
@@ -1084,8 +1084,10 @@ fn spawn_generate_submodule(
         // Stages 4 & 5 (background enrichment) are independent — illustration
         // works on the widgets, the test on the final article — so run them
         // concurrently. Test goes on its own thread; illustration runs here.
-        // Both soft-fail; the submodule is already readable.
-        let test_handle = if is_podcast || skip_tests {
+        // Both soft-fail; the submodule is already readable. Podcasts DO get a
+        // recall quiz (episode recall) so spaced review is available to them too;
+        // only assignments + illustration stay podcast-off.
+        let test_handle = if skip_tests {
             None
         } else {
             let sidecar = sidecar.clone();

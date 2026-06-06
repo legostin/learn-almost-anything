@@ -1665,13 +1665,14 @@ export async function detectImageTextLanguage({ imagePath, sourceLang, targetLan
 }
 
 export async function generateTest({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, structure }, ctx) {
-  if (normalizeCourseFormat(courseFormat) === "podcast_series") {
-    return { questions: [] };
-  }
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
   const lang = (language || "en").trim();
+  const isPodcast = normalizeCourseFormat(courseFormat) === "podcast_series";
+  const recallGuide = isPodcast
+    ? `\nThis is a PODCAST EPISODE — the text below is its transcript/script. Write RECALL questions about what was actually said and explained in the episode, so the listener can self-check and schedule spaced review.\n`
+    : "";
   const intensity = genProfile?.pedagogyIntensity || "standard";
   const outline = Array.isArray(structure?.modules)
     ? structure.modules
@@ -1686,10 +1687,10 @@ export async function generateTest({ topic, language, courseFormat, submodulePat
 a course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-${categoryPedagogyBlock(category, lang, intensity)}
+${categoryPedagogyBlock(category, lang, intensity)}${recallGuide}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
-Article the test must be based on:
+${isPodcast ? "Episode transcript the test must be based on" : "Article the test must be based on"}:
 <article>
 ${article}
 </article>

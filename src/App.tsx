@@ -6186,10 +6186,11 @@ function SubmoduleView({
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
               )}
-              {!isPodcast && content.test?.length > 0 && (
+              {content.test?.length > 0 && (
                 <TestSection
                   questions={content.test}
                   alreadyPassed={!!sub.test_passed}
+                  recall={isPodcast}
                   onResult={async (ratio, results, passed, weakConcepts) => {
                     await invoke("submit_test_result", {
                       submoduleId,
@@ -8012,10 +8013,12 @@ function sampleQuestions(pool: TestQuestion[], n: number): TestQuestion[] {
 function TestSection({
   questions,
   alreadyPassed,
+  recall,
   onResult,
 }: {
   questions: TestQuestion[];
   alreadyPassed: boolean;
+  recall?: boolean;
   onResult: (
     ratio: number,
     results: boolean[],
@@ -8024,6 +8027,7 @@ function TestSection({
   ) => void | Promise<void>;
 }) {
   const t = useT();
+  const title = recall ? t("recallTitle") : t("testTitle");
   const [started, setStarted] = useState(false);
   const [shown, setShown] = useState<TestQuestion[]>(() =>
     sampleQuestions(questions, TEST_QUESTIONS_PER_ATTEMPT)
@@ -8074,7 +8078,7 @@ function TestSection({
     return (
       <section className="test">
         <div className="test-header">
-          <h3 className="test-title">{t("testTitle")}</h3>
+          <h3 className="test-title">{title}</h3>
           {alreadyPassed && <span className="learned-badge">✓ {t("subLearned")}</span>}
         </div>
         <button
@@ -8093,7 +8097,7 @@ function TestSection({
   return (
     <section className="test">
       <div className="test-header">
-        <h3 className="test-title">{t("testTitle")}</h3>
+        <h3 className="test-title">{title}</h3>
       </div>
       <ol className="test-questions">
         {shown.map((q, i) => (
