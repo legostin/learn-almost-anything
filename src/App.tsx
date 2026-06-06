@@ -268,6 +268,7 @@ type TestQuestion = {
   options: string[];
   correct: number;
   explanation: string;
+  concept?: string;
 };
 
 type StageEvent = {
@@ -6087,12 +6088,14 @@ function SubmoduleView({
                 <TestSection
                   questions={content.test}
                   alreadyPassed={!!sub.test_passed}
-                  onPassed={async () => {
+                  onResult={async (ratio, results, passed) => {
                     await invoke("submit_test_result", {
-                      submoduleId: submoduleId,
-                      passed: true,
+                      submoduleId,
+                      ratio,
+                      results,
+                      passed,
                     });
-                    await reloadTree();
+                    if (passed) await reloadTree();
                   }}
                 />
               )}
@@ -7887,11 +7890,11 @@ function hostnameOf(url: string) {
 function TestSection({
   questions,
   alreadyPassed,
-  onPassed,
+  onResult,
 }: {
   questions: TestQuestion[];
   alreadyPassed: boolean;
-  onPassed: () => void | Promise<void>;
+  onResult: (ratio: number, results: boolean[], passed: boolean) => void | Promise<void>;
 }) {
   const t = useT();
   const [started, setStarted] = useState(false);
@@ -7910,9 +7913,10 @@ function TestSection({
 
   async function submit() {
     setSubmitted(true);
-    if (ratio >= TEST_PASS_THRESHOLD) {
-      await onPassed();
-    }
+    // Send the real per-question result every attempt so the backend can grade
+    // honestly (first attempt drives spaced review); pass also gates progress.
+    const results = questions.map((q, i) => answers[i] === q.correct);
+    await onResult(ratio, results, passed);
   }
 
   function retake() {

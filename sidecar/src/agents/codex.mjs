@@ -580,8 +580,9 @@ const testSchema = {
           options: { type: "array", items: { type: "string" } },
           correct: { type: "integer" },
           explanation: { type: "string" },
+          concept: { type: "string" },
         },
-        required: ["text", "options", "correct", "explanation"],
+        required: ["text", "options", "correct", "explanation", "concept"],
       },
     },
   },
@@ -766,8 +767,10 @@ ${article}
 
 Write 5-8 multiple-choice questions that check real UNDERSTANDING of this
 article — not trivia or verbatim recall. Each question has 3-5 plausible
-options, exactly ONE correct ("correct" = 0-based index), and a one-sentence
-"explanation". All in language "${lang}".
+options, exactly ONE correct ("correct" = 0-based index), a one-sentence
+"explanation", and a "concept" (2-4 word tag naming the single concept/skill
+it checks, used later for spaced review and weak-spot diagnosis). All in
+language "${lang}".
 
 ${languageStyleGuide(lang)}`;
   ctx?.progress?.({ label: "thinking" });
@@ -792,6 +795,7 @@ function normalizeTestQuestions(raw) {
         options,
         correct,
         explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+        concept: typeof q.concept === "string" ? q.concept.trim() : "",
       };
     })
     .filter(Boolean);

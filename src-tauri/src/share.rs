@@ -316,7 +316,16 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
         )?),
         "submit_test_result" => {
             let passed = a.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::submit_test_result(app.state(), req("submoduleId")?, passed)?;
+            let ratio = a
+                .get("ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(if passed { 1.0 } else { 0.0 });
+            let results = a
+                .get("results")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().map(|x| x.as_bool().unwrap_or(false)).collect::<Vec<bool>>())
+                .unwrap_or_default();
+            crate::submit_test_result(app.state(), req("submoduleId")?, ratio, results, passed)?;
             Ok(Value::Null)
         }
         "delete_course" => {

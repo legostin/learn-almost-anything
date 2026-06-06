@@ -2390,17 +2390,22 @@ fn read_submodule_error(
 fn submit_test_result(
     db_state: tauri::State<'_, Arc<Db>>,
     submodule_id: String,
+    ratio: f64,
+    results: Vec<bool>,
     passed: bool,
 ) -> Result<(), String> {
-    if !passed {
-        return Ok(());
-    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs() as i64;
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())
+    // Always record the attempt (even failures) so spaced review and weak-spot
+    // diagnosis see honest first-attempt performance; pass also gates progress.
+    db::record_test_attempt(&conn, &submodule_id, ratio, &results, now).map_err(|e| e.to_string())?;
+    if passed {
+        db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {

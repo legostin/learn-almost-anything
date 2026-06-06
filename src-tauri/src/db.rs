@@ -523,6 +523,31 @@ pub fn set_test_passed(conn: &Connection, module_id: &str, now: i64) -> Result<(
     Ok(())
 }
 
+/// Record one graded test attempt. Increments the attempt count and stores the
+/// FIRST attempt's ratio + per-question correctness (COALESCE keeps the first),
+/// so spaced-repetition scheduling grades from honest first-attempt performance
+/// rather than a retake-until-pass result.
+pub fn record_test_attempt(
+    conn: &Connection,
+    module_id: &str,
+    ratio: f64,
+    results: &[bool],
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    let results_json = serde_json::to_string(results).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO progress (module_id, attempts, first_attempt_ratio, first_attempt_results, first_attempt_at) \
+         VALUES (?1, 1, ?2, ?3, ?4) \
+         ON CONFLICT(module_id) DO UPDATE SET \
+            attempts = attempts + 1, \
+            first_attempt_ratio = COALESCE(first_attempt_ratio, ?2), \
+            first_attempt_results = COALESCE(first_attempt_results, ?3), \
+            first_attempt_at = COALESCE(first_attempt_at, ?4)",
+        rusqlite::params![module_id, ratio, results_json, now],
+    )?;
+    Ok(())
+}
+
 pub fn passed_submodules(
     conn: &Connection,
     course_id: &str,

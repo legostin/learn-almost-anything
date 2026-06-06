@@ -1663,6 +1663,9 @@ article — not trivia or verbatim recall. Each question:
 - has 3-5 plausible options, exactly ONE correct;
 - "correct" is the 0-based index of the right option;
 - includes a one-sentence "explanation" of why the answer is right;
+- includes a "concept": a 2-4 word tag naming the single concept/skill it
+  checks (in language "${lang}"), used later for spaced review and weak-spot
+  diagnosis;
 - is written in language "${lang}".
 
 CRITICAL — make options indistinguishable except by their meaning:
@@ -1678,7 +1681,7 @@ CRITICAL — make options indistinguishable except by their meaning:
 ${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence:
-{"questions":[{"text":"...","options":["...","..."],"correct":0,"explanation":"..."}]}`;
+{"questions":[{"text":"...","options":["...","..."],"correct":0,"explanation":"...","concept":"..."}]}`;
   ctx?.progress?.({ label: "thinking" });
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
@@ -1708,6 +1711,7 @@ function normalizeTestQuestions(raw) {
         options: order.map((i) => options[i]),
         correct: order.indexOf(correct),
         explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+        concept: typeof q.concept === "string" ? q.concept.trim() : "",
       };
     })
     .filter(Boolean);
