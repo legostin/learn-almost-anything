@@ -765,8 +765,10 @@ Article the test must be based on:
 ${article}
 </article>
 
-Write 5-8 multiple-choice questions that check real UNDERSTANDING of this
-article — not trivia or verbatim recall. Each question has 3-5 plausible
+Write a POOL of 10-16 multiple-choice questions that check real UNDERSTANDING
+of this article — not trivia or verbatim recall. Only a random subset is shown
+per attempt, so make them VARIED and non-overlapping (cover different points;
+avoid near-duplicates). Each question has 3-5 plausible
 options, exactly ONE correct ("correct" = 0-based index), a one-sentence
 "explanation", and a "concept" (2-4 word tag naming the single concept/skill
 it checks, used later for spaced review and weak-spot diagnosis). All in

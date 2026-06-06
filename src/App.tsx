@@ -7988,6 +7988,24 @@ function hostnameOf(url: string) {
   }
 }
 
+// Tests generate a larger pool than is shown; each attempt draws a fresh random
+// subset so a retake isn't the same questions with the answers already revealed.
+const TEST_QUESTIONS_PER_ATTEMPT = 6;
+
+function shuffledCopy<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function sampleQuestions(pool: TestQuestion[], n: number): TestQuestion[] {
+  const shuffled = shuffledCopy(pool);
+  return shuffled.slice(0, Math.min(n, shuffled.length));
+}
+
 function TestSection({
   questions,
   alreadyPassed,
@@ -7999,30 +8017,40 @@ function TestSection({
 }) {
   const t = useT();
   const [started, setStarted] = useState(false);
-  const [answers, setAnswers] = useState<(number | null)[]>(
-    questions.map(() => null)
+  const [shown, setShown] = useState<TestQuestion[]>(() =>
+    sampleQuestions(questions, TEST_QUESTIONS_PER_ATTEMPT)
+  );
+  const [answers, setAnswers] = useState<(number | null)[]>(() =>
+    shown.map(() => null)
   );
   const [submitted, setSubmitted] = useState(false);
 
-  const correctCount = questions.reduce(
+  const correctCount = shown.reduce(
     (n, q, i) => (answers[i] === q.correct ? n + 1 : n),
     0
   );
-  const ratio = questions.length > 0 ? correctCount / questions.length : 0;
+  const ratio = shown.length > 0 ? correctCount / shown.length : 0;
   const passed = ratio >= TEST_PASS_THRESHOLD;
   const allAnswered = answers.every((a) => a !== null);
+
+  // Fresh random subset for a new attempt — retakes draw different questions.
+  function freshAttempt() {
+    const s = sampleQuestions(questions, TEST_QUESTIONS_PER_ATTEMPT);
+    setShown(s);
+    setAnswers(s.map(() => null));
+    setSubmitted(false);
+  }
 
   async function submit() {
     setSubmitted(true);
     // Send the real per-question result every attempt so the backend can grade
     // honestly (first attempt drives spaced review); pass also gates progress.
-    const results = questions.map((q, i) => answers[i] === q.correct);
+    const results = shown.map((q, i) => answers[i] === q.correct);
     await onResult(ratio, results, passed);
   }
 
   function retake() {
-    setAnswers(questions.map(() => null));
-    setSubmitted(false);
+    freshAttempt();
   }
 
   if (!started) {
@@ -8032,7 +8060,13 @@ function TestSection({
           <h3 className="test-title">{t("testTitle")}</h3>
           {alreadyPassed && <span className="learned-badge">✓ {t("subLearned")}</span>}
         </div>
-        <button className="test-start" onClick={() => setStarted(true)}>
+        <button
+          className="test-start"
+          onClick={() => {
+            freshAttempt();
+            setStarted(true);
+          }}
+        >
           {alreadyPassed ? t("testRetake") : t("testStart")}
         </button>
       </section>
@@ -8045,7 +8079,7 @@ function TestSection({
         <h3 className="test-title">{t("testTitle")}</h3>
       </div>
       <ol className="test-questions">
-        {questions.map((q, i) => (
+        {shown.map((q, i) => (
           <li key={i} className="test-q">
             <div className="test-q-text">{q.text}</div>
             <div className="test-options">
@@ -8090,7 +8124,7 @@ function TestSection({
       ) : (
         <div className={`test-result ${passed ? "pass" : "fail"}`}>
           <div className="test-result-score">
-            {t("testScore", { correct: correctCount, total: questions.length })}
+            {t("testScore", { correct: correctCount, total: shown.length })}
           </div>
           <div className="test-result-verdict">
             {passed
@@ -8177,13 +8211,14 @@ function ReviewCard({
       submoduleId: item.submodule_id,
     })
       .then((c) => {
-        const qs = ((c.test as TestQuestion[]) ?? []).filter(
+        const pool = ((c.test as TestQuestion[]) ?? []).filter(
           (q) => q && Array.isArray(q.options) && q.options.length > 0
         );
+        const qs = sampleQuestions(pool, TEST_QUESTIONS_PER_ATTEMPT);
         setQuestions(qs);
         setAnswers(qs.map(() => null));
         // No test to re-quiz — deschedule so it doesn't stay due forever.
-        if (qs.length === 0) {
+        if (pool.length === 0) {
           invoke("grade_review", { submoduleId: item.submodule_id, ratio: 1 })
             .then(() => onGraded())
             .catch(() => {});

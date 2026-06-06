@@ -1658,8 +1658,10 @@ Article the test must be based on:
 ${article}
 </article>
 
-Write 5-8 multiple-choice questions that check real UNDERSTANDING of this
-article — not trivia or verbatim recall. Each question:
+Write a POOL of 10-16 multiple-choice questions that check real UNDERSTANDING
+of this article — not trivia or verbatim recall. Only a random subset is shown
+per attempt, so make them VARIED and non-overlapping (cover different points;
+avoid near-duplicate questions). Each question:
 - has 3-5 plausible options, exactly ONE correct;
 - "correct" is the 0-based index of the right option;
 - includes a one-sentence "explanation" of why the answer is right;
