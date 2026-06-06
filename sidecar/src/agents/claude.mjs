@@ -397,6 +397,12 @@ async function draftArticleInternal(
     (Array.isArray(spaceDirs) && spaceDirs.length);
   const categoryBlock =
     spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
+  // Active-engagement: formative checkpoints, gated by pedagogy intensity.
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const checkpointGuide =
+    intensity === "lean"
+      ? "Do NOT add any checkpoint widgets."
+      : `Active engagement: add ${intensity === "max" ? "3-4" : "2-3"} "checkpoint" widgets placed at natural points MID-article (right after a key idea, before stating the takeaway). Each must make the learner actively retrieve, predict, or self-explain — not just recall a definition — with a concise confirming "answer". They are optional/non-gating. Skip checkpoints only for purely narrative content.`;
   const memoryBlock =
     memoryFiles && memoryFiles.length
       ? `Past user feedback (apply to tone and content):\n${memoryFiles
@@ -458,6 +464,7 @@ points with a single line, alone, with blank lines above and below:
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
+  ::widget{type="checkpoint" id="cp-1"}    (a predict-then-reveal check — see below)
 
 Use 1-6 widgets total when the topic has concrete visual references, counting
 one gallery as one widget. Use 0 only when the topic is purely textual prose.
@@ -632,7 +639,8 @@ Each widget object:
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 - video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
 - interactive: {"id":"int-1","type":"interactive","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","html":"<body content>","css":"<stylesheet>","js":"<script>","height":320}
-
+- checkpoint: {"id":"cp-1","type":"checkpoint","question":"<a predict / retrieve / self-explain prompt in ${lang}>","answer":"<concise confirming answer + why, in ${lang}>"}
+${checkpointGuide}
 Each source object: {"title":"<page title>","url":"<url>"}
 If no widgets, use []. If no sources, use [].`;
   onProgress?.({ label: "thinking" });
@@ -743,6 +751,13 @@ function normalizeWidgets(raw) {
             ? Math.max(160, Math.min(640, Math.round(w.height)))
             : 320,
       };
+    } else if (w.type === "checkpoint") {
+      // Formative "predict then reveal" check embedded mid-article.
+      const question = typeof w.question === "string" ? w.question.trim() : "";
+      const answer = typeof w.answer === "string" ? w.answer.trim() : "";
+      if (question && answer) {
+        out[id] = { type: "checkpoint", question, answer };
+      }
     }
   }
   return out;

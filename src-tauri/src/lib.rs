@@ -3563,7 +3563,8 @@ fn translate_course_content(
         let widgets_path = dir.join("widgets.json");
         if let Ok(ws) = std::fs::read_to_string(&widgets_path) {
             if let Ok(mut widgets) = serde_json::from_str::<serde_json::Value>(&ws) {
-                const CAPTION_FIELDS: [&str; 5] = ["description", "alt", "caption", "title", "why"];
+                const CAPTION_FIELDS: [&str; 7] =
+                    ["description", "alt", "caption", "title", "why", "question", "answer"];
                 if let Some(obj) = widgets.as_object_mut() {
                     let mut wstr: Vec<String> = Vec::new();
                     let mut collect = |w: &serde_json::Value| {

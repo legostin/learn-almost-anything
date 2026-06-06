@@ -5359,6 +5359,7 @@ type WidgetData =
       height?: number;
       error?: string;
     }
+  | { type: "checkpoint"; question: string; answer: string }
   | { type: string; [k: string]: any };
 
 type LightboxImage = {
@@ -7716,6 +7717,7 @@ function WidgetRenderer({
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
   if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
   if (widget.type === "interactive") return <InteractiveWidget id={id} widget={widget as any} />;
+  if (widget.type === "checkpoint") return <CheckpointWidget id={id} widget={widget as any} />;
   return (
     <div className="widget widget-unknown">
       {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
@@ -8338,6 +8340,41 @@ function SourcesList({ sources }: { sources: Source[] }) {
         ))}
       </ol>
     </section>
+  );
+}
+
+// Formative checkpoint: a predict-then-reveal prompt embedded mid-article.
+function CheckpointWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { question: string; answer: string };
+}) {
+  const t = useT();
+  const [revealed, setRevealed] = useState(false);
+  const md = (text: string) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+  return (
+    <figure className="widget widget-checkpoint">
+      <div className="widget-checkpoint-label">
+        ✦ {t("checkpointLabel")} <span className="widget-id">#{id}</span>
+      </div>
+      <div className="widget-checkpoint-q reader">{md(widget.question)}</div>
+      {revealed ? (
+        <div className="widget-checkpoint-a reader">{md(widget.answer)}</div>
+      ) : (
+        <button className="widget-checkpoint-reveal" onClick={() => setRevealed(true)}>
+          {t("checkpointReveal")}
+        </button>
+      )}
+    </figure>
   );
 }
 

@@ -2825,6 +2825,46 @@ button {
   font-size: 14px;
   color: var(--text);
 }
+.widget-checkpoint {
+  width: 100%;
+  margin: 0;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+.widget-checkpoint-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.widget-checkpoint-q > *:last-child,
+.widget-checkpoint-a > *:last-child {
+  margin-bottom: 0;
+}
+.widget-checkpoint-a {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.widget-checkpoint-reveal {
+  margin-top: 10px;
+  padding: 5px 13px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--accent);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.widget-checkpoint-reveal:hover {
+  border-color: var(--accent);
+}
 .widget-video-open {
   display: inline-block;
   font-size: 12px;
