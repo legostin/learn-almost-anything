@@ -816,6 +816,78 @@ function normalizeTestQuestions(raw) {
     .filter(Boolean);
 }
 
+// ── Flashcards (active recall) ──────────────────────────────────────────────
+
+const flashcardSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    flashcards: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          front: { type: "string" },
+          back: { type: "string" },
+        },
+        required: ["front", "back"],
+      },
+    },
+  },
+  required: ["flashcards"],
+};
+
+function normalizeFlashcards(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((c) => {
+      if (!c) return null;
+      const front = typeof c.front === "string" ? c.front.trim() : "";
+      const back = typeof c.back === "string" ? c.back.trim() : "";
+      if (!front || !back) return null;
+      return { front, back };
+    })
+    .filter(Boolean)
+    .slice(0, 14);
+}
+
+export async function generateFlashcards(
+  { topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile },
+  ctx
+) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for flashcard generation");
+  }
+  const lang = (language || "en").trim();
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const isPodcast = normalizeCourseFormat(courseFormat) === "podcast_series";
+  const source = isPodcast ? "episode transcript" : "article";
+  const prompt = `You are extracting active-recall FLASHCARDS for a submodule of a
+course on "${topic}" (language: ${lang}).
+
+${categoryPedagogyBlock(category, lang, intensity)}
+Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
+
+The ${source} the learner just studied:
+<article>
+${article}
+</article>
+
+Write 6-12 flashcards covering the load-bearing facts, definitions, and
+relationships from this ${source}. Each card has a "front" (a single focused
+prompt — a question, term, or cloze with one blank) and a concise "back"
+(the answer, 1-2 sentences or a definition). Make them ATOMIC (one idea per
+card), test RECALL not recognition, keep code/identifiers/numbers verbatim,
+and write in language "${lang}".
+
+${languageStyleGuide(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, flashcardSchema, ctx?.progress, { braveApiKey, modelConfig });
+  const parsed = JSON.parse(text);
+  return { flashcards: normalizeFlashcards(parsed?.flashcards) };
+}
+
 // Minimal JSON extractor for Codex review (no schema — needs LLM image input
 // which can't co-exist easily with strict outputSchema).
 function extractJsonLoose(text) {

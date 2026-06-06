@@ -60,6 +60,7 @@ const methods = {
   submodule_review_images: async (params, ctx) => pickAgent(params).reviewImages(params, ctx),
   search_image_candidates: async (params, ctx) => pickAgent(params).searchImageCandidates(params, ctx),
   generate_test: async (params, ctx) => pickAgent(params).generateTest(params, ctx),
+  generate_flashcards: async (params, ctx) => pickAgent(params).generateFlashcards(params, ctx),
   generate_assignments: async (params, ctx) => pickAgent(params).generateAssignments(params, ctx),
   review_assignment: async (params, ctx) => pickAgent(params).reviewAssignment(params, ctx),
   list_models: async (params) => pickAgent(params).listModels(),

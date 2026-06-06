@@ -822,6 +822,8 @@ fn spawn_generate_submodule(
             .unwrap_or_default();
         let skip_tests = profile.skip_tests();
         let skip_assignments = profile.skip_assignments();
+        // Flashcards are an active-recall extra: skip on the lean pedagogy tier.
+        let skip_flashcards = profile.pedagogy_intensity() == "lean";
         let illustration_off = profile.illustration_mode() == "off";
         let gen_profile = gen_profile_json(&profile, course.category.as_deref());
         // Tier reasoning cascade: trim/raise thinking on the dominant draft
@@ -1197,6 +1199,60 @@ fn spawn_generate_submodule(
             }))
         };
 
+        // Background — extract active-recall flashcards (lean tier skips them).
+        let flashcards_handle = if skip_flashcards {
+            None
+        } else {
+            let sidecar = sidecar.clone();
+            let app3 = app2.clone();
+            let cid3 = cid.clone();
+            let sid3 = sid.clone();
+            let params = json!({
+                "backend": course.agent,
+                "topic": course.topic,
+                "language": course.language,
+                "courseFormat": course.course_format,
+                "submodulePath": { "title": sub_title, "summary": sub_summary },
+                "article": final_article,
+                "modelConfig": tests_model,
+                "genProfile": gen_profile.clone(),
+                "category": course.category,
+            });
+            Some(thread::spawn(move || {
+                let started = Instant::now();
+                emit_stage_event(&app3, &cid3, &sid3, "flashcards");
+                let cb = {
+                    let app4 = app3.clone();
+                    let cid4 = cid3.clone();
+                    let sid4 = sid3.clone();
+                    move |p: sidecar::ProgressPayload| {
+                        emit_progress_event(
+                            &app4,
+                            &cid4,
+                            &sid4,
+                            "flashcards",
+                            &p.label,
+                            p.detail.as_deref(),
+                        );
+                    }
+                };
+                let out = match sidecar.call_with_progress(
+                    "generate_flashcards",
+                    params,
+                    Duration::from_secs(600),
+                    cb,
+                ) {
+                    Ok(v) => v.get("flashcards").cloned().unwrap_or_else(|| json!([])),
+                    Err(e) => {
+                        eprintln!("[generate_submodule] flashcards stage failed (soft): {e}");
+                        json!([])
+                    }
+                };
+                log_timing(&app3, &cid3, &sid3, "flashcards", started);
+                out
+            }))
+        };
+
         // Stage 4 — illustrate. Per image widget: generate (Gemini/Codex) when
         // flagged, search via Brave when configured, or ask the selected agent
         // to find public source pages when Brave is not.
@@ -1251,6 +1307,9 @@ fn spawn_generate_submodule(
         let assignments = assignments_handle
             .map(|handle| handle.join().unwrap_or_else(|_| json!([])))
             .unwrap_or_else(|| json!([]));
+        let flashcards = flashcards_handle
+            .map(|handle| handle.join().unwrap_or_else(|_| json!([])))
+            .unwrap_or_else(|| json!([]));
 
         // Persist enrichment over the placeholders. Non-fatal — the article is
         // already saved and readable.
@@ -1259,6 +1318,9 @@ fn spawn_generate_submodule(
         }
         if let Err(e) = courses::write_submodule_test(&paths, &cid, &mid, &sid, &test_questions) {
             eprintln!("[generate_submodule] write test (non-fatal): {e}");
+        }
+        if let Err(e) = courses::write_submodule_flashcards(&paths, &cid, &mid, &sid, &flashcards) {
+            eprintln!("[generate_submodule] write flashcards (non-fatal): {e}");
         }
         if let Err(e) =
             courses::write_submodule_assignments(&paths, &cid, &mid, &sid, &assignments)
@@ -2866,6 +2928,85 @@ fn start_generate_assignments(
             eprintln!("[start_generate_assignments] write (non-fatal): {e}");
         }
         emit_assignments_event(&app2, &course_id, &submodule_id);
+    });
+    Ok(())
+}
+
+/// Generate (or regenerate) active-recall flashcards for an already-ready
+/// submodule. Used to retrofit decks onto courses generated before flashcards
+/// existed. Writes flashcards.json and signals the reader to reload.
+#[tauri::command]
+fn start_generate_flashcards(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+) -> Result<(), String> {
+    let course = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?
+    };
+    let paths = paths_state.inner().clone();
+    let content = courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+        .map_err(|_| "submodule not ready yet".to_string())?;
+    let (sub_title, sub_summary) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let structure = courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?;
+        courses::find_submodule_path(&structure, &submodule_id)
+            .map(|(_, s)| (s.title.clone(), s.summary.clone()))
+            .ok_or_else(|| format!("submodule not found: {submodule_id}"))?
+    };
+    let profile = resolve_course_profile(&settings_state, &course);
+    let gen_profile = gen_profile_json(&profile, course.category.as_deref());
+    let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let sidecar = sidecar_state.inner().clone();
+    let app2 = app.clone();
+    let article = content.article;
+    thread::spawn(move || {
+        emit_stage_event(&app2, &course_id, &submodule_id, "flashcards");
+        let cb = {
+            let app3 = app2.clone();
+            let cid = course_id.clone();
+            let sid = submodule_id.clone();
+            move |p: sidecar::ProgressPayload| {
+                emit_progress_event(&app3, &cid, &sid, "flashcards", &p.label, p.detail.as_deref());
+            }
+        };
+        let params = json!({
+            "backend": course.agent,
+            "topic": course.topic,
+            "language": course.language,
+            "courseFormat": course.course_format,
+            "submodulePath": { "title": sub_title, "summary": sub_summary },
+            "article": article,
+            "modelConfig": tests_model,
+            "genProfile": gen_profile,
+            "category": course.category,
+        });
+        let out = match sidecar.call_with_progress(
+            "generate_flashcards",
+            params,
+            Duration::from_secs(600),
+            cb,
+        ) {
+            Ok(v) => v.get("flashcards").cloned().unwrap_or_else(|| json!([])),
+            Err(e) => {
+                eprintln!("[start_generate_flashcards] failed: {e}");
+                json!([])
+            }
+        };
+        if let Err(e) =
+            courses::write_submodule_flashcards(&paths, &course_id, &module_id, &submodule_id, &out)
+        {
+            eprintln!("[start_generate_flashcards] write (non-fatal): {e}");
+        }
+        emit_enrich_event(&app2, &course_id, &submodule_id);
     });
     Ok(())
 }
@@ -4984,6 +5125,7 @@ pub fn run() {
             get_assignments,
             submit_assignment,
             start_generate_assignments,
+            start_generate_flashcards,
             start_illustrate_submodule,
             delete_course,
             get_settings_status,

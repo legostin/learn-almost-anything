@@ -5327,11 +5327,17 @@ function SubmoduleAction({
   );
 }
 
+type Flashcard = {
+  front: string;
+  back: string;
+};
+
 type SubmoduleContent = {
   article: string;
   widgets: Record<string, WidgetData>;
   sources: Source[];
   test: TestQuestion[];
+  flashcards?: Flashcard[];
   review_notes: string;
 };
 
@@ -5894,6 +5900,7 @@ function SubmoduleView({
   const [savedError, setSavedError] = useState<string | null>(null);
   const [retryingImages, setRetryingImages] = useState(false);
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
+  const [cardsBusy, setCardsBusy] = useState(false);
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
     if (!course) return;
@@ -6009,6 +6016,7 @@ function SubmoduleView({
         if (p.courseId !== course.id || p.submoduleId !== submoduleId) return;
         setRetryingImages(false);
         setImageRetryError(null);
+        setCardsBusy(false);
         await reloadTree();
         await reloadContent();
       }
@@ -6236,6 +6244,41 @@ function SubmoduleView({
                     if (passed) await reloadTree();
                   }}
                 />
+              )}
+              {content.flashcards && content.flashcards.length > 0 ? (
+                <FlashcardDeck cards={content.flashcards} />
+              ) : (
+                state === "ready" &&
+                !enriching && (
+                  <div className="flashcards-empty">
+                    <button
+                      className="flashcards-generate"
+                      disabled={cardsBusy}
+                      onClick={async () => {
+                        if (!course) return;
+                        setCardsBusy(true);
+                        try {
+                          await invoke("start_generate_flashcards", {
+                            courseId: course.id,
+                            moduleId,
+                            submoduleId,
+                          });
+                        } catch (e) {
+                          console.error("start_generate_flashcards failed", e);
+                          setCardsBusy(false);
+                        }
+                      }}
+                    >
+                      {cardsBusy ? (
+                        <>
+                          <span className="spinner" /> {t("flashcardsGenerating")}
+                        </>
+                      ) : (
+                        t("flashcardsGenerate")
+                      )}
+                    </button>
+                  </div>
+                )
               )}
               {!isPodcast && (
                 <AssignmentsSection
@@ -8029,6 +8072,68 @@ function hostnameOf(url: string) {
 // Tests generate a larger pool than is shown; each attempt draws a fresh random
 // subset so a retake isn't the same questions with the answers already revealed.
 const TEST_QUESTIONS_PER_ATTEMPT = 6;
+
+function FlashcardDeck({ cards }: { cards: Flashcard[] }) {
+  const t = useT();
+  const [started, setStarted] = useState(false);
+  const [idx, setIdx] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  if (!cards.length) return null;
+  const card = cards[idx];
+  function go(delta: number) {
+    setIdx((i) => Math.min(cards.length - 1, Math.max(0, i + delta)));
+    setFlipped(false);
+  }
+  if (!started) {
+    return (
+      <section className="flashcards">
+        <div className="flashcards-header">
+          <h3 className="flashcards-title">{t("flashcardsTitle")}</h3>
+          <span className="flashcards-progress">
+            {t("flashcardsCount", { count: cards.length })}
+          </span>
+        </div>
+        <button
+          className="flashcards-start"
+          onClick={() => {
+            setStarted(true);
+            setIdx(0);
+            setFlipped(false);
+          }}
+        >
+          {t("flashcardsStart")}
+        </button>
+      </section>
+    );
+  }
+  return (
+    <section className="flashcards">
+      <div className="flashcards-header">
+        <h3 className="flashcards-title">{t("flashcardsTitle")}</h3>
+        <span className="flashcards-progress">
+          {idx + 1} / {cards.length}
+        </span>
+      </div>
+      <button
+        className={`flashcard${flipped ? " is-flipped" : ""}`}
+        onClick={() => setFlipped((f) => !f)}
+      >
+        <div className="flashcard-face">{flipped ? card.back : card.front}</div>
+        <div className="flashcard-hint">
+          {flipped ? t("flashcardsShowFront") : t("flashcardsFlip")}
+        </div>
+      </button>
+      <div className="flashcards-nav">
+        <button disabled={idx === 0} onClick={() => go(-1)}>
+          {t("flashcardsPrev")}
+        </button>
+        <button disabled={idx >= cards.length - 1} onClick={() => go(1)}>
+          {t("flashcardsNext")}
+        </button>
+      </div>
+    </section>
+  );
+}
 
 function shuffledCopy<T>(arr: T[]): T[] {
   const a = [...arr];

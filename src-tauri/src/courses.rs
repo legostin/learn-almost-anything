@@ -748,6 +748,24 @@ pub fn assignment_dir(
         .join(assignment_id)
 }
 
+pub fn write_submodule_flashcards(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    flashcards: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let has = flashcards.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    if !has {
+        return Ok(());
+    }
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(flashcards).unwrap_or_else(|_| "[]".to_string());
+    fs::write(dir.join("flashcards.json"), json)?;
+    Ok(())
+}
+
 pub fn write_submodule_assignments(
     paths: &AppPaths,
     course_id: &str,
@@ -937,6 +955,7 @@ pub struct SubmoduleContent {
     pub widgets: serde_json::Value,
     pub sources: serde_json::Value,
     pub test: serde_json::Value,
+    pub flashcards: serde_json::Value,
     pub review_notes: String,
 }
 
@@ -960,12 +979,17 @@ pub fn read_submodule_content(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!([]));
+    let flashcards = fs::read_to_string(dir.join("flashcards.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
     let review_notes = fs::read_to_string(dir.join("review_notes.md")).unwrap_or_default();
     Ok(SubmoduleContent {
         article,
         widgets,
         sources,
         test,
+        flashcards,
         review_notes,
     })
 }
