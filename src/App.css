@@ -4137,6 +4137,37 @@ button {
   white-space: pre-wrap;
   line-height: 1.5;
 }
+/* Markdown/LaTeX-rendered answer: drop pre-wrap and tame block margins. */
+.assignment-bubble-md {
+  white-space: normal;
+}
+.assignment-bubble-md > :first-child {
+  margin-top: 0;
+}
+.assignment-bubble-md > :last-child {
+  margin-bottom: 0;
+}
+.assignment-bubble-md p {
+  margin: 0 0 8px;
+}
+.assignment-preview {
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+}
+.assignment-preview-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.assignment-preview-body {
+  line-height: 1.5;
+}
 .assignment-bubble-link {
   word-break: break-all;
 }

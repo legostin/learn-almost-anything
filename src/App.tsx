@@ -7296,6 +7296,19 @@ const CRIT_LABEL: Record<Criticality, string> = {
   minor: "critMinor",
 };
 
+// Markdown + LaTeX renderer (same stack as the article) — used for homework
+// answers so learners can write math with $…$ / $$…$$.
+function MathMarkdown({ children }: { children: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+    >
+      {children}
+    </ReactMarkdown>
+  );
+}
+
 // Homework chain shown below the article. Loads on mount and reloads when the
 // background generation finishes (agent_assignments). Sequential unlock: the
 // first not-passed assignment is active, later ones are locked.
@@ -7530,6 +7543,14 @@ function AssignmentCard({
               />
             </>
           )}
+          {text.trim() && (
+            <div className="assignment-preview">
+              <div className="assignment-preview-label">{t("assignmentPreview")}</div>
+              <div className="assignment-preview-body assignment-bubble-md">
+                <MathMarkdown>{text}</MathMarkdown>
+              </div>
+            </div>
+          )}
           {error && <div className="assignment-error">{error}</div>}
           <button className="assignment-send" onClick={submit} disabled={busy}>
             {busy ? (
@@ -7554,7 +7575,11 @@ function AssignmentTurnView({ turn }: { turn: AssignmentTurn }) {
     return (
       <div className="assignment-bubble user">
         <div className="assignment-bubble-who">{t("assignmentYou")}</div>
-        {turn.text && <div className="assignment-bubble-text">{turn.text}</div>}
+        {turn.text && (
+          <div className="assignment-bubble-text assignment-bubble-md">
+            <MathMarkdown>{turn.text}</MathMarkdown>
+          </div>
+        )}
         {turn.githubUrl && (
           <a className="assignment-bubble-link" href={turn.githubUrl} target="_blank" rel="noreferrer">
             {turn.githubUrl}
