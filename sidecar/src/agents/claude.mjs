@@ -22,6 +22,7 @@ import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.
 import {
   categoryClassifyGuide,
   categoryPreferredSourcesBlock,
+  categoryPedagogyBlock,
   normalizeCategory,
 } from "../lib/categories.mjs";
 
@@ -400,6 +401,9 @@ async function draftArticleInternal(
     spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
   // Active-engagement: formative checkpoints, gated by pedagogy intensity.
   const intensity = genProfile?.pedagogyIntensity || "standard";
+  // Per-domain teaching recipe (how to teach this category) — applies even in a
+  // strict space, since it shapes pedagogy, not sources.
+  const pedagogyBlock = categoryPedagogyBlock(category, lang, intensity);
   const checkpointGuide =
     intensity === "lean"
       ? "Do NOT add any checkpoint widgets."
@@ -426,7 +430,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${pedagogyBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -1660,7 +1664,7 @@ export async function detectImageTextLanguage({ imagePath, sourceLang, targetLan
   return { hasText, language: parsed.language || "", translate };
 }
 
-export async function generateTest({ topic, language, courseFormat, submodulePath, article, modelConfig }, ctx) {
+export async function generateTest({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, structure }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { questions: [] };
   }
@@ -1668,17 +1672,28 @@ export async function generateTest({ topic, language, courseFormat, submodulePat
     throw new Error("article required for test generation");
   }
   const lang = (language || "en").trim();
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const outline = Array.isArray(structure?.modules)
+    ? structure.modules
+        .map((m) => `- ${m.title}: ${(m.submodules || []).map((s) => s.title).join("; ")}`)
+        .join("\n")
+    : "";
+  const interleaveGuide =
+    intensity === "lean" || !outline
+      ? ""
+      : `\nINTERLEAVING: ALSO include 1-2 CUMULATIVE questions that connect THIS submodule to an EARLIER one in the course outline below (mix in a prior concept) — interleaving strengthens retention. Tag their "concept" accordingly.\nCourse outline:\n${outline}\n`;
   const prompt = `You are writing a short comprehension test for a submodule of
 a course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${categoryPedagogyBlock(category, lang, intensity)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 Article the test must be based on:
 <article>
 ${article}
 </article>
+${interleaveGuide}
 
 Write a POOL of 10-16 multiple-choice questions that check real UNDERSTANDING
 of this article — not trivia or verbatim recall. Only a random subset is shown
@@ -1802,7 +1817,7 @@ function normalizeReview(parsed) {
  * Design a short chain of practical homework assignments for a submodule.
  * @returns {Promise<{assignments: Array<{id,title,prompt,type,criteria}>}>}
  */
-export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, modelConfig }, ctx) {
+export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { assignments: [] };
   }
@@ -1810,18 +1825,23 @@ export async function generateAssignments({ topic, language, courseFormat, submo
     throw new Error("article required for assignment generation");
   }
   const lang = (language || "en").trim();
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const fadingGuide =
+    intensity === "max"
+      ? `\nSCAFFOLDING (worked -> guided -> independent): make the chain a faded progression — (1) a WORKED example the learner reproduces/completes, (2) a GUIDED task with hints/partial scaffolding, (3) an INDEPENDENT task with none. This completion-problem ramp beats jumping straight to independent production.\n`
+      : "";
   const prompt = `You are designing practical homework for one submodule of a
 course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${categoryPedagogyBlock(category, lang, intensity)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The article the learner just studied:
 <article>
 ${article}
 </article>
-
+${fadingGuide}
 Design a SHORT CHAIN of 1-3 practical assignments that make the learner APPLY
 what they learned, ordered as a progression (each builds on the previous).
 For each assignment pick the single best submission type:

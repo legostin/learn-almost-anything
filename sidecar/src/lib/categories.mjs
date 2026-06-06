@@ -163,3 +163,56 @@ export function categoryPreferredSourcesBlock(category, lang) {
 For grounding facts and examples, start from these reputable sources for this kind of subject and favor them over random open-web pages. They are recommendations, not restrictions — you may still use other high-quality sources, and the learner's brief (and any attached space material) always takes priority. Write in language "${(lang || "en").trim()}".
 ${list}\n`;
 }
+
+// Each category maps to one of a few teaching ARCHETYPES (kept small on purpose —
+// per-domain recipes that scale, not 13 bespoke prompts).
+const ARCHETYPE_BY_CATEGORY = {
+  programming: "stem",
+  data_ai: "stem",
+  science_math: "stem",
+  engineering: "stem",
+  language: "language",
+  humanities: "humanities",
+  social_science: "humanities",
+  business: "humanities",
+  arts_design: "skill",
+  music: "skill",
+  lifestyle: "skill",
+  health: "rigor",
+  general: "",
+};
+
+const ARCHETYPE_RECIPES = {
+  stem: `Teach by WORKED EXAMPLES that FADE: a fully worked example first, then a guided one with a step left for the learner, then an independent problem.
+- Put real, runnable CODE or step-by-step DERIVATIONS inline as fenced blocks (never a screenshot of code or math).
+- Strongly prefer a runnable interactive exercise widget with a BUILT-IN self-check — the learner DOES something (writes/runs code, computes a value) and the widget tells them right or wrong. Doing beats reading here.
+- Use frequent retrieval: ask the learner to predict an output, trace a value, or spot the bug BEFORE revealing the answer.`,
+  language: `Emphasize active PRODUCTION and RECALL over explanation:
+- cloze (fill-in-the-blank) prompts, both L2->native and native->L2 directions, and short examples in real context.
+- Checkpoints must make the learner PRODUCE or RECALL a word/phrase, not merely recognize it.`,
+  humanities: `Ground every claim in primary sources and concrete cases (who / when / where).
+- Use source-analysis and predict-then-reveal checkpoints (interpret a passage, predict an outcome, then compare).
+- Assignments lean toward short argument/analysis with explicit, checkable criteria.`,
+  skill: `Lead with HIGH VISUAL DENSITY (reference images, diagrams) and DELIBERATE-PRACTICE exercises with clear success criteria.
+- Checkpoints ask the learner to critique an example or plan a concrete practice rep.`,
+  rigor: `Accuracy-critical domain: cite authoritative sources, never invent specifics, and prefer careful/hedged language for anything not well-established.
+- Checkpoints reinforce safety-critical distinctions and common dangerous misconceptions.`,
+};
+
+/**
+ * Per-category teaching recipe injected next to the preferred-sources block at
+ * the draft/test/assignment prompt sites. Empty for lean intensity, unknown
+ * category, or the general archetype.
+ */
+export function categoryPedagogyBlock(category, lang, intensity) {
+  if (intensity === "lean") return "";
+  const id = normalizeCategory(category);
+  const recipe = id ? ARCHETYPE_RECIPES[ARCHETYPE_BY_CATEGORY[id]] : null;
+  if (!recipe) return "";
+  const label = BY_ID.get(id)?.label || id;
+  const depth =
+    intensity === "max" ? "Apply it thoroughly." : "Apply it where it naturally fits.";
+  return `\n=== PEDAGOGY RECIPE FOR THIS CATEGORY (${label}) ===
+${recipe}
+Apply this in language "${(lang || "en").trim()}". ${depth}\n`;
+}

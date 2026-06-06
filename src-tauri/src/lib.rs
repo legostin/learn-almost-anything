@@ -1101,6 +1101,8 @@ fn spawn_generate_submodule(
                 "article": final_article,
                 "modelConfig": tests_model,
                 "genProfile": gen_profile.clone(),
+                "category": course.category,
+                "structure": structure_value,
             });
             Some(thread::spawn(move || {
                 let test_started = Instant::now();
@@ -1154,6 +1156,7 @@ fn spawn_generate_submodule(
                 "article": final_article,
                 "modelConfig": tests_model,
                 "genProfile": gen_profile.clone(),
+                "category": course.category,
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -2799,6 +2802,7 @@ fn start_generate_assignments(
             "submodulePath": { "title": sub_title, "summary": sub_summary },
             "article": article,
             "modelConfig": tests_model,
+            "category": course.category,
         });
         let out = match sidecar.call_with_progress(
             "generate_assignments",

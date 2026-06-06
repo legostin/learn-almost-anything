@@ -23,6 +23,7 @@ import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.
 import {
   categoryClassifyGuide,
   categoryPreferredSourcesBlock,
+  categoryPedagogyBlock,
   normalizeCategory,
   CATEGORY_IDS,
 } from "../lib/categories.mjs";
@@ -745,7 +746,7 @@ export async function detectImageTextLanguage() {
   return { hasText: false, language: "", translate: false };
 }
 
-export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, structure }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { questions: [] };
   }
@@ -753,17 +754,28 @@ export async function generateTest({ topic, language, courseFormat, submodulePat
     throw new Error("article required for test generation");
   }
   const lang = (language || "en").trim();
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const outline = Array.isArray(structure?.modules)
+    ? structure.modules
+        .map((m) => `- ${m.title}: ${(m.submodules || []).map((s) => s.title).join("; ")}`)
+        .join("\n")
+    : "";
+  const interleaveGuide =
+    intensity === "lean" || !outline
+      ? ""
+      : `\nINTERLEAVING: ALSO include 1-2 CUMULATIVE questions connecting THIS submodule to an EARLIER one in the outline below (mix in a prior concept). Tag their "concept" accordingly.\nCourse outline:\n${outline}\n`;
   const prompt = `You are writing a short comprehension test for a submodule of
 a course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${categoryPedagogyBlock(category, lang, intensity)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 Article the test must be based on:
 <article>
 ${article}
 </article>
+${interleaveGuide}
 
 Write a POOL of 10-16 multiple-choice questions that check real UNDERSTANDING
 of this article — not trivia or verbatim recall. Only a random subset is shown
@@ -885,7 +897,7 @@ function normalizeReview(parsed) {
 }
 
 /** Design a short chain of practical homework assignments for a submodule. */
-export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig }, ctx) {
+export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { assignments: [] };
   }
@@ -893,17 +905,23 @@ export async function generateAssignments({ topic, language, courseFormat, submo
     throw new Error("article required for assignment generation");
   }
   const lang = (language || "en").trim();
+  const intensity = genProfile?.pedagogyIntensity || "standard";
+  const fadingGuide =
+    intensity === "max"
+      ? `\nSCAFFOLDING (worked -> guided -> independent): make the chain a faded progression — a WORKED example to complete, then a GUIDED task with hints, then an INDEPENDENT task with none.\n`
+      : "";
   const prompt = `You are designing practical homework for one submodule of a
 course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${categoryPedagogyBlock(category, lang, intensity)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The article the learner just studied:
 <article>
 ${article}
 </article>
+${fadingGuide}
 
 Design a SHORT CHAIN of 1-3 practical assignments that make the learner APPLY
 what they learned, ordered as a progression. For each pick the single best
@@ -1305,6 +1323,7 @@ async function draftArticleInternal(
     (Array.isArray(spaceDirs) && spaceDirs.length);
   const categoryBlock =
     spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
+  const pedagogyBlock = categoryPedagogyBlock(category, lang, "standard");
   const memoryBlock =
     memoryFiles && memoryFiles.length
       ? `Past user feedback (apply to tone and content):\n${memoryFiles
@@ -1327,7 +1346,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${pedagogyBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
