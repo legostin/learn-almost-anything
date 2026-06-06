@@ -108,35 +108,33 @@ pub fn save_wizard_answers(
     Ok(())
 }
 
-pub fn write_wizard_questions(
+/// Persist the running adaptive wizard interview so it survives an app restart.
+/// Shape: { title, answered: [{question,answer}], current: <question|null>, done }.
+pub fn write_wizard_dialog(
     paths: &AppPaths,
     course_id: &str,
-    questions: &serde_json::Value,
+    dialog: &serde_json::Value,
 ) -> Result<(), CourseError> {
-    let has_questions = questions.as_array().map(|a| !a.is_empty()).unwrap_or(false);
-    if !has_questions {
-        return Ok(());
-    }
     let dir = paths.course_dir(course_id);
     fs::create_dir_all(&dir)?;
-    let json = serde_json::to_string_pretty(questions).unwrap_or_else(|_| "[]".to_string());
-    fs::write(dir.join("wizard_questions.json"), json)?;
+    let json = serde_json::to_string_pretty(dialog).unwrap_or_else(|_| "{}".to_string());
+    fs::write(dir.join("wizard_dialog.json"), json)?;
     Ok(())
 }
 
-pub fn read_wizard_questions(
+pub fn read_wizard_dialog(
     paths: &AppPaths,
     course_id: &str,
 ) -> Result<serde_json::Value, CourseError> {
-    let path = paths.course_dir(course_id).join("wizard_questions.json");
+    let path = paths.course_dir(course_id).join("wizard_dialog.json");
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::Value::Array(vec![]));
+            return Ok(serde_json::json!({}));
         }
         Err(e) => return Err(e.into()),
     };
-    Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::Value::Array(vec![])))
+    Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 pub fn read_course_md(paths: &AppPaths, course_id: &str) -> Result<String, CourseError> {

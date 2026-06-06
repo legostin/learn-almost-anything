@@ -403,39 +403,67 @@ export async function chat({ prompt }) {
   return { text };
 }
 
+function normalizeWizardQuestion(q) {
+  if (!q || typeof q.text !== "string") return null;
+  const text = q.text.trim();
+  if (!text) return null;
+  const options = Array.isArray(q.options)
+    ? q.options.filter((o) => typeof o === "string" && o.trim().length > 0).map((o) => o.trim())
+    : [];
+  const multi = q.multi !== false;
+  return { text, options, multi };
+}
+
+function answeredBlock(answered) {
+  if (!Array.isArray(answered) || answered.length === 0) {
+    return "(none yet — this is the FIRST question)";
+  }
+  return answered
+    .map((qa, i) => `${i + 1}. Q: ${qa?.question ?? ""}\n   A: ${qa?.answer ?? ""}`)
+    .join("\n");
+}
+
 /**
- * @param {{ topic: string, language: string, courseFormat?: string }} params
+ * Adaptive clarifying interview — returns the single most valuable NEXT question
+ * (building on prior answers) or done=true once enough is gathered. 3-10 total.
+ * @param {{ topic:string, language:string, courseFormat?:string, answered?:Array<{question:string,answer:string}> }} params
+ * @returns {Promise<{title?:string, done:boolean, question?:{text:string,options:string[],multi:boolean}}>}
  */
-export async function wizardQuestions({ topic, language, courseFormat, modelConfig }, ctx) {
+export async function wizardNextQuestion({ topic, language, courseFormat, answered, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
   const lang = (language || "en").trim();
-  const prompt = `You are designing a personalized course on "${topic}".
-The course will be delivered in language code "${lang}".
+  const asked = Array.isArray(answered) ? answered : [];
+  const isFirst = asked.length === 0;
+  const prompt = `You are running an ADAPTIVE clarifying interview with a learner
+BEFORE building a personalized course on "${topic}" (language code "${lang}").
 
 ${courseFormatGuide(courseFormat, lang)}
 
-Generate 5-10 clarifying questions to ask the learner BEFORE you build the
-curriculum. Each question must have 3-5 short, mutually-distinct, concrete,
-topic-specific answer options the learner can pick from. The user will also
-have a free-text fallback so do NOT add an "other" option.
-Do not ask the learner to choose the generation format again.
+Answers gathered so far:
+${answeredBlock(asked)}
+
+Decide the SINGLE most valuable NEXT question — the one whose answer would most
+change how an excellent course for THIS specific person looks. It MUST build on
+what they already told you: follow up on, drill into, disambiguate, or branch
+from a previous answer. Never repeat covered ground, and never ask the learner
+to choose the generation format again. Skip pleasantries.
+
+Conduct between 3 and 10 questions in TOTAL. You have asked ${asked.length} so far.
+- If you have asked FEWER than 3, you MUST ask another question (done=false).
+- If you have asked AT LEAST 3 and now have enough to build an excellent,
+  specific course, set done=true and set "question": null (and "title": null).
+- Otherwise return the next "question".
+
+When you ask a question, provide 3-5 realistic, mutually-distinct, concrete,
+topic-specific answer options (short phrases in "${lang}", not generic
+"low/medium/high"). The learner has a free-text fallback, so do NOT add an
+"other" option. Set "multi": true by default (preferences, scope, materials,
+goals usually accept several answers); set "multi": false ONLY when answers are
+genuinely mutually exclusive (time per week, current level, work vs hobby).
 ${wizardQuestionGuide(courseFormat, lang)}
-
-Also generate a short display title for the whole course. It must NOT copy the
-learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
-written in language "${lang}", with no quotes and no "course about/on" wrapper.
-
-For EACH question, set "multi": true by default — most questions about
-preferences, scopes, materials, goals, formats naturally accept several
-answers (e.g. "Какие жанры интересны?" — портрет AND пейзаж; "Какими
-материалами работаете?" — масло AND акварель). Set "multi": false ONLY when
-answers are genuinely mutually exclusive (e.g. "Сколько часов в неделю
-готовы уделять?", "Какой у вас текущий уровень?", "Это для работы или
-для хобби?"). When in doubt, use multi — forcing a single choice when
-several apply frustrates the learner.
-
+${isFirst ? `Also generate a short display "title": a concise noun phrase, 2-6 words in "${lang}", NOT copying the raw request, no quotes, no "course about/on" wrapper.\n` : ""}
 Write everything in language "${lang}".
 
 ${languageStyleGuide(lang)}`;
@@ -444,29 +472,20 @@ ${languageStyleGuide(lang)}`;
     type: "object",
     additionalProperties: false,
     properties: {
-      title: { type: "string" },
-      questions: {
-        type: "array",
-        minItems: 5,
-        maxItems: 10,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            text: { type: "string" },
-            options: {
-              type: "array",
-              minItems: 3,
-              maxItems: 5,
-              items: { type: "string" },
-            },
-            multi: { type: "boolean" },
-          },
-          required: ["text", "options", "multi"],
+      title: { type: ["string", "null"] },
+      done: { type: "boolean" },
+      question: {
+        type: ["object", "null"],
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          options: { type: "array", items: { type: "string" } },
+          multi: { type: "boolean" },
         },
+        required: ["text", "options", "multi"],
       },
     },
-    required: ["title", "questions"],
+    required: ["title", "done", "question"],
   };
 
   const text = await runStreamed(prompt, schema, ctx?.progress, {
@@ -475,26 +494,14 @@ ${languageStyleGuide(lang)}`;
     totalTimeoutMs: 900_000,
   });
   const parsed = JSON.parse(text);
-  if (!Array.isArray(parsed?.questions)) {
-    throw new Error("Codex response missing 'questions' array");
+  const question = parsed?.done === true ? null : normalizeWizardQuestion(parsed?.question);
+  const out = { done: !question };
+  if (question) out.question = question;
+  if (isFirst) {
+    const title = normalizeCourseTitle(parsed?.title);
+    if (title) out.title = title;
   }
-  const questions = parsed.questions
-    .map((q) => {
-      if (!q || typeof q.text !== "string") return null;
-      const text = q.text.trim();
-      if (!text) return null;
-      const options = Array.isArray(q.options)
-        ? q.options
-            .filter((o) => typeof o === "string" && o.trim().length > 0)
-            .map((o) => o.trim())
-        : [];
-      // Default to multi when unspecified — multi-select is the wizard norm.
-      const multi = q.multi !== false;
-      return { text, options, multi };
-    })
-    .filter(Boolean);
-  if (questions.length === 0) throw new Error("Codex returned zero valid questions");
-  return { title: normalizeCourseTitle(parsed?.title), questions };
+  return out;
 }
 
 export async function suggestCourseIdea({ courses, language, modelConfig }, ctx) {

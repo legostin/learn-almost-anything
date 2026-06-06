@@ -1748,6 +1748,21 @@ button {
   color: var(--danger);
 }
 
+.wizard-progress {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.wizard-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .qna {
   list-style: none;
   padding: 0;
@@ -1765,7 +1780,8 @@ button {
   padding: 18px 0;
   box-shadow: none;
 }
-.qna .q {
+.qna .q,
+.wizard .q {
   font-weight: 600;
   font-size: 15px;
   margin-bottom: 12px;

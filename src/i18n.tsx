@@ -162,20 +162,21 @@ const STRINGS = {
     statusStructuring: "планирование",
     statusReady: "готов к учёбе",
 
-    wizardIntro:
-      "Прежде чем строить план курса, агент задаст несколько уточняющих вопросов с вариантами ответов. Это займёт примерно 10–30 секунд: можно открыть другой курс или вернуться позже, интерфейс не блокируется.",
-    startWizard: "Ответить на вопросы",
-    wizardThinking: "Готовлю вопросы…",
+    wizardThinking: "Готовлю следующий вопрос…",
     errorPrefix: "Ошибка: {error}",
     retry: "Попробовать снова",
-    noQuestionsReturned: "Агент не вернул вопросов.",
+    wizardQuestionProgress: "Вопрос {n}",
+    wizardSubmit: "Дальше",
+    wizardFinishEarly: "Достаточно, собрать курс",
+    wizardDoneIntro:
+      "Готово — собрал {count} ответов. Теперь можно построить план курса.",
+    wizardNeedMore: "Чтобы собрать курс, ответьте минимум на {min} вопроса.",
+    wizardBuildPlan: "Построить план курса",
 
-    answeringIntro: "Отметьте подходящие варианты, можно выбрать несколько. Свой ответ можно добавить в поле ниже. Пустые вопросы будут пропущены.",
     customAnswerPlaceholder: "Свой ответ (можно дополнить выбранные варианты)…",
     optMulti: "множественный выбор",
     optSingle: "один вариант",
     saving: "Сохраняю…",
-    saveAnswers: "Сохранить ответы",
 
     builderIntro:
       "Ответы сохранены. Агент исследует тему и предложит план курса. Это займёт от 30 секунд до 2 минут. Интерфейс не блокируется — можно переключиться на другой курс.",
@@ -668,20 +669,21 @@ const STRINGS = {
     statusStructuring: "planning",
     statusReady: "ready to learn",
 
-    wizardIntro:
-      "Before building the course plan, the agent will ask a few clarifying questions with answer options. This takes about 10–30 seconds: you can switch to another course or come back later, and the interface stays responsive.",
-    startWizard: "Answer questions",
-    wizardThinking: "Preparing questions…",
+    wizardThinking: "Preparing the next question…",
     errorPrefix: "Error: {error}",
     retry: "Try again",
-    noQuestionsReturned: "Agent returned no questions.",
+    wizardQuestionProgress: "Question {n}",
+    wizardSubmit: "Next",
+    wizardFinishEarly: "That's enough — build the course",
+    wizardDoneIntro:
+      "All set — gathered {count} answers. You can build the course plan now.",
+    wizardNeedMore: "Answer at least {min} questions to build the course.",
+    wizardBuildPlan: "Build the course plan",
 
-    answeringIntro: "Select every option that applies; you can choose several. Add your own answer below. Empty questions are skipped.",
     customAnswerPlaceholder: "Your answer (can add to the selected options)…",
     optMulti: "multiple choice",
     optSingle: "single choice",
     saving: "Saving…",
-    saveAnswers: "Save answers",
 
     builderIntro:
       "Your answers are saved. The agent will research the topic and propose a course plan. This takes 30 seconds to 2 minutes. The interface stays responsive — you can switch courses.",

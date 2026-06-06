@@ -286,7 +286,7 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             )?;
             Ok(Value::Null)
         }
-        "get_wizard_questions" => to_val(crate::get_wizard_questions(
+        "get_wizard_dialog" => to_val(crate::get_wizard_dialog(
             app.state(),
             req("courseId")?,
         )?),
@@ -348,17 +348,14 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             crate::delete_course(app.state(), app.state(), req("courseId")?)?;
             Ok(Value::Null)
         }
-        "start_wizard_questions" => {
-            crate::start_wizard_questions(
-                app.clone(),
-                app.state(),
-                app.state(),
-                app.state(),
-                app.state(),
-                req("courseId")?,
-            )?;
-            Ok(Value::Null)
-        }
+        "wizard_next_question" => to_val(crate::wizard_next_question(
+            app.state(),
+            app.state(),
+            app.state(),
+            app.state(),
+            req("courseId")?,
+            from_arg(a, "answered", json!([]))?,
+        )?),
         "start_course_suggestion" => {
             crate::start_course_suggestion(
                 app.clone(),

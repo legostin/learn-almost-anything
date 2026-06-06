@@ -178,6 +178,22 @@ function courseTitle(course: Course, fallback: string) {
 
 type Question = { text: string; options: string[]; multi?: boolean };
 
+type QnA = { question: string; answer: string };
+
+// One step of the adaptive clarifying interview returned by wizard_next_question.
+type WizardStep = { title?: string | null; done: boolean; question?: Question };
+
+// Persisted running interview (for cross-session resume) from get_wizard_dialog.
+type WizardDialog = {
+  title?: string | null;
+  answered?: QnA[];
+  current?: Question | null;
+  done?: boolean;
+  // True while a wizard_next_question call is in flight (persisted before the
+  // sidecar runs) — lets a remount resume instead of restarting the interview.
+  pending?: boolean;
+};
+
 type GenState = "pending" | "queued" | "generating" | "ready" | "failed";
 
 type ModuleNode = {
@@ -206,7 +222,7 @@ type ChatMessage = {
   modules: ModuleNode[];
 };
 
-type JobKind = "wizard_questions" | "build_structure" | "generate_submodule" | "translate";
+type JobKind = "build_structure" | "generate_submodule" | "translate";
 
 type JobState =
   | { kind: JobKind; status: "running" }
@@ -777,7 +793,7 @@ function App() {
   const [transcripts, setTranscripts] = useState<Map<string, Bubble[]>>(new Map());
   const [subErrors, setSubErrors] = useState<Map<string, string>>(new Map());
   const [recentCourseIds, setRecentCourseIds] = useState<string[]>(readRecentCourseIds);
-  const [wizardQuestionsById, setWizardQuestionsById] = useState<Map<string, Question[]>>(
+  const [wizardDialogById, setWizardDialogById] = useState<Map<string, WizardDialog>>(
     new Map()
   );
   // Submodules that are readable but still backfilling images + test.
@@ -899,22 +915,22 @@ function App() {
     let cancelled = false;
     const wizardCourses = courses.filter((course) => course.status === "wizard");
     if (wizardCourses.length === 0) {
-      setWizardQuestionsById(new Map());
+      setWizardDialogById(new Map());
       return;
     }
     Promise.all(
       wizardCourses.map(async (course) => {
         try {
-          const questions = await invoke<Question[]>("get_wizard_questions", {
+          const dialog = await invoke<WizardDialog>("get_wizard_dialog", {
             courseId: course.id,
           });
-          return [course.id, Array.isArray(questions) ? questions : []] as const;
+          return [course.id, dialog ?? {}] as const;
         } catch {
-          return [course.id, [] as Question[]] as const;
+          return [course.id, {} as WizardDialog] as const;
         }
       })
     ).then((entries) => {
-      if (!cancelled) setWizardQuestionsById(new Map(entries));
+      if (!cancelled) setWizardDialogById(new Map(entries));
     });
     return () => {
       cancelled = true;
@@ -973,14 +989,6 @@ function App() {
             total: pl.total ?? 0,
             complete: !!ok,
           });
-          return next;
-        });
-      }
-      if (kind === "wizard_questions" && ok) {
-        const questions = (result as { questions?: Question[] } | undefined)?.questions ?? [];
-        setWizardQuestionsById((prev) => {
-          const next = new Map(prev);
-          next.set(courseId, questions);
           return next;
         });
       }
@@ -1149,15 +1157,10 @@ function App() {
       return next;
     });
     // Structure-phase transcript is keyed by courseId — reset it on a new run.
-    if (kind === "build_structure" || kind === "wizard_questions") {
+    if (kind === "build_structure") {
       setTranscripts((prev) => {
         const next = new Map(prev);
-        next.set(courseId, [
-          {
-            kind: "running",
-            text: kind === "build_structure" ? t("buildingStructure") : t("wizardThinking"),
-          },
-        ]);
+        next.set(courseId, [{ kind: "running", text: t("buildingStructure") }]);
         return next;
       });
     }
@@ -1232,7 +1235,7 @@ function App() {
       setCourseSuggestion({ status: "idle" });
       await refresh();
       openCourse(id);
-      await startJob(id, "wizard_questions");
+      // The adaptive wizard auto-starts its first question when opened.
     } catch (e) {
       setCourseSuggestion({ status: "error", error: String(e) });
     }
@@ -1337,9 +1340,8 @@ function App() {
         )}
         <ul className="course-list">
           {sidebarCourses.map((c) => {
-            const hasRunning = ["wizard_questions", "build_structure"].some(
-              (k) => jobs.get(jobKey(c.id, k as JobKind))?.status === "running"
-            );
+            const hasRunning =
+              jobs.get(jobKey(c.id, "build_structure"))?.status === "running";
             return (
               <li
                 key={c.id}
@@ -1437,7 +1439,7 @@ function App() {
             geminiConfigured={geminiConfigured}
             modelSettings={modelSettings}
             recentCourseIds={recentCourseIds}
-            wizardQuestionsById={wizardQuestionsById}
+            wizardDialogById={wizardDialogById}
             courseSuggestion={courseSuggestion}
             homeTitleTextStyles={homeTitleTextStyles}
             onNewCourse={() => setView({ kind: "creating" })}
@@ -1488,7 +1490,6 @@ function App() {
           <CourseView
             course={courses.find((c) => c.id === view.id)}
             jobs={jobs}
-            savedWizardQuestions={wizardQuestionsById.get(view.id) ?? []}
             structureTranscript={transcripts.get(view.id) ?? null}
             onStartJob={(kind) => startJob(view.id, kind)}
             onChanged={refresh}
@@ -2086,7 +2087,7 @@ function CourseDashboard({
   geminiConfigured,
   modelSettings,
   recentCourseIds,
-  wizardQuestionsById,
+  wizardDialogById,
   courseSuggestion,
   homeTitleTextStyles,
   onNewCourse,
@@ -2108,7 +2109,7 @@ function CourseDashboard({
   geminiConfigured: boolean | null;
   modelSettings: ModelConfig | null;
   recentCourseIds: string[];
-  wizardQuestionsById: Map<string, Question[]>;
+  wizardDialogById: Map<string, WizardDialog>;
   courseSuggestion: CourseSuggestionState;
   homeTitleTextStyles: HomeTitleTextStyles;
   onNewCourse: () => void;
@@ -2220,7 +2221,6 @@ function CourseDashboard({
 
   const summaries = filteredCourses.map((course) => {
     const progress = progressById.get(course.id);
-    const wizardJob = jobs.get(jobKey(course.id, "wizard_questions"));
     const structureJob = jobs.get(jobKey(course.id, "build_structure"));
     const verifiedPercent =
       progress && progress.total > 0 ? Math.round((progress.verified / progress.total) * 100) : 0;
@@ -2232,30 +2232,16 @@ function CourseDashboard({
     let needsAction = false;
 
     if (course.status === "wizard") {
-      const savedQuestions = wizardQuestionsById.get(course.id) ?? [];
-      if (wizardJob?.status === "running") {
-        actionLabel = t("courseActionWorking");
-        actionDisabled = true;
-        statusText = t("courseStatusWorking");
-      } else if (wizardJob?.status === "error") {
-        actionLabel = t("courseActionRetry");
-        action = () => onStartJob(course.id, "wizard_questions");
-        statusText = t("courseStatusNeedsQuestions");
-        needsAction = true;
-      } else if ((wizardJob?.result as { questions?: Question[] } | undefined)?.questions?.length) {
-        actionLabel = t("courseActionAnswerQuestions");
-        statusText = t("courseStatusNeedsAnswers");
-        needsAction = true;
-      } else if (savedQuestions.length > 0) {
-        actionLabel = t("courseActionAnswerQuestions");
-        statusText = t("courseStatusNeedsAnswers");
-        needsAction = true;
-      } else {
-        actionLabel = t("courseActionStartQuestions");
-        action = () => onStartJob(course.id, "wizard_questions");
-        statusText = t("courseStatusNeedsQuestions");
-        needsAction = true;
-      }
+      // The clarifying interview is now an interactive in-course dialog — the
+      // card just opens it; the label reflects whether it's already underway.
+      const dialog = wizardDialogById.get(course.id);
+      const inProgress = !!(dialog && ((dialog.answered?.length ?? 0) > 0 || dialog.current));
+      actionLabel = inProgress
+        ? t("courseActionAnswerQuestions")
+        : t("courseActionStartQuestions");
+      statusText = inProgress ? t("courseStatusNeedsAnswers") : t("courseStatusNeedsQuestions");
+      action = () => onOpenCourse(course.id);
+      needsAction = true;
     } else if (course.status === "structuring") {
       if (structureJob?.status === "running") {
         actionLabel = t("courseActionWorking");
@@ -4322,7 +4308,6 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
 function CourseView({
   course,
   jobs,
-  savedWizardQuestions,
   structureTranscript,
   onStartJob,
   onChanged,
@@ -4334,7 +4319,6 @@ function CourseView({
 }: {
   course?: Course;
   jobs: Map<string, JobState>;
-  savedWizardQuestions: Question[];
   structureTranscript: Bubble[] | null;
   onStartJob: (kind: JobKind) => void;
   onChanged: () => void | Promise<void>;
@@ -4548,14 +4532,7 @@ function CourseView({
         </div>
       )}
       {course.status === "wizard" && (
-        <Wizard
-          course={course}
-          job={jobs.get(jobKey(course.id, "wizard_questions"))}
-          savedQuestions={savedWizardQuestions}
-          transcript={structureTranscript}
-          onStart={() => onStartJob("wizard_questions")}
-          onSaved={onChanged}
-        />
+        <Wizard key={course.id} course={course} onSaved={onChanged} />
       )}
       {course.status === "structuring" && (
         <StructureBuilder
@@ -4664,177 +4641,259 @@ function DeleteCourseModal({
   );
 }
 
+const WIZARD_MIN_QUESTIONS = 3;
+
+// Adaptive clarifying interview: one question at a time, each generated from the
+// answers so far (3-10 total). The component is the authority for its own state:
+// it loads the persisted dialog from disk on mount (keyed by course.id via the
+// parent), so a remount / course switch / cold open resumes instead of restarting
+// and overwriting the saved answers.
 function Wizard({
   course,
-  job,
-  savedQuestions,
-  transcript,
-  onStart,
   onSaved,
 }: {
   course: Course;
-  job?: JobState;
-  savedQuestions: Question[];
-  transcript: Bubble[] | null;
-  onStart: () => void;
   onSaved: () => void | Promise<void>;
 }) {
   const t = useT();
-  if (!job || (job.status === "done" && !job.result)) {
-    if (savedQuestions.length > 0) {
-      return <AnsweringForm course={course} questions={savedQuestions} onSaved={onSaved} />;
-    }
-    return (
-      <div className="wizard">
-        <p>{t("wizardIntro")}</p>
-        <button onClick={onStart}>{t("startWizard")}</button>
-      </div>
-    );
-  }
-  if (job.status === "running") {
-    return (
-      <div className="wizard">
-        <p>{t("wizardThinking")}</p>
-        <AgentTranscript
-          transcript={
-            transcript?.length
-              ? transcript
-              : [{ kind: "running", text: t("wizardThinking") }]
-          }
-        />
-      </div>
-    );
-  }
-  if (job.status === "error") {
-    return (
-      <div className="wizard error">
-        <p>{t("errorPrefix", { error: job.error })}</p>
-        <button onClick={onStart}>{t("retry")}</button>
-      </div>
-    );
-  }
-  // status === "done"
-  const result = job.result as { questions?: Question[] } | undefined;
-  const questions = result?.questions ?? [];
-  if (questions.length === 0) {
-    return (
-      <div className="wizard">
-        <p>{t("noQuestionsReturned")}</p>
-        <button onClick={onStart}>{t("retry")}</button>
-      </div>
-    );
-  }
-  return <AnsweringForm course={course} questions={questions} onSaved={onSaved} />;
-}
-
-type Answer = { selected: number[]; custom: string };
-
-function AnsweringForm({
-  course,
-  questions,
-  onSaved,
-}: {
-  course: Course;
-  questions: Question[];
-  onSaved: () => void | Promise<void>;
-}) {
-  const t = useT();
-  const [answers, setAnswers] = useState<Answer[]>(
-    questions.map(() => ({ selected: [], custom: "" }))
-  );
-  const [saving, setSaving] = useState(false);
+  const [answered, setAnswered] = useState<QnA[]>([]);
+  const [current, setCurrent] = useState<Question | null>(null);
+  const [done, setDone] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const startedRef = useRef(false);
 
-  function setAnswer(i: number, patch: Partial<Answer>) {
-    setAnswers((prev) => prev.map((a, j) => (j === i ? { ...a, ...patch } : a)));
-  }
+  const askNext = useCallback(
+    async (history: QnA[], reRequested = false) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const step = await invoke<WizardStep>("wizard_next_question", {
+          courseId: course.id,
+          answered: history,
+        });
+        if (step.question) {
+          setAnswered(history);
+          setCurrent(step.question);
+          setDone(false);
+          setPending(false);
+        } else if (history.length < WIZARD_MIN_QUESTIONS && !reRequested) {
+          // Model finished before the 3-question floor — ask once more rather
+          // than dropping the learner onto an under-clarified build screen.
+          await askNext(history, true);
+        } else {
+          setAnswered(history);
+          setCurrent(null);
+          setDone(true);
+          setPending(false);
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [course.id]
+  );
 
-  function toggleOption(i: number, optIdx: number) {
-    const q = questions[i];
-    const isMulti = q.multi !== false;
-    const cur = answers[i].selected;
-    if (isMulti) {
-      const has = cur.includes(optIdx);
-      setAnswer(i, {
-        selected: has ? cur.filter((x) => x !== optIdx) : [...cur, optIdx].sort((a, b) => a - b),
-      });
-    } else {
-      setAnswer(i, { selected: cur[0] === optIdx ? [] : [optIdx] });
+  // Load the persisted dialog (if any) before deciding whether to auto-start.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await invoke<WizardDialog>("get_wizard_dialog", { courseId: course.id });
+        if (cancelled) return;
+        setAnswered(d?.answered ?? []);
+        setCurrent(d?.current ?? null);
+        setDone(!!d?.done);
+        setPending(!!d?.pending);
+      } catch {
+        // Leave defaults; auto-start begins a fresh interview.
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+
+  // After hydration: start the first question (fresh course) or regenerate the
+  // next one if a prior call was abandoned in flight (`pending`); otherwise the
+  // persisted `current`/`done` already drives the UI.
+  useEffect(() => {
+    if (!hydrated || startedRef.current) return;
+    startedRef.current = true;
+    if (done || current) return;
+    if (pending || answered.length === 0) {
+      askNext(answered);
     }
+  }, [hydrated, done, current, pending, answered, askNext]);
+
+  async function submitAnswer(answer: string) {
+    if (!current) return;
+    const history = [...answered, { question: current.text, answer }];
+    setAnswered(history);
+    setCurrent(null);
+    await askNext(history);
   }
 
-  function resolveAnswer(i: number): string {
-    const q = questions[i];
-    const a = answers[i];
-    const custom = a.custom.trim();
-    const picked = a.selected.map((idx) => q.options[idx]).filter(Boolean);
-    if (picked.length === 0 && !custom) return "";
-    if (picked.length === 0) return custom;
-    const joined = picked.join(", ");
-    if (!custom) return joined;
-    return `${joined}; ${custom}`;
-  }
-
-  const canSave = answers.some((_, i) => resolveAnswer(i).length > 0);
-
-  async function save() {
-    const pairs = questions.map((q, i) => ({
-      question: q.text,
-      answer: resolveAnswer(i),
-    }));
-    setSaving(true);
+  async function buildCourse(history: QnA[]) {
+    setFinishing(true);
     setError(null);
     try {
-      await invoke("save_wizard_answers", { courseId: course.id, answers: pairs });
+      await invoke("save_wizard_answers", { courseId: course.id, answers: history });
       await onSaved();
     } catch (e) {
       setError(String(e));
-    } finally {
-      setSaving(false);
+      setFinishing(false);
     }
   }
 
+  if (!hydrated || loading) {
+    return (
+      <div className="wizard">
+        <p>
+          <span className="spinner" /> {t("wizardThinking")}
+        </p>
+      </div>
+    );
+  }
+
+  if (error && !current && !done) {
+    return (
+      <div className="wizard error">
+        <p>{t("errorPrefix", { error })}</p>
+        <button onClick={() => askNext(answered)}>{t("retry")}</button>
+      </div>
+    );
+  }
+
+  if (done || !current) {
+    const enough = answered.length >= WIZARD_MIN_QUESTIONS;
+    return (
+      <div className="wizard">
+        <p>
+          {enough
+            ? t("wizardDoneIntro", { count: answered.length })
+            : t("wizardNeedMore", { min: WIZARD_MIN_QUESTIONS })}
+        </p>
+        {enough ? (
+          <button onClick={() => buildCourse(answered)} disabled={finishing}>
+            {finishing ? t("saving") : t("wizardBuildPlan")}
+          </button>
+        ) : (
+          <button onClick={() => askNext(answered)}>{t("wizardSubmit")}</button>
+        )}
+        {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <WizardQuestion
+      key={answered.length}
+      question={current}
+      index={answered.length}
+      canFinishEarly={answered.length >= WIZARD_MIN_QUESTIONS}
+      finishing={finishing}
+      onSubmit={submitAnswer}
+      onFinishEarly={() => buildCourse(answered)}
+      error={error}
+    />
+  );
+}
+
+// A single adaptive-wizard question: option chips (multi/single) + free text.
+function WizardQuestion({
+  question,
+  index,
+  canFinishEarly,
+  finishing,
+  onSubmit,
+  onFinishEarly,
+  error,
+}: {
+  question: Question;
+  index: number;
+  canFinishEarly: boolean;
+  finishing: boolean;
+  onSubmit: (answer: string) => void | Promise<void>;
+  onFinishEarly: () => void;
+  error: string | null;
+}) {
+  const t = useT();
+  const isMulti = question.multi !== false;
+  const [selected, setSelected] = useState<number[]>([]);
+  const [custom, setCustom] = useState("");
+
+  function toggle(optIdx: number) {
+    if (isMulti) {
+      setSelected((cur) =>
+        cur.includes(optIdx)
+          ? cur.filter((x) => x !== optIdx)
+          : [...cur, optIdx].sort((a, b) => a - b)
+      );
+    } else {
+      setSelected((cur) => (cur[0] === optIdx ? [] : [optIdx]));
+    }
+  }
+
+  function resolved(): string {
+    const c = custom.trim();
+    const picked = selected.map((i) => question.options[i]).filter(Boolean);
+    if (picked.length === 0) return c;
+    return c ? `${picked.join(", ")}; ${c}` : picked.join(", ");
+  }
+
+  const answer = resolved();
+
   return (
     <div className="wizard">
-      <p>{t("answeringIntro")}</p>
-      <ol className="qna">
-        {questions.map((q, i) => {
-          const isMulti = q.multi !== false;
-          return (
-            <li key={i}>
-              <div className="q">
-                {q.text}
-                <span className={`q-mode q-mode-${isMulti ? "multi" : "single"}`}>
-                  {isMulti ? t("optMulti") : t("optSingle")}
-                </span>
-              </div>
-              <div className="options">
-                {q.options.map((opt, j) => (
-                  <label key={j} className="option">
-                    <input
-                      type={isMulti ? "checkbox" : "radio"}
-                      name={isMulti ? undefined : `q-${i}`}
-                      checked={answers[i].selected.includes(j)}
-                      onChange={() => toggleOption(i, j)}
-                    />
-                    <span>{opt}</span>
-                  </label>
-                ))}
-              </div>
+      <div className="wizard-progress">{t("wizardQuestionProgress", { n: index + 1 })}</div>
+      <div className="q">
+        {question.text}
+        {question.options.length > 0 && (
+          <span className={`q-mode q-mode-${isMulti ? "multi" : "single"}`}>
+            {isMulti ? t("optMulti") : t("optSingle")}
+          </span>
+        )}
+      </div>
+      {question.options.length > 0 && (
+        <div className="options">
+          {question.options.map((opt, j) => (
+            <label key={j} className="option">
               <input
-                className="custom-answer"
-                type="text"
-                value={answers[i].custom}
-                placeholder={t("customAnswerPlaceholder")}
-                onChange={(e) => setAnswer(i, { custom: e.target.value })}
+                type={isMulti ? "checkbox" : "radio"}
+                name={isMulti ? undefined : "wizard-q"}
+                checked={selected.includes(j)}
+                onChange={() => toggle(j)}
               />
-            </li>
-          );
-        })}
-      </ol>
-      <button onClick={save} disabled={!canSave || saving}>
-        {saving ? t("saving") : t("saveAnswers")}
-      </button>
+              <span>{opt}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <input
+        className="custom-answer"
+        type="text"
+        value={custom}
+        placeholder={t("customAnswerPlaceholder")}
+        onChange={(e) => setCustom(e.target.value)}
+      />
+      <div className="wizard-actions">
+        <button onClick={() => onSubmit(answer)} disabled={!answer || finishing}>
+          {t("wizardSubmit")}
+        </button>
+        {canFinishEarly && (
+          <button className="ghost" onClick={onFinishEarly} disabled={finishing}>
+            {finishing ? t("saving") : t("wizardFinishEarly")}
+          </button>
+        )}
+      </div>
       {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
     </div>
   );

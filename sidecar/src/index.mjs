@@ -48,7 +48,7 @@ function courseContext(params) {
 const methods = {
   ping: async () => ({ pong: true, time: Date.now() }),
   chat: async (params) => pickAgent(params).chat(params),
-  wizard_questions: async (params, ctx) => pickAgent(params).wizardQuestions(params, ctx),
+  wizard_next_question: async (params, ctx) => pickAgent(params).wizardNextQuestion(params, ctx),
   suggest_course_idea: async (params, ctx) => pickAgent(params).suggestCourseIdea(params, ctx),
   build_structure: async (params, ctx) => pickAgent(params).buildStructure(params, ctx),
   refine_structure: async (params, ctx) => pickAgent(params).refineStructure(params, ctx),

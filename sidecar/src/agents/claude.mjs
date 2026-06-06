@@ -2144,77 +2144,90 @@ Output ONLY single-line JSON:
   };
 }
 
-export async function wizardQuestions({ topic, language, courseFormat, modelConfig }, ctx) {
+// One option/text normalizer shared by the adaptive wizard.
+function normalizeWizardQuestion(q) {
+  if (!q || typeof q.text !== "string") return null;
+  const text = q.text.trim();
+  if (!text) return null;
+  const options = Array.isArray(q.options)
+    ? q.options.filter((o) => typeof o === "string" && o.trim().length > 0).map((o) => o.trim())
+    : [];
+  // Default to multi when unspecified — multi-select is the wizard norm.
+  const multi = q.multi !== false;
+  return { text, options, multi };
+}
+
+// Render the running interview so the model can ask a question that BUILDS on it.
+function answeredBlock(answered) {
+  if (!Array.isArray(answered) || answered.length === 0) {
+    return "(none yet — this is the FIRST question)";
+  }
+  return answered
+    .map((qa, i) => `${i + 1}. Q: ${qa?.question ?? ""}\n   A: ${qa?.answer ?? ""}`)
+    .join("\n");
+}
+
+/**
+ * Adaptive clarifying interview: given the answers so far, return the single most
+ * valuable NEXT question (that builds on prior answers), or done=true once enough
+ * has been gathered. The caller asks one question at a time, 3-10 total.
+ * @param {{topic:string, language:string, courseFormat?:string, answered?:Array<{question:string,answer:string}>}} params
+ * @returns {Promise<{title?:string, done:boolean, question?:{text:string,options:string[],multi:boolean}}>}
+ */
+export async function wizardNextQuestion({ topic, language, courseFormat, answered, modelConfig }, ctx) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
   const lang = (language || "en").trim();
-  const prompt = `You are designing a personalized course on "${topic}".
-The course will be delivered in language code "${lang}".
+  const asked = Array.isArray(answered) ? answered : [];
+  const isFirst = asked.length === 0;
+  const prompt = `You are running an ADAPTIVE clarifying interview with a learner
+BEFORE building a personalized course on "${topic}" (language code "${lang}").
 
 ${courseFormatGuide(courseFormat, lang)}
 
-Generate 5-10 clarifying questions to ask the learner BEFORE you build the
-curriculum. The questions should uncover the things that most change how a
-good program for this specific person would look: prior knowledge, concrete
-goals, available time, constraints, tools/materials, preferred depth, and
-anything topic-specific that matters. Skip pleasantries.
-Do not ask the learner to choose the generation format again.
+Answers gathered so far:
+${answeredBlock(asked)}
+
+Decide the SINGLE most valuable NEXT question — the one whose answer would most
+change how an excellent course for THIS specific person looks. It MUST build on
+what they already told you: follow up on, drill into, disambiguate, or branch
+from a previous answer. Never repeat ground already covered, and never ask the
+learner to choose the generation format again. Skip pleasantries.
+
+Conduct between 3 and 10 questions in TOTAL. You have asked ${asked.length} so far.
+- If you have asked FEWER than 3, you MUST ask another question (done=false).
+- If you have asked AT LEAST 3 and now have enough to build an excellent,
+  specific course, set done=true and omit "question".
+- Otherwise return the next "question".
+
+When you ask a question, also provide 3-5 realistic, mutually-distinct, concrete,
+topic-specific answer options (short phrases in "${lang}", not generic
+"low/medium/high"; e.g. for painting: "масло", "акварель", "карандаш и уголь").
+The learner has a free-text fallback, so do NOT add an "other" option. Also set
+"multi": true by default (preferences, scope, materials, goals usually accept
+several answers); set "multi": false ONLY when answers are genuinely mutually
+exclusive (time per week, current level, work vs hobby).
 ${wizardQuestionGuide(courseFormat, lang)}
-
-For EACH question, also provide 3-5 realistic, mutually-distinct answer
-options the learner can pick from. The options should:
-- cover the common cases for this topic (not generic "low/medium/high");
-- be concrete and topic-specific (e.g. for painting: "масло", "акварель",
-  "карандаш и уголь" — not "art supplies");
-- be short (a phrase, not a paragraph);
-- be in language "${lang}".
-
-For EACH question, also decide whether multiple options can be picked at once.
-Set "multi": true by default — most questions about preferences, scopes,
-materials, goals, formats naturally accept several answers (e.g. "Какие
-жанры интересны?" — портрет AND пейзаж; "Какими материалами работаете?" —
-масло AND акварель). Set "multi": false ONLY when answers are genuinely
-mutually exclusive (e.g. "Сколько часов в неделю готовы уделять?",
-"Какой у вас текущий уровень?", "Это для работы или для хобби?"). When in
-doubt, use multi — forcing a single choice when several apply frustrates
-the learner.
-
-The user will also have a free-text fallback for both modes, so do NOT add
-an "other" option.
-
-Also generate a short display title for the whole course. It must NOT copy the
-learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
-written in language "${lang}", with no quotes and no "course about/on" wrapper.
-
+${isFirst ? `Also generate a short display "title" for the course: a concise noun phrase, 2-6 words in "${lang}", NOT copying the raw request, no quotes, no "course about/on" wrapper.\n` : ""}
 Write everything in language "${lang}".
 
 ${languageStyleGuide(lang)}
 
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
-Shape: {"title":"...","questions":[{"text":"...","options":["...","..."],"multi":true}]}`;
+Shape when asking: {${isFirst ? `"title":"...",` : ""}"done":false,"question":{"text":"...","options":["...","..."],"multi":true}}
+Shape when finished: {"done":true}`;
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
-  const parsed = extractJson(text);
-  if (!Array.isArray(parsed?.questions)) {
-    throw new Error("LLM response missing 'questions' array");
+  const parsed = extractJson(text) || {};
+  // Honor an explicit done; otherwise a missing/invalid question also means done.
+  const question = parsed.done === true ? null : normalizeWizardQuestion(parsed.question);
+  const out = { done: !question };
+  if (question) out.question = question;
+  if (isFirst) {
+    const title = normalizeCourseTitle(parsed?.title);
+    if (title) out.title = title;
   }
-  const questions = parsed.questions
-    .map((q) => {
-      if (!q || typeof q.text !== "string") return null;
-      const text = q.text.trim();
-      if (!text) return null;
-      const options = Array.isArray(q.options)
-        ? q.options
-            .filter((o) => typeof o === "string" && o.trim().length > 0)
-            .map((o) => o.trim())
-        : [];
-      // Default to multi when unspecified — multi-select is the wizard norm.
-      const multi = q.multi !== false;
-      return { text, options, multi };
-    })
-    .filter(Boolean);
-  if (questions.length === 0) throw new Error("LLM returned zero valid questions");
-  return { title: normalizeCourseTitle(parsed?.title), questions };
+  return out;
 }
 
 export async function suggestCourseIdea({ courses, language, modelConfig }, ctx) {
