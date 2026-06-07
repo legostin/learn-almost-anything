@@ -453,13 +453,16 @@ comparing two functions or approaches (e.g. duplicate functions like fetchUser
 vs getUserById), architecture or decision trade-offs, code smells, edge cases,
 before/after — and for AI / LLM material — prompts, system prompts, context
 windows, tool/function schemas, JSON or config payloads, command output, logs,
-or any other text/code artifact — do NOT use image or gallery widgets: a
-searched or generated picture of these is meaningless or hallucinated. Instead,
-write a concrete, self-authored example INLINE as a real Markdown fenced code
-block — invent a representative snippet rather than searching for or generating
-one as an image. Reserve image/gallery widgets for genuinely visual subjects
-(real photographs, real UI screenshots found via search, real diagrams/charts
-of real data, physical objects).
+or any other text/code artifact — AND for SOFTWARE UI of any kind: app /
+program / editor / IDE windows, inspector or properties panels, dashboards,
+settings screens, menus, toolbars/palettes, or app/website screenshots — do NOT
+use image or gallery widgets: a searched or generated picture of these is
+meaningless, hallucinated, or almost never findable, so it ends up an empty
+placeholder. Instead, write a concrete, self-authored example INLINE as a real
+Markdown fenced code block, or describe the interface in prose (which panel,
+which fields). Reserve image/gallery widgets for genuinely visual subjects
+(real photographs, real diagrams/charts of real data, maps, artworks, physical
+objects, places) — never for software UI or screenshots.
 
 Mark insertion
 points with a single line, alone, with blank lines above and below:
@@ -815,17 +818,20 @@ Do a silent paragraph-by-paragraph pass. For every paragraph, decide ONE of:
   a conceptual teaching scene).
 - the point is really a code or AI/LLM / text artifact — a code pattern or
   before/after, a prompt or system prompt, a context window, a tool/function
-  schema, a JSON or config payload, command output, or logs — where a searched
-  or generated picture would be meaningless or hallucinated. Do NOT add an image
-  here; instead write a concrete, self-authored Markdown fenced code block
-  INLINE right where it helps (invent a representative snippet).
-Be friendly to illustration count on genuinely visual subjects: several precise
-illustrations beat one token image. Do not decorate every paragraph, and do not
-add a snippet where the prose already shows one.
+  schema, a JSON or config payload, command output, or logs — OR it is software
+  UI (an app/program/editor/IDE window, an inspector or properties panel, a
+  dashboard, a settings screen, a menu, a toolbar, or any app/website
+  screenshot) — where a searched or generated picture would be meaningless,
+  hallucinated, or almost never findable. Do NOT add an image here; instead
+  write a concrete, self-authored Markdown fenced code block INLINE, or describe
+  the interface in prose.
+Only add an image when the subject is a concrete, real, FINDABLE thing. If you
+are not confident a real image can actually be found, do NOT add the widget —
+a missing image beats an empty placeholder. Do not decorate every paragraph.
 
 Rules:
 - Preserve all existing widget marker lines and existing ids.
-- Add at most 6 NEW image/gallery widgets total.
+- Add at most 3 NEW image/gallery widgets total, and only clearly findable ones.
 - Use ids that do not collide with existing ids, e.g. img-auto-1,
   img-auto-2, gal-auto-1.
 - New marker lines must be alone, with blank lines around them:

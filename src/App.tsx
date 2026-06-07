@@ -6022,6 +6022,7 @@ function SubmoduleView({
   const [retryingImages, setRetryingImages] = useState(false);
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [cardsBusy, setCardsBusy] = useState(false);
+  const [editImages, setEditImages] = useState(false);
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
     if (!course) return;
@@ -6303,31 +6304,42 @@ function SubmoduleView({
           {content && (
             <>
               {!enriching && unresolvedImages > 0 && (
-                <div className="sub-recovery">
-                  <div>
-                    <div className="sub-recovery-title">
-                      {t("subImagesIncomplete", { count: unresolvedImages })}
-                    </div>
-                    <div className="sub-recovery-body">{t("subImagesIncompleteBody")}</div>
-                    {imageRetryError && (
-                      <div className="sub-recovery-error">
-                        {t("errorPrefix", { error: imageRetryError })}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    className="sub-recovery-action"
-                    disabled={retryingImages}
-                    onClick={retryImages}
-                  >
-                    {retryingImages ? (
-                      <>
-                        <span className="spinner" /> {t("subImagesRetrying")}
-                      </>
-                    ) : (
-                      t("subImagesRetry")
-                    )}
-                  </button>
+                <div className="sub-image-edit">
+                  {!editImages ? (
+                    <button
+                      className="sub-image-edit-toggle"
+                      onClick={() => setEditImages(true)}
+                    >
+                      ✎ {t("editImages", { count: unresolvedImages })}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        className="sub-image-edit-toggle"
+                        onClick={() => setEditImages(false)}
+                      >
+                        {t("editImagesDone")}
+                      </button>
+                      <button
+                        className="sub-recovery-action"
+                        disabled={retryingImages}
+                        onClick={retryImages}
+                      >
+                        {retryingImages ? (
+                          <>
+                            <span className="spinner" /> {t("subImagesRetrying")}
+                          </>
+                        ) : (
+                          t("subImagesRetry")
+                        )}
+                      </button>
+                      {imageRetryError && (
+                        <span className="sub-recovery-error">
+                          {t("errorPrefix", { error: imageRetryError })}
+                        </span>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
               <ArticleReader
@@ -6341,6 +6353,7 @@ function SubmoduleView({
                         moduleId,
                         submoduleId,
                         canGenerate,
+                        editImages,
                         onChanged: reloadContent,
                       }
                     : undefined
@@ -7770,6 +7783,9 @@ type WidgetCtx = {
   moduleId: string;
   submoduleId: string;
   canGenerate: boolean;
+  // When false, unresolved image/gallery placeholders are hidden from the reader;
+  // the "Edit images" toggle flips this on to expose the editable placeholders.
+  editImages: boolean;
   onChanged: () => void | Promise<void>;
 };
 
@@ -7927,6 +7943,11 @@ function WidgetRenderer({
     );
   }
   if (widget.type === "image") {
+    // Hide an unresolved image entirely unless the reader is in "Edit images"
+    // mode — a dashed placeholder is noise in a finished article.
+    const item = widget as WidgetImageItem;
+    const unresolved = item.placeholder === true || !resolveWidgetImage(item.url, item.source).imgSrc;
+    if (unresolved && !widgetCtx?.editImages) return null;
     return (
       <ImagePlaceholder
         id={id}
@@ -7937,7 +7958,14 @@ function WidgetRenderer({
     );
   }
   if (widget.type === "gallery") {
-    return <GalleryWidget id={id} widget={widget as any} onOpenImage={onOpenImage} />;
+    return (
+      <GalleryWidget
+        id={id}
+        widget={widget as any}
+        onOpenImage={onOpenImage}
+        editImages={!!widgetCtx?.editImages}
+      />
+    );
   }
   if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
   if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
@@ -8776,10 +8804,12 @@ function GalleryWidget({
   id,
   widget,
   onOpenImage,
+  editImages,
 }: {
   id: string;
   widget: { caption?: string; items?: WidgetImageItem[] };
   onOpenImage?: (key: string) => void;
+  editImages?: boolean;
 }) {
   const t = useT();
   const items = Array.isArray(widget.items) ? widget.items : [];
@@ -8788,6 +8818,13 @@ function GalleryWidget({
   useEffect(() => {
     setFailed(new Set());
   }, [widget.items]);
+
+  const isUnresolved = (item: WidgetImageItem) =>
+    item.placeholder === true || !resolveWidgetImage(item.url, item.source).imgSrc;
+
+  // Read mode: hide the whole gallery when nothing resolved (and skip unresolved
+  // items below, preserving original indices for the lightbox).
+  if (!editImages && (items.length === 0 || items.every(isUnresolved))) return null;
 
   if (items.length === 0) {
     return (
@@ -8804,6 +8841,7 @@ function GalleryWidget({
     <figure className="widget widget-gallery">
       <div className="widget-gallery-grid">
         {items.map((item, index) => {
+          if (!editImages && (isUnresolved(item) || failed.has(index))) return null;
           const { hasUrl, imgSrc } = resolveWidgetImage(item.url, item.source);
           const unavailable = hasUrl && (!imgSrc || failed.has(index));
           const imageKey = `${id}-${index}`;

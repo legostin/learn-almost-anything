@@ -4146,6 +4146,31 @@ button {
   }
 }
 
+/* Compact "Edit images" control that replaces the verbose recovery banner. */
+.sub-image-edit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.sub-image-edit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sub-image-edit-toggle:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
 /* ── Homework assignments ──────────────────────────────────────────── */
 .assignments {
   margin-top: 32px;

@@ -275,9 +275,8 @@ const STRINGS = {
     stagePendingHint: "Раздел ещё не сгенерирован.",
     stageQueuedHint: "Раздел в очереди на генерацию.",
     subEnriching: "Иллюстрации и тест ещё загружаются…",
-    subImagesIncomplete: "Картинки не дозагрузились: {count}",
-    subImagesIncompleteBody:
-      "Агент заново пройдёт статью по абзацам, добавит нужные иллюстрации и соберёт картинки. Тест и домашние задания не изменятся.",
+    editImages: "Править картинки ({count})",
+    editImagesDone: "Готово",
     subImagesRetry: "Пересобрать иллюстрации",
     subImagesRetrying: "Собираю картинки…",
     lectureListen: "Слушать",
@@ -783,9 +782,8 @@ const STRINGS = {
     stagePendingHint: "This section has not been generated yet.",
     stageQueuedHint: "This section is queued for generation.",
     subEnriching: "Illustrations and the test are still loading…",
-    subImagesIncomplete: "Images did not finish loading: {count}",
-    subImagesIncompleteBody:
-      "The agent will review the article paragraph by paragraph, add useful illustration markers, and collect images. The test and assignments stay unchanged.",
+    editImages: "Edit images ({count})",
+    editImagesDone: "Done",
     subImagesRetry: "Rebuild illustrations",
     subImagesRetrying: "Collecting images…",
     lectureListen: "Listen",
