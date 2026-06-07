@@ -4358,6 +4358,97 @@ fn update_widget_in_place(
         .map_err(|e| e.to_string())
 }
 
+/// Merge a set of fields into one widget's JSON object (used by "fix widget" to
+/// write back corrected content, e.g. diagram `source` or interactive html/css/js,
+/// and clear/refresh `error`). Returns the updated widget.
+fn merge_widget_fields(
+    paths: &AppPaths,
+    course_id: &str,
+    module_id: &str,
+    submodule_id: &str,
+    widget_id: &str,
+    fields: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let content = courses::read_submodule_content(paths, course_id, module_id, submodule_id)
+        .map_err(|e| e.to_string())?;
+    let mut widgets = content.widgets;
+    let w = widgets
+        .get_mut(widget_id)
+        .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+    if let Some(obj) = fields.as_object() {
+        for (k, v) in obj {
+            w[k] = v.clone();
+        }
+    }
+    let updated = w.clone();
+    courses::write_submodule_widgets(paths, course_id, module_id, submodule_id, &widgets)
+        .map_err(|e| e.to_string())?;
+    Ok(updated)
+}
+
+/// Repair a broken/unsatisfactory diagram or interactive widget via the agent's
+/// validate+repair pipeline, honoring an optional learner instruction. Async +
+/// spawn_blocking (LLM call). Returns the updated widget (with `error` if it
+/// could not be fully fixed). Image widgets use search/generate instead.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn fix_widget(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+    instruction: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let content =
+            courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+                .map_err(|e| e.to_string())?;
+        let widget = content
+            .widgets
+            .get(&widget_id)
+            .cloned()
+            .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+        let wtype = widget.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if wtype != "diagram" && wtype != "interactive" {
+            return Err("only diagram and interactive widgets can be auto-fixed".into());
+        }
+        let model_config = settings.stage_model(&course.agent, "writing");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "article": content.article,
+            "widget": widget,
+            "instruction": instruction,
+            "braveApiKey": settings.brave_api_key(),
+            "modelConfig": model_config,
+        });
+        let v = sidecar
+            .call("fix_widget", params, Duration::from_secs(600))
+            .map_err(|e| e.to_string())?;
+        let fields = v.get("widget").cloned().unwrap_or_else(|| json!({}));
+        let updated =
+            merge_widget_fields(&paths, &course_id, &module_id, &submodule_id, &widget_id, &fields)?;
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Download a user-chosen candidate and attach it to the widget. Off-thread.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -5326,6 +5417,7 @@ pub fn run() {
             search_widget_candidates,
             set_widget_image,
             generate_widget_image,
+            fix_widget,
             remove_widget,
             image_generation_available,
             list_spaces,

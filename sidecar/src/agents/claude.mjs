@@ -1179,6 +1179,79 @@ function mermaidIssue(source) {
 }
 
 /**
+ * Repair / edit one diagram or interactive widget on demand (the learner asked
+ * to "fix it" or gave an instruction). Reuses the validate+repair pipeline.
+ * @returns {Promise<{ widget: object }>} corrected content fields (+ error if any)
+ */
+export async function fixWidget({ language, topic, article, widget, instruction, modelConfig }, ctx) {
+  const w = widget && typeof widget === "object" && widget.widget ? widget.widget : widget;
+  const lang = (language || "en").trim();
+  const type = w?.type;
+  const instr = (instruction || "").trim();
+  const lessonCtx = (article || "").slice(0, 6000);
+  if (type === "diagram") {
+    const prompt = `You are fixing a Mermaid DIAGRAM in a lesson on "${topic}" (language "${lang}").
+Current Mermaid source:
+<source>
+${w.source || ""}
+</source>
+${w.error ? `Known render error: ${w.error}\n` : ""}${instr ? `Learner's instruction: ${instr}\n` : ""}Lesson context (keep the diagram faithful to it):
+<lesson>
+${lessonCtx}
+</lesson>
+Return a corrected, VALID Mermaid diagram (labels in "${lang}").
+Output ONLY a JSON object on a single line, no prose, no fence:
+{"source":"<mermaid source>","caption":"<short caption or empty>"}`;
+    const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+    const parsed = extractJson(text) || {};
+    const source =
+      typeof parsed.source === "string" && parsed.source.trim() ? parsed.source.trim() : w.source;
+    const out = { source, error: mermaidIssue(source) || null };
+    if (typeof parsed.caption === "string" && parsed.caption.trim()) out.caption = parsed.caption.trim();
+    return { widget: out };
+  }
+  if (type === "interactive") {
+    let current = {
+      html: w.html || "",
+      css: w.css || "",
+      js: w.js || "",
+      height: w.height,
+      title: w.title,
+      description: w.description,
+    };
+    if (instr) {
+      const prompt = `You are editing a SELF-CONTAINED interactive widget (vanilla JS only; no network, no eval, no external libs) in a lesson on "${topic}" (language "${lang}").
+Current HTML:\n${current.html}\nCurrent CSS:\n${current.css}\nCurrent JS:\n${current.js}
+${w.error ? `Known error: ${w.error}\n` : ""}Learner's instruction: ${instr}
+Output ONLY a JSON object on a single line, no prose, no fence:
+{"html":"...","css":"...","js":"...","height":<number optional>}`;
+      const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+      const parsed = extractJson(text);
+      if (parsed && typeof parsed === "object") {
+        current = {
+          ...current,
+          html: typeof parsed.html === "string" ? parsed.html : current.html,
+          css: typeof parsed.css === "string" ? parsed.css : current.css,
+          js: typeof parsed.js === "string" ? parsed.js : current.js,
+          height: typeof parsed.height === "number" ? parsed.height : current.height,
+        };
+      }
+    }
+    const { final, error } = await validateAndRepairInteractive(current, "fix", ctx?.progress, modelConfig);
+    return {
+      widget: {
+        html: final.html,
+        css: final.css,
+        js: final.js,
+        height: final.height,
+        error: error || null,
+      },
+    };
+  }
+  return { widget: {} };
+}
+
+/**
  * Three-stage submodule pipeline: draft → review → annotate images.
  * Each stage is its own LLM call; the orchestrator returns the final article,
  * the widget map for placeholders, and the editor's notes.

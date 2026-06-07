@@ -5605,6 +5605,7 @@ function CourseAssistant({
   submoduleId,
   target,
   onTargetConsumed,
+  onChanged,
   onOpenSubmodule,
 }: {
   courseId: string;
@@ -5612,6 +5613,7 @@ function CourseAssistant({
   submoduleId: string;
   target?: AssistantTarget | null;
   onTargetConsumed?: () => void;
+  onChanged?: () => void | Promise<void>;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
   const t = useT();
@@ -5622,6 +5624,8 @@ function CourseAssistant({
   const [fragment, setFragment] = useState<string | null>(null);
   const [image, setImage] = useState<string | null>(null);
   const [widgetTarget, setWidgetTarget] = useState<AssistantTarget | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ImageCandidate[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
@@ -5636,6 +5640,7 @@ function CourseAssistant({
     setFragment(null);
     setImage(null);
     setWidgetTarget(null);
+    setCandidates([]);
     setError(null);
     setCurrentNoteId(null);
     setMode("chat");
@@ -5862,6 +5867,81 @@ function CourseAssistant({
     }
   }
 
+  // ── Per-widget actions on the current target (fix / variants) ──────────────
+  function targetArgs() {
+    if (!widgetTarget) return null;
+    return { courseId, moduleId, submoduleId, widgetId: widgetTarget.widgetId };
+  }
+  function note(text: string) {
+    setMessages((prev) => [...prev, { role: "assistant", text }]);
+  }
+  async function fixTarget() {
+    const args = targetArgs();
+    if (!args || actionBusy) return;
+    setActionBusy("fix");
+    setError(null);
+    try {
+      const updated = await invoke<{ error?: string | null } | null>("fix_widget", {
+        ...args,
+        instruction: input.trim() || null,
+      });
+      setInput("");
+      note(updated?.error ? t("widgetFixPartial", { error: String(updated.error) }) : t("widgetFixDone"));
+      await onChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+  async function searchTarget() {
+    const args = targetArgs();
+    if (!args || actionBusy) return;
+    setActionBusy("search");
+    setError(null);
+    setCandidates([]);
+    try {
+      const cands = await invoke<ImageCandidate[]>("search_widget_candidates", args);
+      setCandidates(cands);
+      if (!cands.length) note(t("widgetNotFound"));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+  async function pickCandidate(c: ImageCandidate) {
+    const args = targetArgs();
+    if (!args || actionBusy) return;
+    setActionBusy("pick");
+    setError(null);
+    try {
+      await invoke("set_widget_image", { ...args, url: c.url, source: c.source || null });
+      setCandidates([]);
+      note(t("widgetImageUpdated"));
+      await onChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+  async function generateTarget() {
+    const args = targetArgs();
+    if (!args || actionBusy) return;
+    setActionBusy("generate");
+    setError(null);
+    try {
+      await invoke("generate_widget_image", args);
+      note(t("widgetImageUpdated"));
+      await onChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
   return (
     <>
       {sel && !open && (
@@ -6012,11 +6092,52 @@ function CourseAssistant({
                     onClick={() => {
                       if (image && image === widgetTarget.imagePath) setImage(null);
                       setWidgetTarget(null);
+                      setCandidates([]);
                     }}
                     aria-label="remove"
                   >
                     ✕
                   </button>
+                </div>
+              )}
+              {widgetTarget && (
+                <div className="assistant-actions">
+                  {(widgetTarget.widgetType === "diagram" ||
+                    widgetTarget.widgetType === "interactive") && (
+                    <button disabled={!!actionBusy} onClick={fixTarget}>
+                      {actionBusy === "fix" ? `… ${t("assistantThinking")}` : `🔧 ${t("widgetFix")}`}
+                    </button>
+                  )}
+                  {(widgetTarget.widgetType === "image" ||
+                    widgetTarget.widgetType === "gallery") && (
+                    <>
+                      <button disabled={!!actionBusy} onClick={searchTarget}>
+                        {actionBusy === "search"
+                          ? `… ${t("assistantThinking")}`
+                          : `🖼 ${t("widgetOtherImages")}`}
+                      </button>
+                      <button disabled={!!actionBusy} onClick={generateTarget}>
+                        {actionBusy === "generate"
+                          ? `… ${t("assistantThinking")}`
+                          : `✨ ${t("widgetGenerateNew")}`}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              {candidates.length > 0 && (
+                <div className="assistant-candidates">
+                  {candidates.map((c, i) => (
+                    <button
+                      key={i}
+                      className="assistant-candidate"
+                      disabled={!!actionBusy}
+                      onClick={() => pickCandidate(c)}
+                      title={c.title}
+                    >
+                      <img src={c.thumbnail || c.url} alt="" />
+                    </button>
+                  ))}
                 </div>
               )}
               {image && (
@@ -6292,6 +6413,7 @@ function SubmoduleView({
           submoduleId={submoduleId}
           target={assistantTarget}
           onTargetConsumed={() => setAssistantTarget(null)}
+          onChanged={reloadContent}
           onOpenSubmodule={onOpenSubmodule}
         />
       )}

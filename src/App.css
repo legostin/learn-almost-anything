@@ -6385,6 +6385,54 @@ button.domain-chip {
 .assistant-target-chip span {
   font-weight: 600;
 }
+.assistant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 12px 4px;
+}
+.assistant-actions button {
+  padding: 5px 11px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.assistant-actions button:hover:not(:disabled) {
+  border-color: var(--accent, #2563eb);
+}
+.assistant-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.assistant-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 6px;
+  margin: 0 12px 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.assistant-candidate {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--surface-2);
+  aspect-ratio: 1 / 1;
+}
+.assistant-candidate:hover {
+  border-color: var(--accent, #2563eb);
+}
+.assistant-candidate img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .assistant-typing {
   color: var(--text-subtle);
   font-size: 13px;

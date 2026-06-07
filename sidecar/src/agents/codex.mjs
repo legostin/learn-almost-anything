@@ -2212,6 +2212,95 @@ function mermaidIssue(source) {
   return null;
 }
 
+const diagramFixSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { source: { type: "string" }, caption: { type: "string" } },
+  required: ["source", "caption"],
+};
+
+/**
+ * Repair / edit one diagram or interactive widget on demand. Mirrors the Claude
+ * agent; reuses the codex validate+repair pipeline.
+ * @returns {Promise<{ widget: object }>}
+ */
+export async function fixWidget(
+  { language, topic, article, widget, instruction, braveApiKey, modelConfig },
+  ctx
+) {
+  const w = widget && typeof widget === "object" && widget.widget ? widget.widget : widget;
+  const lang = (language || "en").trim();
+  const type = w?.type;
+  const instr = (instruction || "").trim();
+  const lessonCtx = (article || "").slice(0, 6000);
+  if (type === "diagram") {
+    const prompt = `You are fixing a Mermaid DIAGRAM in a lesson on "${topic}" (language "${lang}").
+Current Mermaid source:
+<source>
+${w.source || ""}
+</source>
+${w.error ? `Known render error: ${w.error}\n` : ""}${instr ? `Learner's instruction: ${instr}\n` : ""}Lesson context (keep the diagram faithful to it):
+<lesson>
+${lessonCtx}
+</lesson>
+Return a corrected, VALID Mermaid diagram (labels in "${lang}") and a short caption (may be empty).`;
+    const text = await runStreamed(prompt, diagramFixSchema, ctx?.progress, { braveApiKey, modelConfig });
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = {};
+    }
+    const source =
+      typeof parsed.source === "string" && parsed.source.trim() ? parsed.source.trim() : w.source;
+    const out = { source, error: mermaidIssue(source) || null };
+    if (typeof parsed.caption === "string" && parsed.caption.trim()) out.caption = parsed.caption.trim();
+    return { widget: out };
+  }
+  if (type === "interactive") {
+    let current = {
+      html: w.html || "",
+      css: w.css || "",
+      js: w.js || "",
+      height: w.height,
+      title: w.title,
+      description: w.description,
+    };
+    if (instr) {
+      const prompt = `You are editing a SELF-CONTAINED interactive widget (vanilla JS only; no network, no eval, no external libs) in a lesson on "${topic}" (language "${lang}").
+Current HTML:\n${current.html}\nCurrent CSS:\n${current.css}\nCurrent JS:\n${current.js}
+${w.error ? `Known error: ${w.error}\n` : ""}Learner's instruction: ${instr}`;
+      const text = await runStreamed(prompt, repairSchema, ctx?.progress, { braveApiKey, modelConfig });
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && typeof parsed === "object") {
+        current = {
+          ...current,
+          html: typeof parsed.html === "string" ? parsed.html : current.html,
+          css: typeof parsed.css === "string" ? parsed.css : current.css,
+          js: typeof parsed.js === "string" ? parsed.js : current.js,
+          height: typeof parsed.height === "number" ? parsed.height : current.height,
+        };
+      }
+    }
+    const { final, error } = await validateAndRepairInteractive(current, "fix", ctx, braveApiKey, modelConfig);
+    return {
+      widget: {
+        html: final.html,
+        css: final.css,
+        js: final.js,
+        height: final.height,
+        error: error || null,
+      },
+    };
+  }
+  return { widget: {} };
+}
+
 /**
  * Composite kept for back-compat / smoke tests. Rust drives the stages
  * individually for per-stage progress events.
