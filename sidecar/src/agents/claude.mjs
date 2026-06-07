@@ -1716,9 +1716,11 @@ Answer in ${lang}, in Markdown. Be concise but complete; use examples or code wh
     }
     ctx?.progress?.({ label: "thinking" });
     let text = "";
+    // Grant the same tools as the text path (web + reference MCP + read-only
+    // space dirs) so an image question is grounded identically across backends.
     for await (const m of query({
       prompt: userPrompt(),
-      options: { maxTurns: 4, ...claudeBaseOptions(modelOptions(modelConfig)) },
+      options: buildClaudeOptions({ maxTurns: 10, web: true, modelConfig, dirs: spaceDirs }),
     })) {
       if (m.type === "result" && m.subtype === "success") text = m.result;
     }
