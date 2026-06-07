@@ -222,10 +222,14 @@ pub fn install_package(
             .ok()
             .flatten()
         });
+    // A fresh import gets a NEW local id (distinct from the catalog origin id) so
+    // `course.id != catalog_origin_id` reliably marks it as imported — the publish
+    // gate + "Imported" badge depend on that. Re-imports/updates still match the
+    // existing local copy via catalog_origin_id (above), so dedup is unaffected.
     let course_id = existing
         .as_ref()
         .map(|course| course.id.clone())
-        .unwrap_or_else(|| package.course.id.clone());
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     if let Some(existing_course) = existing.as_ref() {
         let local_generated = count_generated_lessons(conn, &existing_course.id).unwrap_or(0);

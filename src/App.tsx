@@ -5811,13 +5811,16 @@ function CourseAssistant({
   }
 
   // Consume a widget target ("✦ Ask"): open the panel focused on that widget.
-  // For image widgets the local file is attached so the model sees it (vision).
+  // Reset any prior candidate grid so it can't be applied to the new target. We
+  // do NOT attach the image here — the backend re-derives an image widget's local
+  // file for vision from its url, which avoids a duplicate image chip and avoids
+  // leaking a previous photo onto a non-image target.
   useEffect(() => {
     if (!target) return;
     setMode("chat");
     setOpen(true);
     setWidgetTarget(target);
-    if (target.imagePath) setImage(target.imagePath);
+    setCandidates([]);
     onTargetConsumed?.();
   }, [target, onTargetConsumed]);
 
@@ -5835,7 +5838,7 @@ function CourseAssistant({
 
   async function send() {
     const q = input.trim();
-    if ((!q && !image && !widgetTarget) || busy) return;
+    if ((!q && !image && !widgetTarget) || busy || actionBusy) return;
     const userMsg: AssistantMsg = {
       role: "user",
       text: q,
@@ -5892,7 +5895,15 @@ function CourseAssistant({
         instruction: input.trim() || null,
       });
       setInput("");
-      note(updated?.error ? t("widgetFixPartial", { error: String(updated.error) }) : t("widgetFixDone"));
+      if (updated?.error) {
+        note(t("widgetFixPartial", { error: String(updated.error) }));
+      } else if (widgetTarget?.widgetType === "diagram") {
+        // The diagram is validated only heuristically here; the real Mermaid
+        // parser runs in the reader, so don't over-claim success.
+        note(t("widgetFixRegenerated"));
+      } else {
+        note(t("widgetFixDone"));
+      }
       await onChanged?.();
     } catch (e) {
       setError(String(e));
@@ -6117,7 +6128,6 @@ function CourseAssistant({
                   <span>✦ {widgetTarget.summary}</span>
                   <button
                     onClick={() => {
-                      if (image && image === widgetTarget.imagePath) setImage(null);
                       setWidgetTarget(null);
                       setCandidates([]);
                     }}
@@ -6135,8 +6145,7 @@ function CourseAssistant({
                       {actionBusy === "fix" ? `… ${t("assistantThinking")}` : `🔧 ${t("widgetFix")}`}
                     </button>
                   )}
-                  {(widgetTarget.widgetType === "image" ||
-                    widgetTarget.widgetType === "gallery") && (
+                  {widgetTarget.widgetType === "image" && (
                     <>
                       <button disabled={!!actionBusy} onClick={searchTarget}>
                         {actionBusy === "search"
@@ -6208,7 +6217,7 @@ function CourseAssistant({
                 <button
                   className="assistant-send"
                   onClick={send}
-                  disabled={(!input.trim() && !image && !widgetTarget) || busy}
+                  disabled={(!input.trim() && !image && !widgetTarget) || busy || !!actionBusy}
                   title={t("assistantSend")}
                   aria-label={t("assistantSend")}
                 >
