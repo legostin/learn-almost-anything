@@ -72,6 +72,7 @@ const methods = {
   detect_image_text_language: async (params) => pickAgent(params).detectImageTextLanguage(params),
   course_assistant: async (params, ctx) => pickAgent(params).courseAssistant(params, ctx),
   fix_widget: async (params, ctx) => pickAgent(params).fixWidget(params, ctx),
+  extend_article: async (params, ctx) => pickAgent(params).extendArticle(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };

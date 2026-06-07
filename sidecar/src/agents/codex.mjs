@@ -780,6 +780,40 @@ Answer in ${lang}, in Markdown. Be concise but complete; use examples or code wh
   return { answer: (text || "").trim() };
 }
 
+/**
+ * Deepen a lesson: additional Markdown "##" sections appended after the article
+ * (prose + inline code; no widgets). Returns { markdown }.
+ */
+export async function extendArticle(
+  { language, topic, article, instruction, spaceSources, spaceLinks, spaceDirs, spaceStrict, modelConfig },
+  ctx
+) {
+  const lang = (language || "en").trim();
+  const instr = (instruction || "").trim();
+  const prompt = `You are DEEPENING an existing lesson on "${topic}" (language "${lang}").
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
+The lesson so far:
+<lesson>
+${article}
+</lesson>
+
+Write ADDITIONAL deep-dive sections to append AFTER this lesson — go beyond what
+is already covered: edge cases, advanced techniques, worked examples, common
+pitfalls, deeper theory or context${instr ? `. Focus especially on: ${instr}` : ""}.
+Rules:
+- Begin each section with a Markdown "## " heading. Do NOT repeat anything already
+  in the lesson.
+- Use prose and inline fenced code blocks where they help. Do NOT add any
+  ::widget markers, images, or galleries.
+- Write everything in language "${lang}".
+
+${languageStyleGuide(lang)}
+
+Output ONLY the new Markdown sections — no preamble, no surrounding code fence.`;
+  const text = await runStreamed(prompt, undefined, ctx?.progress, { modelConfig, dirs: spaceDirs });
+  return { markdown: (text || "").trim() };
+}
+
 // Vision text-language detection is done via Claude (the Rust side forces
 // backend="claude"); this codex stub keeps the method present and safe.
 export async function detectImageTextLanguage() {

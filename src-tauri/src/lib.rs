@@ -2432,6 +2432,17 @@ fn publish_course_to_catalog(
 ) -> Result<catalog::CatalogPublishResult, String> {
     let package = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        // Only the original author may publish: an imported course (origin id set
+        // to someone else's) stays local, so the learner's own additions to it are
+        // never shared.
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        if let Some(origin) = course.catalog_origin_id.as_deref() {
+            if origin != course.id {
+                return Err("imported courses cannot be published".to_string());
+            }
+        }
         catalog::build_package(&conn, &paths, &course_id)?
     };
     let token = settings
@@ -3062,6 +3073,75 @@ fn start_generate_flashcards(
         emit_enrich_event(&app2, &course_id, &submodule_id);
     });
     Ok(())
+}
+
+/// Append assistant-proposed deep-dive sections to a lesson's article. Async +
+/// spawn_blocking (LLM call). Sharing is governed by course authorship at publish
+/// time, so additions on an imported course simply never get published.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn extend_submodule(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    instruction: Option<String>,
+) -> Result<(), String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let (course, space) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let c = db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?;
+            let sp = course_space_context(&paths, &conn, &c);
+            (c, sp)
+        };
+        let (docs, links, dirs, strict) = space;
+        let content =
+            courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+                .map_err(|e| e.to_string())?;
+        let model = settings.stage_model(&course.agent, "writing");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "article": content.article,
+            "instruction": instruction,
+            "spaceSources": docs,
+            "spaceLinks": links,
+            "spaceDirs": dirs,
+            "spaceStrict": strict,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("extend_article", params, Duration::from_secs(900))
+            .map_err(|e| e.to_string())?;
+        let md = v
+            .get("markdown")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if md.is_empty() {
+            return Err("no additional sections were produced".into());
+        }
+        let appended = format!("{}\n\n<!-- la:deepdive -->\n\n{}\n", content.article.trim_end(), md);
+        courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &appended)
+            .map_err(|e| e.to_string())?;
+        emit_enrich_event(&app2, &course_id, &submodule_id);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Retry only the illustration enrichment for an already-readable submodule.
@@ -5418,6 +5498,7 @@ pub fn run() {
             set_widget_image,
             generate_widget_image,
             fix_widget,
+            extend_submodule,
             remove_widget,
             image_generation_available,
             list_spaces,

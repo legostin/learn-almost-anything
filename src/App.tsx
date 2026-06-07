@@ -4439,6 +4439,11 @@ function CourseView({
           {course.translated_from && (
             <span className="translated-badge">🌐 {t("translatedBadge")}</span>
           )}
+          {!!course.catalog_origin_id && course.catalog_origin_id !== course.id && (
+            <span className="translated-badge" title={t("importedBadgeHint")}>
+              📥 {t("importedBadge")}
+            </span>
+          )}
         </div>
         <div className="course-meta-actions">
           <select
@@ -4471,7 +4476,8 @@ function CourseView({
               </div>
             )}
           </div>
-          {course.status === "ready" && (
+          {course.status === "ready" &&
+            !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id) && (
             <button className="meta-action" onClick={publishCourse} disabled={publishing}>
               {publishing ? t("catalogPublishing") : t("catalogPublish")}
             </button>
@@ -5941,6 +5947,27 @@ function CourseAssistant({
       setActionBusy(null);
     }
   }
+  // Assistant-proposed deep-dive: append extra sections to the current lesson.
+  async function goDeeper() {
+    if (actionBusy || busy) return;
+    setActionBusy("deepen");
+    setError(null);
+    try {
+      await invoke("extend_submodule", {
+        courseId,
+        moduleId,
+        submoduleId,
+        instruction: input.trim() || null,
+      });
+      setInput("");
+      note(t("assistantDeepenDone"));
+      await onChanged?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(null);
+    }
+  }
 
   return (
     <>
@@ -6138,6 +6165,13 @@ function CourseAssistant({
                       <img src={c.thumbnail || c.url} alt="" />
                     </button>
                   ))}
+                </div>
+              )}
+              {!widgetTarget && (
+                <div className="assistant-actions">
+                  <button disabled={!!actionBusy || busy} onClick={goDeeper} title={t("assistantDeepenHint")}>
+                    {actionBusy === "deepen" ? `… ${t("assistantThinking")}` : `✦ ${t("assistantDeepen")}`}
+                  </button>
                 </div>
               )}
               {image && (
