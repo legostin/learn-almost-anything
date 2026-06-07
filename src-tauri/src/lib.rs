@@ -431,6 +431,12 @@ async fn wizard_next_question(
             }
         }
 
+        // Space material (attached docs/links/directories) so the interview can
+        // inspect it and ground its questions in what's actually there.
+        let (space_sources, space_links, space_dirs, space_strict) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            course_space_context(&paths, &conn, &course)
+        };
         let model_config = settings.stage_model(&course.agent, "planning");
         let params = json!({
             "backend": course.agent,
@@ -439,6 +445,10 @@ async fn wizard_next_question(
             "courseFormat": course.course_format,
             "answered": answered_json,
             "modelConfig": model_config,
+            "spaceSources": space_sources,
+            "spaceLinks": space_links,
+            "spaceDirs": space_dirs,
+            "spaceStrict": space_strict,
         });
         let step = sidecar
             .call_with_progress(

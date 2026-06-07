@@ -429,18 +429,28 @@ function answeredBlock(answered) {
  * @param {{ topic:string, language:string, courseFormat?:string, answered?:Array<{question:string,answer:string}> }} params
  * @returns {Promise<{title?:string, done:boolean, question?:{text:string,options:string[],multi:boolean}}>}
  */
-export async function wizardNextQuestion({ topic, language, courseFormat, answered, modelConfig }, ctx) {
+export async function wizardNextQuestion(
+  { topic, language, courseFormat, answered, modelConfig, spaceSources, spaceLinks, spaceDirs, spaceStrict },
+  ctx
+) {
   if (typeof topic !== "string" || !topic.trim()) {
     throw new Error("topic must be a non-empty string");
   }
   const lang = (language || "en").trim();
   const asked = Array.isArray(answered) ? answered : [];
   const isFirst = asked.length === 0;
+  const hasSpace =
+    (Array.isArray(spaceDirs) && spaceDirs.length > 0) ||
+    (Array.isArray(spaceSources) && spaceSources.length > 0) ||
+    (Array.isArray(spaceLinks) && spaceLinks.length > 0);
+  const spaceProbe = hasSpace
+    ? `\nThis course is built inside a SPACE with the attached material above (documents, links, and especially the attached DIRECTORIES/files). BEFORE choosing your question, INSPECT that material — open and skim the attached files/directories — and ground every clarifying question in what it actually contains and what is still ambiguous or missing for THIS material. Do not ask generic questions answerable from the material itself.\n`
+    : "";
   const prompt = `You are running an ADAPTIVE clarifying interview with a learner
 BEFORE building a personalized course on "${topic}" (language code "${lang}").
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${spaceProbe}
 Answers gathered so far:
 ${answeredBlock(asked)}
 
@@ -490,6 +500,7 @@ ${languageStyleGuide(lang)}`;
 
   const text = await runStreamed(prompt, schema, ctx?.progress, {
     modelConfig,
+    dirs: spaceDirs,
     idleTimeoutMs: 180_000,
     totalTimeoutMs: 900_000,
   });
