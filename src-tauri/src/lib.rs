@@ -2463,17 +2463,25 @@ fn download_catalog_course(
     catalog::install_package(&conn, &paths, package)
 }
 
+// Async + spawn_blocking: this hits the remote catalog over the network, and a
+// sync command would block Tauri's main thread on every ready-course open — which
+// froze the plan page when the catalog endpoint is slow/unreachable.
 #[tauri::command]
-fn get_catalog_update(
+async fn get_catalog_update(
     db_state: tauri::State<'_, Arc<Db>>,
     course_id: String,
 ) -> Result<catalog::CatalogUpdateStatus, String> {
-    let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL, None)?;
-    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    let course = db::get_course(&conn, &course_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("course not found: {course_id}"))?;
-    Ok(catalog::check_update(&conn, &course, &remote))
+    let db = db_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<catalog::CatalogUpdateStatus, String> {
+        let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL, None)?;
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        Ok(catalog::check_update(&conn, &course, &remote))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

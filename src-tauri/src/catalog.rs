@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -431,7 +431,12 @@ pub fn list_remote(
         url.push_str("?q=");
         url.push_str(&urlencoding::encode(q));
     }
-    let response = ureq::get(&url).call().map_err(ureq_error)?;
+    // Fail fast: this runs on every ready-course open (update check). A slow or
+    // unreachable catalog must not leave the request hanging.
+    let response = ureq::get(&url)
+        .timeout(Duration::from_secs(8))
+        .call()
+        .map_err(ureq_error)?;
     response.into_json().map_err(|e| e.to_string())
 }
 

@@ -266,10 +266,10 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             app.state(),
             req("catalogId")?,
         )?),
-        "get_catalog_update" => to_val(crate::get_catalog_update(
+        "get_catalog_update" => to_val(tauri::async_runtime::block_on(crate::get_catalog_update(
             app.state(),
             req("courseId")?,
-        )?),
+        ))?),
         "update_catalog_course" => to_val(crate::update_catalog_course(
             app.state(),
             app.state(),
