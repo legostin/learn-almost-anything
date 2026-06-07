@@ -3312,6 +3312,20 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 }
 
 fn sidecar_script_path(app: &AppHandle) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri has a parent")
+        .join("sidecar")
+        .join("src")
+        .join("index.mjs");
+    // Dev (debug builds): run the live source directly so sidecar edits take
+    // effect on an app restart. The staged resource copy under target/ is only
+    // refreshed by `pnpm build` (copy-sidecar.mjs), not by `tauri dev`, so
+    // preferring it in dev silently runs stale agent code.
+    #[cfg(debug_assertions)]
+    if source.exists() {
+        return source;
+    }
     // Production: scripts/copy-sidecar.mjs copies sidecar/ into src-tauri/
     // before bundling, and tauri.conf "bundle.resources" ships it; at runtime
     // it lives under the bundle's resource_dir.
@@ -3321,13 +3335,8 @@ fn sidecar_script_path(app: &AppHandle) -> PathBuf {
             return strip_verbatim_prefix(bundled);
         }
     }
-    // Dev fallback: sidecar/ is a sibling of src-tauri/ in the source tree.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("src-tauri has a parent")
-        .join("sidecar")
-        .join("src")
-        .join("index.mjs")
+    // Fallback: the source tree (also covers a release build run from source).
+    source
 }
 
 // Path of the dev-only agent transcript log the sidecar writes (see
