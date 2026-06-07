@@ -992,17 +992,9 @@ function App() {
           return next;
         });
       }
-      // Goal hook: after an initial structure build, kick off the first
-      // submodule generation so the learner has something to start with.
-      // Do this BEFORE refresh so when Structure mounts the row is already
-      // flipped to 'generating'.
-      if (kind === "build_structure" && ok) {
-        try {
-          await invoke("start_first_pending_submodule", { courseId });
-        } catch {
-          /* swallowed; UI shows nothing extra */
-        }
-      }
+      // After the plan is built we intentionally stop and let the user review
+      // and confirm it. Submodule generation is started explicitly from the
+      // plan view ("Generate full course"), not automatically here.
       // course.status may have flipped (e.g. build_structure → 'ready')
       await refresh();
       // Terminal event for submodule generation — clear stage tracking
@@ -4341,6 +4333,20 @@ function CourseView({
   const [updatingCatalog, setUpdatingCatalog] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
 
+  // Once the wizard is done the course enters "structuring"; start the
+  // plan-building agent automatically (no extra confirmation screen). Guarded
+  // so it fires once per course and never restarts an existing (running /
+  // errored / finished) job. Submodule generation is NOT auto-started here —
+  // it waits for the user to confirm the plan.
+  const autoStartedStructuring = useRef<string | null>(null);
+  useEffect(() => {
+    if (!course || course.status !== "structuring") return;
+    if (jobs.has(jobKey(course.id, "build_structure"))) return;
+    if (autoStartedStructuring.current === course.id) return;
+    autoStartedStructuring.current = course.id;
+    onStartJob("build_structure");
+  }, [course, jobs, onStartJob]);
+
   const loadCatalogUpdate = useCallback(async () => {
     if (!course || course.status !== "ready") {
       setUpdateStatus(null);
@@ -4687,6 +4693,7 @@ function Wizard({
   const [error, setError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
   const startedRef = useRef(false);
+  const finalizedRef = useRef(false);
 
   const askNext = useCallback(
     async (history: QnA[], reRequested = false) => {
@@ -4775,6 +4782,18 @@ function Wizard({
     }
   }
 
+  // Once the interview is complete with enough answers, finalize automatically:
+  // persist the answers and hand off to plan generation. No extra "build" click.
+  useEffect(() => {
+    if (!hydrated || loading || !done) return;
+    if (answered.length < WIZARD_MIN_QUESTIONS) return;
+    if (finalizedRef.current || finishing || error) return;
+    finalizedRef.current = true;
+    buildCourse(answered);
+    // buildCourse is a stable closure over course/onSaved; guarded by finalizedRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, loading, done, answered, finishing, error]);
+
   if (!hydrated || loading) {
     return <WizardLoader />;
   }
@@ -4790,23 +4809,26 @@ function Wizard({
 
   if (done || !current) {
     const enough = answered.length >= WIZARD_MIN_QUESTIONS;
-    return (
-      <div className="wizard">
-        <p>
-          {enough
-            ? t("wizardDoneIntro", { count: answered.length })
-            : t("wizardNeedMore", { min: WIZARD_MIN_QUESTIONS })}
-        </p>
-        {enough ? (
-          <button onClick={() => buildCourse(answered)} disabled={finishing}>
-            {finishing ? t("saving") : t("wizardBuildPlan")}
-          </button>
-        ) : (
+    if (!enough) {
+      return (
+        <div className="wizard">
+          <p>{t("wizardNeedMore", { min: WIZARD_MIN_QUESTIONS })}</p>
           <button onClick={() => askNext(answered)}>{t("wizardSubmit")}</button>
-        )}
-        {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
-      </div>
-    );
+          {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
+        </div>
+      );
+    }
+    // Enough answers: the effect above auto-finalizes. Show progress, or an
+    // error with a manual retry if persisting the answers failed.
+    if (error) {
+      return (
+        <div className="wizard error">
+          <p>{t("errorPrefix", { error })}</p>
+          <button onClick={() => buildCourse(answered)}>{t("retry")}</button>
+        </div>
+      );
+    }
+    return <WizardLoader />;
   }
 
   return (

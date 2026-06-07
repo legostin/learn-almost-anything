@@ -485,12 +485,15 @@ pub fn queue_pending_submodules(
     conn: &Connection,
     course_id: &str,
 ) -> Result<usize, rusqlite::Error> {
+    // Queue submodules that still need work: never generated ('pending') and
+    // previously failed ('failed'). Already-generated ('ready') and in-flight
+    // ('generating'/'queued') ones are left untouched.
     conn.execute(
         "UPDATE modules \
          SET generation_state = 'queued' \
          WHERE course_id = ?1 \
            AND parent_id IS NOT NULL \
-           AND generation_state = 'pending'",
+           AND generation_state IN ('pending', 'failed')",
         [course_id],
     )
 }
@@ -764,12 +767,14 @@ pub fn first_pending_submodule(
     conn: &Connection,
     course_id: &str,
 ) -> Result<Option<(String, String)>, rusqlite::Error> {
+    // First submodule still needing work, in plan order: never generated
+    // ('pending') or previously failed ('failed').
     conn.query_row(
         "SELECT m.parent_id, m.id FROM modules m \
          JOIN modules p ON p.id = m.parent_id \
          WHERE m.course_id = ?1 \
            AND m.parent_id IS NOT NULL \
-           AND m.generation_state = 'pending' \
+           AND m.generation_state IN ('pending', 'failed') \
          ORDER BY p.position, m.position \
          LIMIT 1",
         [course_id],
