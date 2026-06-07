@@ -1778,7 +1778,10 @@ button {
   border-radius: 50%;
   background: radial-gradient(circle at 30% 30%, var(--accent), var(--accent-soft));
   box-shadow: 0 0 0 0 var(--accent-soft);
-  animation: wizard-orb-pulse 1.4s ease-in-out infinite;
+  /* Pulse (scale/glow) + a slow, smooth color cycle. hue-rotate also tints the
+     box-shadow glow, so the whole orb drifts colour together. */
+  animation: wizard-orb-pulse 1.4s ease-in-out infinite,
+    wizard-orb-hue 6s linear infinite;
 }
 .wizard-loader-label {
   font-size: 14px;
@@ -1841,6 +1844,14 @@ button {
     transform: scale(1.1);
     box-shadow: 0 0 0 8px transparent;
     opacity: 1;
+  }
+}
+@keyframes wizard-orb-hue {
+  from {
+    filter: hue-rotate(0deg);
+  }
+  to {
+    filter: hue-rotate(360deg);
   }
 }
 
