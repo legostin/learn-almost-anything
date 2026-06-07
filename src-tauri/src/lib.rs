@@ -379,12 +379,13 @@ fn strip_widget_markers(article: &str) -> String {
 }
 
 /// One step of the adaptive clarifying interview. Given the answers so far,
-/// returns the next question (built on them) or done=true. Synchronous — the UI
-/// awaits each step and shows a spinner. Enforces the 10-question hard cap; the
-/// 3-question minimum is enforced in the prompt. Persists the running dialog so
-/// it survives an app restart, and sets the course title on the first call.
+/// returns the next question (built on them) or done=true. Async + spawn_blocking
+/// so the multi-second sidecar call never blocks the UI thread — the wizard shows
+/// an animated loader meanwhile. Enforces the 10-question hard cap; the 3-question
+/// minimum is enforced in the prompt + frontend. Persists the running dialog so it
+/// survives an app restart, and sets the course title on the first call.
 #[tauri::command]
-fn wizard_next_question(
+async fn wizard_next_question(
     db_state: tauri::State<'_, Arc<Db>>,
     paths_state: tauri::State<'_, Arc<AppPaths>>,
     sidecar_state: tauri::State<'_, Arc<Sidecar>>,
@@ -392,81 +393,88 @@ fn wizard_next_question(
     course_id: String,
     answered: Vec<courses::QnA>,
 ) -> Result<serde_json::Value, String> {
-    let course = {
-        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-        db::get_course(&conn, &course_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("course not found: {course_id}"))?
-    };
-    let answered_json = serde_json::to_value(&answered).unwrap_or_else(|_| json!([]));
-
-    // Hard cap: never conduct more than 10 questions, even if the model wants to.
-    if answered.len() >= 10 {
-        let dialog = json!({ "answered": answered_json, "current": Value::Null, "done": true });
-        if let Err(e) = courses::write_wizard_dialog(&paths_state, &course_id, &dialog) {
-            eprintln!("[wizard] write dialog (cap) failed: {e}");
-        }
-        return Ok(json!({ "done": true }));
-    }
-
-    // Durability + in-flight marker: persist the just-submitted answers BEFORE the
-    // slow, fallible sidecar call. If it errors, or the app is closed / the view
-    // remounts mid-call, the answer is not lost and the dialog reads `pending`, so
-    // resume regenerates the next question instead of restarting the interview.
-    {
-        let pending = json!({
-            "answered": answered_json,
-            "current": Value::Null,
-            "done": false,
-            "pending": true,
-        });
-        if let Err(e) = courses::write_wizard_dialog(&paths_state, &course_id, &pending) {
-            eprintln!("[wizard] pre-step write dialog failed: {e}");
-        }
-    }
-
-    let model_config = settings_state.stage_model(&course.agent, "planning");
-    let params = json!({
-        "backend": course.agent,
-        "topic": course.topic,
-        "language": course.language,
-        "courseFormat": course.course_format,
-        "answered": answered_json,
-        "modelConfig": model_config,
-    });
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
-    let step = sidecar
-        .call_with_progress(
-            "wizard_next_question",
-            params,
-            Duration::from_secs(600),
-            |_p: sidecar::ProgressPayload| {},
-        )
-        .map_err(|e| e.to_string())?;
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let answered_json = serde_json::to_value(&answered).unwrap_or_else(|_| json!([]));
 
-    // First question carries the generated course title — persist it.
-    if answered.is_empty() {
-        if let Some(title) = generated_course_title(&step) {
-            if let Ok(conn) = db_state.0.lock() {
-                if let Ok(now) = now_unix_secs() {
-                    let _ = db::set_course_title(&conn, &course_id, &title, now);
+        // Hard cap: never conduct more than 10 questions, even if the model wants to.
+        if answered.len() >= 10 {
+            let dialog = json!({ "answered": answered_json, "current": Value::Null, "done": true });
+            if let Err(e) = courses::write_wizard_dialog(&paths, &course_id, &dialog) {
+                eprintln!("[wizard] write dialog (cap) failed: {e}");
+            }
+            return Ok(json!({ "done": true }));
+        }
+
+        // Durability + in-flight marker: persist the just-submitted answers BEFORE
+        // the slow, fallible sidecar call. If it errors, or the app is closed / the
+        // view remounts mid-call, the answer is not lost and the dialog reads
+        // `pending`, so resume regenerates the next question instead of restarting.
+        {
+            let pending = json!({
+                "answered": answered_json,
+                "current": Value::Null,
+                "done": false,
+                "pending": true,
+            });
+            if let Err(e) = courses::write_wizard_dialog(&paths, &course_id, &pending) {
+                eprintln!("[wizard] pre-step write dialog failed: {e}");
+            }
+        }
+
+        let model_config = settings.stage_model(&course.agent, "planning");
+        let params = json!({
+            "backend": course.agent,
+            "topic": course.topic,
+            "language": course.language,
+            "courseFormat": course.course_format,
+            "answered": answered_json,
+            "modelConfig": model_config,
+        });
+        let step = sidecar
+            .call_with_progress(
+                "wizard_next_question",
+                params,
+                Duration::from_secs(600),
+                |_p: sidecar::ProgressPayload| {},
+            )
+            .map_err(|e| e.to_string())?;
+
+        // First question carries the generated course title — persist it.
+        if answered.is_empty() {
+            if let Some(title) = generated_course_title(&step) {
+                if let Ok(conn) = db.0.lock() {
+                    if let Ok(now) = now_unix_secs() {
+                        let _ = db::set_course_title(&conn, &course_id, &title, now);
+                    }
                 }
             }
         }
-    }
 
-    let current = step.get("question").cloned().unwrap_or(Value::Null);
-    let done = step.get("done").and_then(Value::as_bool).unwrap_or(false) || current.is_null();
-    let dialog = json!({
-        "title": step.get("title").cloned().unwrap_or(Value::Null),
-        "answered": answered_json,
-        "current": if done { Value::Null } else { current },
-        "done": done,
-    });
-    if let Err(e) = courses::write_wizard_dialog(&paths_state, &course_id, &dialog) {
-        eprintln!("[wizard] write dialog failed: {e}");
-    }
-    Ok(step)
+        let current = step.get("question").cloned().unwrap_or(Value::Null);
+        let done = step.get("done").and_then(Value::as_bool).unwrap_or(false) || current.is_null();
+        let dialog = json!({
+            "title": step.get("title").cloned().unwrap_or(Value::Null),
+            "answered": answered_json,
+            "current": if done { Value::Null } else { current },
+            "done": done,
+        });
+        if let Err(e) = courses::write_wizard_dialog(&paths, &course_id, &dialog) {
+            eprintln!("[wizard] write dialog failed: {e}");
+        }
+        Ok(step)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

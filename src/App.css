@@ -1763,6 +1763,87 @@ button {
   flex-wrap: wrap;
 }
 
+/* Animated loader while the next wizard question is generated. */
+.wizard-loading {
+  gap: 22px;
+}
+.wizard-loader-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.wizard-loader-orb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, var(--accent), var(--accent-soft));
+  box-shadow: 0 0 0 0 var(--accent-soft);
+  animation: wizard-orb-pulse 1.4s ease-in-out infinite;
+}
+.wizard-loader-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.wizard-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 560px;
+}
+.wizard-skel-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wizard-skel {
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--accent-soft) 50%,
+    var(--surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: wizard-shimmer 1.3s ease-in-out infinite;
+}
+.wizard-skel-q {
+  height: 22px;
+  width: 78%;
+}
+.wizard-skel-opt {
+  height: 38px;
+  width: 100%;
+}
+.wizard-skel-opt:nth-child(2) {
+  width: 92%;
+}
+.wizard-skel-opt:nth-child(3) {
+  width: 84%;
+}
+@keyframes wizard-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+@keyframes wizard-orb-pulse {
+  0%,
+  100% {
+    transform: scale(0.85);
+    box-shadow: 0 0 0 0 var(--accent-soft);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 8px transparent;
+    opacity: 1;
+  }
+}
+
 .qna {
   list-style: none;
   padding: 0;

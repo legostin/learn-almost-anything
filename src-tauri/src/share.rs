@@ -348,14 +348,14 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             crate::delete_course(app.state(), app.state(), req("courseId")?)?;
             Ok(Value::Null)
         }
-        "wizard_next_question" => to_val(crate::wizard_next_question(
+        "wizard_next_question" => to_val(tauri::async_runtime::block_on(crate::wizard_next_question(
             app.state(),
             app.state(),
             app.state(),
             app.state(),
             req("courseId")?,
             from_arg(a, "answered", json!([]))?,
-        )?),
+        ))?),
         "start_course_suggestion" => {
             crate::start_course_suggestion(
                 app.clone(),

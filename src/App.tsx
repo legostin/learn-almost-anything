@@ -4643,6 +4643,28 @@ function DeleteCourseModal({
 
 const WIZARD_MIN_QUESTIONS = 3;
 
+// Animated loader shown while the next wizard question is being generated (the
+// call is async, so this animates smoothly without freezing the UI).
+function WizardLoader() {
+  const t = useT();
+  return (
+    <div className="wizard wizard-loading" aria-busy="true">
+      <div className="wizard-loader-head">
+        <span className="wizard-loader-orb" />
+        <span className="wizard-loader-label">{t("wizardThinking")}</span>
+      </div>
+      <div className="wizard-skeleton" aria-hidden="true">
+        <div className="wizard-skel wizard-skel-q" />
+        <div className="wizard-skel-options">
+          <span className="wizard-skel wizard-skel-opt" />
+          <span className="wizard-skel wizard-skel-opt" />
+          <span className="wizard-skel wizard-skel-opt" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Adaptive clarifying interview: one question at a time, each generated from the
 // answers so far (3-10 total). The component is the authority for its own state:
 // it loads the persisted dialog from disk on mount (keyed by course.id via the
@@ -4754,13 +4776,7 @@ function Wizard({
   }
 
   if (!hydrated || loading) {
-    return (
-      <div className="wizard">
-        <p>
-          <span className="spinner" /> {t("wizardThinking")}
-        </p>
-      </div>
-    );
+    return <WizardLoader />;
   }
 
   if (error && !current && !done) {
