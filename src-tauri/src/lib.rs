@@ -4090,10 +4090,11 @@ async fn ask_course_assistant(
     question: String,
     fragment: Option<String>,
     image_path: Option<String>,
+    widget_id: Option<String>,
     history: Vec<serde_json::Value>,
 ) -> Result<String, String> {
     let q = question.trim().to_string();
-    if q.is_empty() && image_path.is_none() {
+    if q.is_empty() && image_path.is_none() && widget_id.is_none() {
         return Err("вопрос пуст".into());
     }
     let db = db_state.inner().clone();
@@ -4111,12 +4112,28 @@ async fn ask_course_assistant(
             (c, s, sp)
         };
         let (docs, links, dirs, strict) = space;
-        let article = match (&module_id, &submodule_id) {
-            (Some(m), Some(s)) => courses::read_submodule_content(&paths, &course_id, m, s)
-                .ok()
-                .map(|c| c.article),
+        let content = match (&module_id, &submodule_id) {
+            (Some(m), Some(s)) => courses::read_submodule_content(&paths, &course_id, m, s).ok(),
             _ => None,
         };
+        let article = content.as_ref().map(|c| c.article.clone());
+        // Resolve a targeted widget (the learner clicked "✦ Ask"): pass its content
+        // to the assistant, and for an image widget attach the local file so the
+        // model actually sees it (vision) when no explicit image was supplied.
+        let mut widget_json = serde_json::Value::Null;
+        let mut vision_image = image_path;
+        if let (Some(wid), Some(c)) = (widget_id.as_ref(), content.as_ref()) {
+            if let Some(w) = c.widgets.get(wid) {
+                widget_json = json!({ "id": wid, "widget": w });
+                if vision_image.is_none() {
+                    if let Some(url) = w.get("url").and_then(|u| u.as_str()) {
+                        if url.starts_with('/') || url.starts_with("file://") {
+                            vision_image = Some(url.trim_start_matches("file://").to_string());
+                        }
+                    }
+                }
+            }
+        }
         // Both agents do vision on a local image (Claude via base64, Codex via a
         // local_image input item), so keep the course's own agent.
         let model = settings.stage_model(&course.agent, "writing");
@@ -4127,7 +4144,8 @@ async fn ask_course_assistant(
             "structure": structure,
             "article": article,
             "fragment": fragment,
-            "imagePath": image_path,
+            "imagePath": vision_image,
+            "widget": widget_json,
             "question": q,
             "history": history,
             "spaceSources": docs,

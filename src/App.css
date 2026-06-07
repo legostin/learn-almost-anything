@@ -6013,6 +6013,38 @@ button.domain-chip {
 .widget-image {
   position: relative;
 }
+/* Per-widget "Ask" affordance (focuses the assistant on this widget). */
+.widget-host {
+  position: relative;
+}
+.widget-ask {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.widget-host:hover .widget-ask {
+  opacity: 0.85;
+}
+.widget-ask:hover {
+  opacity: 1;
+  color: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
 .widget-remove {
   position: absolute;
   top: 6px;
@@ -6345,6 +6377,13 @@ button.domain-chip {
   font-size: 12px;
   font-style: italic;
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.assistant-frag-widget {
+  font-style: normal;
+  font-weight: 600;
+}
+.assistant-target-chip span {
+  font-weight: 600;
 }
 .assistant-typing {
   color: var(--text-subtle);

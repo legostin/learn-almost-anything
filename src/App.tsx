@@ -5573,7 +5573,21 @@ function countUnresolvedImageWidgets(widgets: Record<string, WidgetData>) {
   }, 0);
 }
 
-type AssistantMsg = { role: "user" | "assistant"; text: string; fragment?: string; image?: string };
+type AssistantMsg = {
+  role: "user" | "assistant";
+  text: string;
+  fragment?: string;
+  image?: string;
+  widgetRef?: { type: string; summary: string };
+};
+
+// A widget the learner targeted ("✦ Ask") — focuses the assistant on it.
+type AssistantTarget = {
+  widgetId: string;
+  widgetType: string;
+  summary: string;
+  imagePath?: string;
+};
 type Note = {
   id: string;
   courseId: string;
@@ -5589,11 +5603,15 @@ function CourseAssistant({
   courseId,
   moduleId,
   submoduleId,
+  target,
+  onTargetConsumed,
   onOpenSubmodule,
 }: {
   courseId: string;
   moduleId: string;
   submoduleId: string;
+  target?: AssistantTarget | null;
+  onTargetConsumed?: () => void;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
   const t = useT();
@@ -5603,6 +5621,7 @@ function CourseAssistant({
   const [input, setInput] = useState("");
   const [fragment, setFragment] = useState<string | null>(null);
   const [image, setImage] = useState<string | null>(null);
+  const [widgetTarget, setWidgetTarget] = useState<AssistantTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
@@ -5616,6 +5635,7 @@ function CourseAssistant({
     setInput("");
     setFragment(null);
     setImage(null);
+    setWidgetTarget(null);
     setError(null);
     setCurrentNoteId(null);
     setMode("chat");
@@ -5779,6 +5799,17 @@ function CourseAssistant({
     window.getSelection?.()?.removeAllRanges();
   }
 
+  // Consume a widget target ("✦ Ask"): open the panel focused on that widget.
+  // For image widgets the local file is attached so the model sees it (vision).
+  useEffect(() => {
+    if (!target) return;
+    setMode("chat");
+    setOpen(true);
+    setWidgetTarget(target);
+    if (target.imagePath) setImage(target.imagePath);
+    onTargetConsumed?.();
+  }, [target, onTargetConsumed]);
+
   async function attachImage() {
     try {
       const selFile = await openFileDialog({
@@ -5793,18 +5824,23 @@ function CourseAssistant({
 
   async function send() {
     const q = input.trim();
-    if ((!q && !image) || busy) return;
+    if ((!q && !image && !widgetTarget) || busy) return;
     const userMsg: AssistantMsg = {
       role: "user",
       text: q,
       fragment: fragment ?? undefined,
       image: image ?? undefined,
+      widgetRef: widgetTarget
+        ? { type: widgetTarget.widgetType, summary: widgetTarget.summary }
+        : undefined,
     };
     const history = messages.map((m) => ({ role: m.role, text: m.text }));
+    const wid = widgetTarget?.widgetId ?? null;
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setFragment(null);
     setImage(null);
+    setWidgetTarget(null);
     setBusy(true);
     setError(null);
     try {
@@ -5812,9 +5848,10 @@ function CourseAssistant({
         courseId,
         moduleId,
         submoduleId,
-        question: q || "(see attached image)",
+        question: q || "(see the attached widget)",
         fragment: userMsg.fragment ?? null,
         imagePath: userMsg.image ?? null,
+        widgetId: wid,
         history,
       });
       setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }]);
@@ -5929,6 +5966,9 @@ function CourseAssistant({
                 {messages.map((m, i) => (
                   <div key={i} className={`assistant-msg ${m.role}`}>
                     {m.fragment && <div className="assistant-frag">“{m.fragment}”</div>}
+                    {m.widgetRef && (
+                      <div className="assistant-frag assistant-frag-widget">✦ {m.widgetRef.summary}</div>
+                    )}
                     {m.role === "assistant" ? (
                       <div className="assistant-md reader">
                         <ReactMarkdown
@@ -5961,6 +6001,20 @@ function CourseAssistant({
                     {fragment.length > 90 ? "…" : ""}”
                   </span>
                   <button onClick={() => setFragment(null)} aria-label="remove">
+                    ✕
+                  </button>
+                </div>
+              )}
+              {widgetTarget && (
+                <div className="assistant-frag-chip assistant-target-chip">
+                  <span>✦ {widgetTarget.summary}</span>
+                  <button
+                    onClick={() => {
+                      if (image && image === widgetTarget.imagePath) setImage(null);
+                      setWidgetTarget(null);
+                    }}
+                    aria-label="remove"
+                  >
                     ✕
                   </button>
                 </div>
@@ -5999,7 +6053,7 @@ function CourseAssistant({
                 <button
                   className="assistant-send"
                   onClick={send}
-                  disabled={(!input.trim() && !image) || busy}
+                  disabled={(!input.trim() && !image && !widgetTarget) || busy}
                   title={t("assistantSend")}
                   aria-label={t("assistantSend")}
                 >
@@ -6045,6 +6099,7 @@ function SubmoduleView({
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [cardsBusy, setCardsBusy] = useState(false);
   const [editImages, setEditImages] = useState(false);
+  const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
     if (!course) return;
@@ -6213,6 +6268,21 @@ function SubmoduleView({
     }
   }
 
+  // Build an assistant target from a widget the learner clicked "✦ Ask" on.
+  function askWidget(widgetId: string) {
+    const w = (content?.widgets as Record<string, any> | undefined)?.[widgetId];
+    if (!w) return;
+    const type: string = w.type || "widget";
+    const raw =
+      w.description || w.caption || w.title || w.alt || (Array.isArray(w.items) ? w.items[0]?.description : "") || type;
+    const summary = `${type} · ${String(raw).replace(/\s+/g, " ").trim().slice(0, 60)}`;
+    let imagePath: string | undefined;
+    if (type === "image" && typeof w.url === "string" && (w.url.startsWith("/") || w.url.startsWith("file://"))) {
+      imagePath = w.url.replace(/^file:\/\//, "");
+    }
+    setAssistantTarget({ widgetId, widgetType: type, summary, imagePath });
+  }
+
   return (
     <div className="submodule-view">
       {course && (
@@ -6220,6 +6290,8 @@ function SubmoduleView({
           courseId={course.id}
           moduleId={moduleId}
           submoduleId={submoduleId}
+          target={assistantTarget}
+          onTargetConsumed={() => setAssistantTarget(null)}
           onOpenSubmodule={onOpenSubmodule}
         />
       )}
@@ -6376,6 +6448,7 @@ function SubmoduleView({
                         submoduleId,
                         canGenerate,
                         editImages,
+                        onAskWidget: askWidget,
                         onChanged: reloadContent,
                       }
                     : undefined
@@ -7808,6 +7881,8 @@ type WidgetCtx = {
   // When false, unresolved image/gallery placeholders are hidden from the reader;
   // the "Edit images" toggle flips this on to expose the editable placeholders.
   editImages: boolean;
+  // Open the assistant focused on a specific widget (ask / fix / variants).
+  onAskWidget: (widgetId: string) => void;
   onChanged: () => void | Promise<void>;
 };
 
@@ -7964,23 +8039,18 @@ function WidgetRenderer({
       </div>
     );
   }
+  let inner: ReactNode;
   if (widget.type === "image") {
     // Hide an unresolved image entirely unless the reader is in "Edit images"
     // mode — a dashed placeholder is noise in a finished article.
     const item = widget as WidgetImageItem;
     const unresolved = item.placeholder === true || !resolveWidgetImage(item.url, item.source).imgSrc;
     if (unresolved && !widgetCtx?.editImages) return null;
-    return (
-      <ImagePlaceholder
-        id={id}
-        widget={widget as any}
-        onOpenImage={onOpenImage}
-        widgetCtx={widgetCtx}
-      />
+    inner = (
+      <ImagePlaceholder id={id} widget={widget as any} onOpenImage={onOpenImage} widgetCtx={widgetCtx} />
     );
-  }
-  if (widget.type === "gallery") {
-    return (
+  } else if (widget.type === "gallery") {
+    inner = (
       <GalleryWidget
         id={id}
         widget={widget as any}
@@ -7988,16 +8058,35 @@ function WidgetRenderer({
         editImages={!!widgetCtx?.editImages}
       />
     );
+  } else if (widget.type === "diagram") inner = <DiagramWidget id={id} widget={widget as any} />;
+  else if (widget.type === "video") inner = <VideoWidget id={id} widget={widget as any} />;
+  else if (widget.type === "interactive") inner = <InteractiveWidget id={id} widget={widget as any} />;
+  else if (widget.type === "checkpoint") inner = <CheckpointWidget id={id} widget={widget as any} />;
+  else
+    inner = (
+      <div className="widget widget-unknown">
+        {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
+      </div>
+    );
+
+  // In the editable reader, wrap visual widgets with an "Ask" affordance that
+  // focuses the assistant on this widget (ask / fix / other variants).
+  const askable = ["image", "gallery", "diagram", "video", "interactive"].includes(widget.type);
+  if (widgetCtx && askable) {
+    return (
+      <div className="widget-host">
+        <button
+          className="widget-ask"
+          title={t("widgetAsk")}
+          onClick={() => widgetCtx.onAskWidget(id)}
+        >
+          ✦ {t("widgetAsk")}
+        </button>
+        {inner}
+      </div>
+    );
   }
-  if (widget.type === "diagram") return <DiagramWidget id={id} widget={widget as any} />;
-  if (widget.type === "video") return <VideoWidget id={id} widget={widget as any} />;
-  if (widget.type === "interactive") return <InteractiveWidget id={id} widget={widget as any} />;
-  if (widget.type === "checkpoint") return <CheckpointWidget id={id} widget={widget as any} />;
-  return (
-    <div className="widget widget-unknown">
-      {t("widgetUnknown")}: {widget.type} <span className="widget-id">#{id}</span>
-    </div>
-  );
+  return <>{inner}</>;
 }
 
 const WIKIMEDIA_THUMB_STEPS = [20, 40, 60, 120, 250, 330, 500, 960, 1280, 1920, 3840];

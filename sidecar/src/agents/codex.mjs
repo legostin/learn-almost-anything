@@ -696,6 +696,26 @@ ${js || ""}
   };
 }
 
+// Render a compact context block for a widget the learner targeted ("✦ Ask").
+function widgetContextBlock(widget) {
+  const w = widget && typeof widget === "object" ? widget.widget : null;
+  if (!w || typeof w !== "object") return "";
+  const type = w.type || "widget";
+  let detail;
+  if (type === "diagram") {
+    detail = `Mermaid source:\n${w.source || ""}${w.error ? `\n\nKnown render error: ${w.error}` : ""}`;
+  } else if (type === "interactive") {
+    detail = `Title: ${w.title || ""}\nDescription: ${w.description || ""}\nHTML:\n${w.html || ""}\nCSS:\n${w.css || ""}\nJS:\n${w.js || ""}${w.error ? `\n\nKnown error: ${w.error}` : ""}`;
+  } else if (type === "image" || type === "gallery") {
+    detail = `Description: ${w.description || w.alt || w.caption || ""}${w.source ? `\nSource page: ${w.source}` : ""}`;
+  } else if (type === "video") {
+    detail = `Title: ${w.title || ""}\nURL: ${w.url || ""}`;
+  } else {
+    detail = JSON.stringify(w).slice(0, 1000);
+  }
+  return `The learner is asking about THIS specific ${type} widget in the lesson (id ${widget.id || "?"}) — focus your answer on it:\n<widget>\n${detail}\n</widget>\n\n`;
+}
+
 export async function courseAssistant(
   {
     language,
@@ -710,6 +730,7 @@ export async function courseAssistant(
     spaceDirs,
     spaceStrict,
     imagePath,
+    widget,
     modelConfig,
   },
   ctx
@@ -725,6 +746,7 @@ export async function courseAssistant(
     fragment && String(fragment).trim()
       ? `The learner highlighted this fragment from the course material — focus your answer on it:\n<fragment>\n${fragment}\n</fragment>\n\n`
       : "";
+  const widgetBlock = widgetContextBlock(widget);
   const articleBlock =
     article && String(article).trim()
       ? `The lesson the learner is currently reading:\n<lesson>\n${article}\n</lesson>\n\n`
@@ -737,7 +759,7 @@ Course program (curriculum):
 ${JSON.stringify(structure ?? {}, null, 2)}
 </structure>
 
-${articleBlock}${fragBlock}${histBlock}Learner's question: ${question}
+${articleBlock}${fragBlock}${widgetBlock}${histBlock}Learner's question: ${question}
 
 Answer in ${lang}, in Markdown. Be concise but complete; use examples or code where they help.`;
   // Attached image → send it as a local_image input item so Codex can see it.
