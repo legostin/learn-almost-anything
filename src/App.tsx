@@ -286,6 +286,8 @@ type SrsCard = {
   dueAt: number;
   stability: number;
   difficulty: number;
+  elapsedDays: number;
+  scheduledDays: number;
   reps: number;
   lapses: number;
   lastReviewAt?: number | null;
@@ -301,6 +303,11 @@ type DueCard = SrsCard & {
 };
 
 type GradeOutcome = { card: SrsCard; becameLeech: boolean };
+
+// Submodule card with interval previews (in-lesson recall widgets).
+type SubCard = SrsCard & {
+  preview: { again: number; hard: number; good: number; easy: number };
+};
 
 /** Local-midnight offset the SRS daily budget math needs (seconds east of UTC). */
 function tzOffsetSecs(): number {
@@ -6456,6 +6463,7 @@ function SubmoduleView({
   const editingRef = useRef(false);
   editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
+  const [recallCards, setRecallCards] = useState<Record<string, SubCard>>({});
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
     if (!course) return;
@@ -6494,6 +6502,13 @@ function SubmoduleView({
     } catch (e) {
       // article.md not yet on disk — leave content null
       setContent(null);
+    }
+    // SRS state for in-lesson recall widgets (non-fatal if missing).
+    try {
+      const cards = await invoke<SubCard[]>("get_submodule_cards", { submoduleId });
+      setRecallCards(Object.fromEntries(cards.map((c) => [c.id, c])));
+    } catch {
+      setRecallCards({});
     }
   }, [course, moduleId, submoduleId]);
 
@@ -6843,6 +6858,7 @@ function SubmoduleView({
                         submoduleId,
                         canGenerate,
                         editImages,
+                        recallCards,
                         onAskWidget: askWidget,
                         onChanged: reloadContent,
                       }
@@ -8276,6 +8292,8 @@ type WidgetCtx = {
   // When false, unresolved image/gallery placeholders are hidden from the reader;
   // the "Edit images" toggle flips this on to expose the editable placeholders.
   editImages: boolean;
+  // SRS state for in-lesson recall widgets, keyed by card id.
+  recallCards?: Record<string, SubCard>;
   // Open the assistant focused on a specific widget (ask / fix / variants).
   onAskWidget: (widgetId: string) => void;
   onChanged: () => void | Promise<void>;
@@ -8551,6 +8569,9 @@ function defaultWidget(kind: string): any {
       return { type: "interactive", html: "", css: "", js: "", title: "" };
     case "checkpoint":
       return { type: "checkpoint", question: "", answer: "" };
+    case "recall":
+      // No card_id yet: the backend mints the SRS card when the lesson saves.
+      return { type: "recall", front: "", back: "" };
     default:
       return { type: kind };
   }
@@ -9006,6 +9027,15 @@ function LeWidgetBlock({
       </figure>
     );
   }
+  if (type === "recall") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">✦ {t("recallLabel")}</div>
+        <textarea className="le-cap" placeholder={t("checkpointQuestion")} value={widget?.front || ""} disabled={busy} onChange={(e) => onPatch({ front: e.target.value })} />
+        <textarea className="le-cap" placeholder={t("checkpointAnswer")} value={widget?.back || ""} disabled={busy} onChange={(e) => onPatch({ back: e.target.value })} />
+      </figure>
+    );
+  }
   if (type === "gallery") {
     return (
       <figure className="le-widget">
@@ -9035,6 +9065,7 @@ function InsertBar({ onInsert }: { onInsert: (k: string) => void }) {
     { k: "diagram", label: t("blockDiagram") },
     { k: "interactive", label: t("blockInteractive") },
     { k: "checkpoint", label: t("blockCheckpoint") },
+    { k: "recall", label: t("recallLabel") },
   ];
   return (
     <div className="le-insert">
@@ -9292,6 +9323,8 @@ function WidgetRenderer({
   else if (widget.type === "video") inner = <VideoWidget id={id} widget={widget as any} />;
   else if (widget.type === "interactive") inner = <InteractiveWidget id={id} widget={widget as any} />;
   else if (widget.type === "checkpoint") inner = <CheckpointWidget id={id} widget={widget as any} />;
+  else if (widget.type === "recall")
+    inner = <RecallWidget id={id} widget={widget as any} widgetCtx={widgetCtx} />;
   else
     inner = (
       <div className="widget widget-unknown">
@@ -9827,24 +9860,24 @@ function fmtInterval(days: number, t: ReturnType<typeof useT>) {
   return t("gradeIntYears", { count: Math.round(days / 365) });
 }
 
-/** Shared by ReviewFlipCard and (later) in-lesson recall widgets. */
+/** Shared by ReviewFlipCard and the in-lesson recall widgets. */
 function GradeButtons({
   preview,
   suggested,
   disabled,
   onGrade,
 }: {
-  preview: { again: number; hard: number; good: number; easy: number };
+  preview?: { again: number; hard: number; good: number; easy: number };
   suggested?: number | null;
   disabled?: boolean;
   onGrade: (rating: 1 | 2 | 3 | 4) => void;
 }) {
   const t = useT();
-  const buttons: { rating: 1 | 2 | 3 | 4; cls: string; label: string; days: number }[] = [
-    { rating: 1, cls: "again", label: t("gradeAgain"), days: preview.again },
-    { rating: 2, cls: "hard", label: t("gradeHard"), days: preview.hard },
-    { rating: 3, cls: "good", label: t("gradeGood"), days: preview.good },
-    { rating: 4, cls: "easy", label: t("gradeEasy"), days: preview.easy },
+  const buttons: { rating: 1 | 2 | 3 | 4; cls: string; label: string; days?: number }[] = [
+    { rating: 1, cls: "again", label: t("gradeAgain"), days: preview?.again },
+    { rating: 2, cls: "hard", label: t("gradeHard"), days: preview?.hard },
+    { rating: 3, cls: "good", label: t("gradeGood"), days: preview?.good },
+    { rating: 4, cls: "easy", label: t("gradeEasy"), days: preview?.easy },
   ];
   return (
     <div className="grade-row">
@@ -9856,7 +9889,9 @@ function GradeButtons({
           onClick={() => onGrade(b.rating)}
         >
           <span className="grade-label">{b.label}</span>
-          <span className="grade-interval">{fmtInterval(b.days, t)}</span>
+          {b.days !== undefined && (
+            <span className="grade-interval">{fmtInterval(b.days, t)}</span>
+          )}
         </button>
       ))}
     </div>
@@ -10176,6 +10211,67 @@ function SourcesList({ sources }: { sources: Source[] }) {
         ))}
       </ol>
     </section>
+  );
+}
+
+// In-lesson retrieval prompt (mnemonic medium): bound to an FSRS card, so
+// grading here reschedules the same card the review session uses.
+function RecallWidget({
+  id,
+  widget,
+  widgetCtx,
+}: {
+  id: string;
+  widget: { card_id?: string; front: string; back: string };
+  widgetCtx?: WidgetCtx;
+}) {
+  const t = useT();
+  const [revealed, setRevealed] = useState(false);
+  const [scheduledDays, setScheduledDays] = useState<number | null>(null);
+  const cardState = widget.card_id ? widgetCtx?.recallCards?.[widget.card_id] : undefined;
+
+  async function gradeIt(rating: 1 | 2 | 3 | 4) {
+    if (!widget.card_id) {
+      setScheduledDays(0);
+      return;
+    }
+    try {
+      const out = await invoke<GradeOutcome>("grade_card", {
+        cardId: widget.card_id,
+        rating,
+        source: "inline",
+      });
+      setScheduledDays(out.card.scheduledDays ?? 0);
+    } catch {
+      setScheduledDays(0);
+    }
+  }
+
+  return (
+    <aside className="widget widget-recall" data-widget-id={id}>
+      <div className="recall-label">✦ {t("recallLabel")}</div>
+      <div className="recall-front">
+        <MathMarkdown>{widget.front}</MathMarkdown>
+      </div>
+      {!revealed && scheduledDays === null && (
+        <button className="recall-reveal" onClick={() => setRevealed(true)}>
+          {t("recallReveal")}
+        </button>
+      )}
+      {revealed && scheduledDays === null && (
+        <>
+          <div className="recall-back">
+            <MathMarkdown>{widget.back}</MathMarkdown>
+          </div>
+          <GradeButtons preview={cardState?.preview} onGrade={gradeIt} />
+        </>
+      )}
+      {scheduledDays !== null && (
+        <div className="recall-scheduled">
+          ✓ {t("recallScheduled", { interval: fmtInterval(scheduledDays, t) })}
+        </div>
+      )}
+    </aside>
   );
 }
 

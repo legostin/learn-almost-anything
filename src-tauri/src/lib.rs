@@ -1372,6 +1372,8 @@ fn spawn_generate_submodule(
                 if let Err(e) = srs::sync_cards_for_submodule(&conn, &cid, &mid, &sid, &flashcards, now)
                 {
                     eprintln!("[generate_submodule] sync cards (non-fatal): {e}");
+                } else if let Err(e) = embed_recall_widgets(&conn, &paths, &cid, &mid, &sid) {
+                    eprintln!("[generate_submodule] embed recall (non-fatal): {e}");
                 }
             }
         }
@@ -1388,6 +1390,97 @@ fn spawn_generate_submodule(
         maybe_publish_catalog_update(&db, &paths, &cid, catalog_upload_token);
     });
     Ok(true)
+}
+
+/// Mnemonic medium: embed up to 3 in-lesson recall prompts as `recall` widgets,
+/// each bound to an SRS card. Markers go at the END of the card's anchor
+/// section (fallback: end of article). Idempotent — skips when recall widgets
+/// already exist, so regeneration of flashcards alone won't duplicate them.
+fn embed_recall_widgets(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+    course_id: &str,
+    module_id: &str,
+    submodule_id: &str,
+) -> Result<(), String> {
+    let cards = srs::cards_for_submodule(conn, submodule_id).map_err(|e| e.to_string())?;
+    let active: Vec<&srs::CardRow> = cards.iter().filter(|c| !c.suspended).collect();
+    if active.is_empty() {
+        return Ok(());
+    }
+    let content = courses::read_submodule_content(paths, course_id, module_id, submodule_id)
+        .map_err(|e| e.to_string())?;
+    let mut widgets = content.widgets.clone();
+    let obj = widgets
+        .as_object_mut()
+        .ok_or_else(|| "widgets.json is not an object".to_string())?;
+    if obj
+        .values()
+        .any(|w| w.get("type").and_then(|t| t.as_str()) == Some("recall"))
+    {
+        return Ok(());
+    }
+    // Up to 3 cards, at most one per article section.
+    let mut chosen: Vec<&srs::CardRow> = Vec::new();
+    let mut seen_anchors = std::collections::HashSet::new();
+    for c in &active {
+        if chosen.len() >= 3 {
+            break;
+        }
+        let key = c.anchor.clone().unwrap_or_default();
+        if !key.is_empty() && !seen_anchors.insert(key) {
+            continue;
+        }
+        chosen.push(c);
+    }
+    let mut lines: Vec<String> = content.article.lines().map(|l| l.to_string()).collect();
+    let norm = |s: &str| s.trim_start_matches('#').trim().to_lowercase();
+    // Resolve insertion points first, then insert bottom-up so earlier indices
+    // stay valid.
+    let mut inserts: Vec<(usize, String)> = Vec::new();
+    for (i, card) in chosen.iter().enumerate() {
+        let wid = format!("rc-{}", i + 1);
+        let at = card
+            .anchor
+            .as_deref()
+            .and_then(|a| {
+                let a_norm = norm(a);
+                let h_idx = lines.iter().position(|l| {
+                    l.trim_start().starts_with("##") && norm(l) == a_norm
+                })?;
+                Some(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .skip(h_idx + 1)
+                        .find(|(_, l)| l.trim_start().starts_with("## "))
+                        .map(|(j, _)| j)
+                        .unwrap_or(lines.len()),
+                )
+            })
+            .unwrap_or(lines.len());
+        inserts.push((at, wid.clone()));
+        obj.insert(
+            wid.clone(),
+            json!({
+                "id": wid,
+                "type": "recall",
+                "card_id": card.id,
+                "front": card.front,
+                "back": card.back,
+            }),
+        );
+    }
+    inserts.sort_by(|a, b| b.0.cmp(&a.0));
+    for (at, wid) in inserts {
+        let at = at.min(lines.len());
+        lines.insert(at, format!("\n::widget{{id=\"{wid}\"}}\n"));
+    }
+    courses::write_submodule_article(paths, course_id, module_id, submodule_id, &lines.join("\n"))
+        .map_err(|e| e.to_string())?;
+    courses::write_submodule_widgets(paths, course_id, module_id, submodule_id, &widgets)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn maybe_publish_catalog_update(
@@ -2734,9 +2827,10 @@ fn grade_card(
 fn get_submodule_cards(
     db_state: tauri::State<'_, Arc<Db>>,
     submodule_id: String,
-) -> Result<Vec<srs::CardRow>, String> {
+) -> Result<Vec<srs::CardWithPreview>, String> {
+    let now = now_unix_secs()?;
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    srs::cards_for_submodule(&conn, &submodule_id).map_err(|e| e.to_string())
+    srs::cards_with_preview(&conn, &submodule_id, now).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3267,6 +3361,10 @@ fn start_generate_flashcards(
                     now,
                 ) {
                     eprintln!("[start_generate_flashcards] sync cards (non-fatal): {e}");
+                } else if let Err(e) =
+                    embed_recall_widgets(&conn, &paths, &course_id, &module_id, &submodule_id)
+                {
+                    eprintln!("[start_generate_flashcards] embed recall (non-fatal): {e}");
                 }
             }
         }
@@ -4464,6 +4562,38 @@ fn save_lesson_content(
     let paths = paths_state.inner().clone();
     courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &article)
         .map_err(|e| e.to_string())?;
+    // Editor-created recall widgets arrive without a card_id — mint their SRS
+    // cards now so in-lesson grading works immediately.
+    let mut widgets = widgets;
+    if let (Some(obj), Ok(conn), Ok(now)) = (
+        widgets.as_object_mut(),
+        db_state.0.lock(),
+        now_unix_secs(),
+    ) {
+        for (wid, w) in obj.iter_mut() {
+            let is_recall = w.get("type").and_then(|t| t.as_str()) == Some("recall");
+            let has_card = w
+                .get("card_id")
+                .and_then(|c| c.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !is_recall || has_card {
+                continue;
+            }
+            let front = w.get("front").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let back = w.get("back").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if front.is_empty() || back.is_empty() {
+                continue;
+            }
+            match srs::mint_card(&conn, &course_id, &module_id, &submodule_id, front, back, now) {
+                Ok(card_id) => {
+                    w.as_object_mut()
+                        .map(|m| m.insert("card_id".into(), json!(card_id)));
+                }
+                Err(e) => eprintln!("[save_lesson_content] mint recall card #{wid}: {e}"),
+            }
+        }
+    }
     courses::write_submodule_widgets(&paths, &course_id, &module_id, &submodule_id, &widgets)
         .map_err(|e| e.to_string())?;
     if mark_ready {

@@ -3511,6 +3511,57 @@ button {
   font-size: 12px;
   color: var(--status-failed-fg, #b91c1c);
 }
+/* In-lesson recall widget (mnemonic medium) */
+.widget-recall {
+  margin: 20px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.04));
+}
+.recall-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.recall-front {
+  margin-top: 8px;
+  font-size: 15px;
+}
+.recall-front p,
+.recall-back p {
+  margin: 0 0 6px;
+}
+.recall-back {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 14px;
+}
+.recall-reveal {
+  margin-top: 10px;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.recall-reveal:hover {
+  border-color: var(--accent);
+}
+.widget-recall .grade-row {
+  margin-top: 12px;
+}
+.recall-scheduled {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--status-ready-fg, #15803d);
+}
 .test-header {
   display: flex;
   align-items: center;

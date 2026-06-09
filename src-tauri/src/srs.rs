@@ -383,6 +383,70 @@ pub fn cards_for_submodule(
     rows.collect()
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardWithPreview {
+    #[serde(flatten)]
+    pub card: CardRow,
+    pub preview: IntervalPreview,
+}
+
+/// Submodule cards with grade-button interval previews (reader recall widgets).
+pub fn cards_with_preview(
+    conn: &Connection,
+    submodule_id: &str,
+    now: i64,
+) -> Result<Vec<CardWithPreview>, rusqlite::Error> {
+    Ok(cards_for_submodule(conn, submodule_id)?
+        .into_iter()
+        .map(|card| {
+            let preview = preview_for(&card, now);
+            CardWithPreview { card, preview }
+        })
+        .collect())
+}
+
+/// Mint one card for an editor-authored recall widget (skips if an identical
+/// card already exists in the submodule). Returns the card id.
+pub fn mint_card(
+    conn: &Connection,
+    course_id: &str,
+    module_id: &str,
+    submodule_id: &str,
+    front: &str,
+    back: &str,
+    now: i64,
+) -> Result<String, rusqlite::Error> {
+    let hash = content_hash(front, back);
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM cards WHERE submodule_id = ?1 AND content_hash = ?2",
+            rusqlite::params![submodule_id, hash],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let max_pos: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), 0) FROM cards WHERE submodule_id = ?1",
+        [submodule_id],
+        |r| r.get(0),
+    )?;
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO cards (id, course_id, module_id, submodule_id, kind, position, \
+         front, back, content_hash, created_at, due_at) \
+         VALUES (?1, ?2, ?3, ?4, 'flashcard', ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![id, course_id, module_id, submodule_id, max_pos + 1, front, back, hash, now, now],
+    )?;
+    Ok(id)
+}
+
 /// Card metadata needed by the leech-rewrite flow (article lookup, prompts).
 pub fn card_meta(conn: &Connection, card_id: &str) -> Result<CardRow, rusqlite::Error> {
     get_card(conn, card_id)
