@@ -2969,6 +2969,33 @@ fn replace_card(
     srs::replace_card(&conn, &card_id, &cards, now).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_review_stats(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: Option<String>,
+    tz_offset_secs: Option<i64>,
+) -> Result<srs::ReviewStats, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::review_stats(
+        &conn,
+        course_id.as_deref(),
+        now,
+        tz_offset_secs.unwrap_or(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_course_mastery(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+) -> Result<std::collections::HashMap<String, srs::SubmoduleMastery>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::course_mastery(&conn, &course_id, now).map_err(|e| e.to_string())
+}
+
 // ===== Learner profile + entry diagnostic =====
 
 #[tauri::command]
@@ -6170,6 +6197,8 @@ pub fn run() {
             grade_card_with_ai,
             rewrite_leech_card,
             replace_card,
+            get_review_stats,
+            get_course_mastery,
             get_learner_profile,
             set_learner_profile,
             extract_learner_profile,

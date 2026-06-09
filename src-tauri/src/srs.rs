@@ -625,6 +625,141 @@ pub fn seed_from_test_ratio(
     Ok(())
 }
 
+// ===== Dashboard aggregates =====
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewStats {
+    pub reviewed_today: i64,
+    pub daily_new_cap: i64,
+    pub streak_days: i64,
+    pub longest_streak: i64,
+    /// Reviews per local day, last 7 days, oldest first.
+    pub week: Vec<i64>,
+    /// Lifetime engagement points: sum of ratings over the review log.
+    pub xp: i64,
+}
+
+/// Streak/heatmap/XP from review_log (optionally course-scoped).
+pub fn review_stats(
+    conn: &Connection,
+    course_id: Option<&str>,
+    now: i64,
+    tz_offset_secs: i64,
+) -> Result<ReviewStats, rusqlite::Error> {
+    let today = (now + tz_offset_secs) / DAY_SECS;
+    let (filter, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match course_id {
+        Some(cid) => (
+            "WHERE course_id = ?2",
+            vec![Box::new(tz_offset_secs), Box::new(cid.to_string())],
+        ),
+        None => ("", vec![Box::new(tz_offset_secs)]),
+    };
+    let sql = format!(
+        "SELECT (reviewed_at + ?1) / {DAY_SECS} AS day, COUNT(*), SUM(rating) \
+         FROM review_log {filter} GROUP BY day ORDER BY day DESC LIMIT 730"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(i64, i64, i64)> = stmt
+        .query_map(rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0)))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let mut week = vec![0_i64; 7];
+    let mut reviewed_today = 0;
+    let mut xp = 0;
+    for (day, count, points) in &rows {
+        xp += points;
+        let offset = today - day;
+        if (0..7).contains(&offset) {
+            week[(6 - offset) as usize] = *count;
+        }
+        if *day == today {
+            reviewed_today = *count;
+        }
+    }
+    // Streaks over the (desc-sorted) distinct day list. The current streak may
+    // start today OR yesterday — an un-reviewed today shouldn't read as broken.
+    let days: Vec<i64> = rows.iter().map(|(d, _, _)| *d).collect();
+    let mut streak_days = 0;
+    if let Some(&first) = days.first() {
+        if first == today || first == today - 1 {
+            streak_days = 1;
+            for w in days.windows(2) {
+                if w[0] - w[1] == 1 {
+                    streak_days += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    let mut longest_streak = 0;
+    let mut run = 0;
+    for (i, &d) in days.iter().enumerate() {
+        if i == 0 || days[i - 1] - d == 1 {
+            run += 1;
+        } else {
+            run = 1;
+        }
+        longest_streak = longest_streak.max(run);
+    }
+    Ok(ReviewStats {
+        reviewed_today,
+        daily_new_cap: NEW_PER_DAY,
+        streak_days,
+        longest_streak,
+        week,
+        xp,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleMastery {
+    /// 0 unseen, 1 fragile (<3d), 2 developing (<10d), 3 solid (<21d), 4 durable.
+    pub stability_bucket: i64,
+    pub card_count: i64,
+    pub due_count: i64,
+}
+
+/// Per-submodule mastery from average FSRS stability of reviewed cards.
+pub fn course_mastery(
+    conn: &Connection,
+    course_id: &str,
+    now: i64,
+) -> Result<HashMap<String, SubmoduleMastery>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT submodule_id, COUNT(*), \
+                AVG(CASE WHEN reps > 0 THEN stability END), \
+                SUM(CASE WHEN reps > 0 AND due_at <= ?2 THEN 1 ELSE 0 END) \
+         FROM cards WHERE course_id = ?1 AND suspended = 0 GROUP BY submodule_id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![course_id, now], |r| {
+        let sub: String = r.get(0)?;
+        let card_count: i64 = r.get(1)?;
+        let avg_stability: Option<f64> = r.get(2)?;
+        let due_count: i64 = r.get::<_, Option<i64>>(3)?.unwrap_or(0);
+        let stability_bucket = match avg_stability {
+            None => 0,
+            Some(s) if s < 3.0 => 1,
+            Some(s) if s < 10.0 => 2,
+            Some(s) if s < 21.0 => 3,
+            Some(_) => 4,
+        };
+        Ok((
+            sub,
+            SubmoduleMastery {
+                stability_bucket,
+                card_count,
+                due_count,
+            },
+        ))
+    })?;
+    rows.collect()
+}
+
 /// One-time startup backfill: create cards from every ready submodule's
 /// flashcards.json, seeding FSRS state from legacy SM-2 rows where present.
 /// Idempotent (content-hash skip + app_meta flag).

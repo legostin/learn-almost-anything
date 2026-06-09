@@ -1534,6 +1534,7 @@ function App() {
               await refresh();
             }}
             onOpenCourse={openCourse}
+            onReview={() => setView({ kind: "review", courseId: view.id })}
             translateStatus={translateStatus.get(view.id)}
           />
         )}
@@ -4349,6 +4350,7 @@ function CourseView({
   onStartSubGen,
   onDeleted,
   onOpenCourse,
+  onReview,
   translateStatus,
 }: {
   course?: Course;
@@ -4360,12 +4362,14 @@ function CourseView({
   onStartSubGen: (submoduleId: string) => void | Promise<void>;
   onDeleted: () => void | Promise<void>;
   onOpenCourse: (id: string) => void;
+  onReview: () => void;
   translateStatus?: { done: number; total: number; complete: boolean };
 }) {
   const t = useT();
   const [uiLang] = useLang();
   const [translateOpen, setTranslateOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [courseTab, setCourseTab] = useState<"plan" | "mastery">("plan");
   const [translating, setTranslating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -4609,11 +4613,31 @@ function CourseView({
         />
       )}
       {course.status === "ready" && (
-        <Structure
-          course={course}
-          onOpenSub={onOpenSub}
-          onStartSubGen={onStartSubGen}
-        />
+        <>
+          <div className="course-tabs">
+            <button
+              className={`course-tab${courseTab === "plan" ? " active" : ""}`}
+              onClick={() => setCourseTab("plan")}
+            >
+              {t("courseTabPlan")}
+            </button>
+            <button
+              className={`course-tab${courseTab === "mastery" ? " active" : ""}`}
+              onClick={() => setCourseTab("mastery")}
+            >
+              {t("masteryTab")}
+            </button>
+          </div>
+          {courseTab === "plan" ? (
+            <Structure
+              course={course}
+              onOpenSub={onOpenSub}
+              onStartSubGen={onStartSubGen}
+            />
+          ) : (
+            <MasteryView course={course} onOpenSub={onOpenSub} onReview={onReview} />
+          )}
+        </>
       )}
 
       <div className="course-danger-zone">
@@ -5298,6 +5322,124 @@ function StructureBuilder({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Knowledge view: the course tree colored by FSRS mastery (stability buckets),
+// plus due-today / streak / XP and a 7-day review bar chart. Read-only — the
+// emotional engine of retention (Math Academy-style knowledge map).
+function MasteryView({
+  course,
+  onOpenSub,
+  onReview,
+}: {
+  course: Course;
+  onOpenSub: (moduleId: string, submoduleId: string) => void;
+  onReview: () => void;
+}) {
+  const t = useT();
+  const [tree, setTree] = useState<StructureFile | null>(null);
+  const [mastery, setMastery] = useState<Record<
+    string,
+    { stabilityBucket: number; cardCount: number; dueCount: number }
+  > | null>(null);
+  const [stats, setStats] = useState<{
+    reviewedToday: number;
+    streakDays: number;
+    week: number[];
+    xp: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.allSettled([
+      invoke<StructureFile>("get_structure", { courseId: course.id }),
+      invoke<Record<string, { stabilityBucket: number; cardCount: number; dueCount: number }>>(
+        "get_course_mastery",
+        { courseId: course.id }
+      ),
+      invoke<{ reviewedToday: number; streakDays: number; week: number[]; xp: number }>(
+        "get_review_stats",
+        { courseId: course.id, tzOffsetSecs: tzOffsetSecs() }
+      ),
+    ]).then(([s, m, st]) => {
+      if (cancelled) return;
+      if (s.status === "fulfilled") setTree(s.value);
+      if (m.status === "fulfilled") setMastery(m.value);
+      if (st.status === "fulfilled") setStats(st.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+
+  if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
+  const dueTotal = Object.values(mastery ?? {}).reduce((a, m) => a + m.dueCount, 0);
+  const maxWeek = Math.max(1, ...(stats?.week ?? [0]));
+  return (
+    <div className="mastery-view">
+      <div className="mastery-head">
+        <div className="mastery-stat">
+          <span className="mastery-stat-num">{dueTotal}</span>
+          <span className="mastery-stat-label">{t("masteryDueToday")}</span>
+        </div>
+        <div className="mastery-stat">
+          <span className="mastery-stat-num">{stats?.streakDays ?? 0}</span>
+          <span className="mastery-stat-label">{t("masteryStreak")}</span>
+        </div>
+        <div className="mastery-stat">
+          <span className="mastery-stat-num">{stats?.xp ?? 0}</span>
+          <span className="mastery-stat-label">XP</span>
+        </div>
+        <div className="mastery-week" title={t("masteryWeekChart")}>
+          {(stats?.week ?? Array(7).fill(0)).map((n, i) => (
+            <div
+              key={i}
+              className="mastery-week-bar"
+              style={{ height: `${Math.max(8, (n / maxWeek) * 100)}%` }}
+              data-count={n}
+            />
+          ))}
+        </div>
+        {dueTotal > 0 && (
+          <button className="mastery-review-cta" onClick={onReview}>
+            {t("reviewBannerCta")} →
+          </button>
+        )}
+      </div>
+      <div className="mastery-legend">
+        {[0, 1, 2, 3, 4].map((b) => (
+          <span key={b} className="mastery-legend-item">
+            <span className={`mastery-dot mastery-${b}`} />
+            {t(`masteryBucket${b}` as Parameters<typeof t>[0])}
+          </span>
+        ))}
+      </div>
+      <div className="mastery-tree">
+        {tree.modules.map((m) => (
+          <div key={m.id} className="mastery-module">
+            <div className="mastery-module-title">{m.title}</div>
+            <ul className="mastery-subs">
+              {m.submodules.map((s) => {
+                const ms = mastery?.[s.id];
+                const bucket = ms?.stabilityBucket ?? 0;
+                return (
+                  <li key={s.id}>
+                    <button className="mastery-sub" onClick={() => onOpenSub(m.id, s.id)}>
+                      <span className={`mastery-dot mastery-${bucket}`} />
+                      <span className="mastery-sub-title">{s.title}</span>
+                      {!!ms?.dueCount && (
+                        <span className="mastery-due-chip">{ms.dueCount}</span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
