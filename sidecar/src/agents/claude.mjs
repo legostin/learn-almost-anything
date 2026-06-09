@@ -30,6 +30,7 @@ import {
   gradeAnswerBlock,
   leechRewriteBlock,
   learnerProfileBlock,
+  socraticBlock,
 } from "../lib/pedagogy.mjs";
 
 function terminologyGuide(lang) {
@@ -1668,6 +1669,9 @@ export async function courseAssistant(
     widget,
     modelConfig,
     learnerProfile,
+    socratic,
+    exercise,
+    exchangeCount,
   },
   ctx
 ) {
@@ -1687,8 +1691,11 @@ export async function courseAssistant(
     article && String(article).trim()
       ? `The lesson the learner is currently reading:\n<lesson>\n${article}\n</lesson>\n\n`
       : "";
-  const prompt = `You are a knowledgeable, friendly tutor for a learner taking a course on "${topic}". Answer the learner's question in language "${lang}".
-Ground your answer in the COURSE PROGRAM and the lesson material below; prefer the course's own framing and terminology. If the question is outside the course's scope, say so briefly and still help where you can.
+  const opening = socratic
+    ? socraticBlock(topic, lang, exercise, exchangeCount)
+    : `You are a knowledgeable, friendly tutor for a learner taking a course on "${topic}". Answer the learner's question in language "${lang}".
+Ground your answer in the COURSE PROGRAM and the lesson material below; prefer the course's own framing and terminology. If the question is outside the course's scope, say so briefly and still help where you can.`;
+  const prompt = `${opening}
 ${learnerProfileBlock(learnerProfile)}${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
 Course program (curriculum):
 <structure>

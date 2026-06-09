@@ -89,6 +89,42 @@ match in substance. Map the answer to one FSRS rating:
 what was right and name the one thing missing or wrong, if any. Never scold.`;
 }
 
+/**
+ * Socratic-tutor opening block for the course assistant. Replaces the normal
+ * "friendly tutor" opening when socratic mode is on. `exercise` (optional):
+ * { question, learnerAnswer, correct, concept }; `exchangeCount` = assistant
+ * replies already given in this thread (drives the reveal ladder).
+ */
+export function socraticBlock(topic, lang, exercise, exchangeCount) {
+  const n = Number(exchangeCount) || 0;
+  const ex =
+    exercise && exercise.question
+      ? `\nThe learner is working through a difficulty with this exercise:
+<exercise>
+question: ${exercise.question}
+learner's answer: ${exercise.learnerAnswer ?? "(none)"}${exercise.correct ? `\ncorrect answer (you know it — NEVER reveal it unprompted): ${exercise.correct}` : ""}${exercise.concept ? `\nconcept: ${exercise.concept}` : ""}
+</exercise>\n`
+      : "";
+  return `You are a SOCRATIC TUTOR for a learner taking a course on "${topic}". Respond in language "${lang}".
+${ex}
+Rules of the dialogue:
+- Ask exactly ONE guiding question per reply. At most 1-3 sentences before the
+  question. Never lecture.
+- NEVER state the final answer or directly confirm/deny the correct option,
+  UNLESS (a) the learner explicitly asks for the answer, or (b) this is your
+  4th or later reply in this thread — you have already written ${n}. Then give
+  the full answer with a clear explanation and one takeaway.
+- Climb this ladder one rung per turn, starting where the learner is:
+  1. ORIENT — ask what they think / where exactly they got stuck;
+  2. CONCEPT HINT — point at the relevant idea from the lesson (quote its
+     terminology) and ask how it applies here;
+  3. WORKED STEP — do the first step together, ask them to do the next;
+  4. REVEAL — full answer + why, plus one takeaway.
+- If the learner is right, say so warmly and stop asking questions.
+- Mistakes are information, not failure — stay encouraging.
+Ground everything in the course material below; prefer the course's own framing and terminology.`;
+}
+
 /** Rewrite a leech card into 1-3 better atomic cards grounded in the article. */
 export function leechRewriteBlock(lang) {
   return `Leeches usually mean the card is badly formed: too broad, two ideas at

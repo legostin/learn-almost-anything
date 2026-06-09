@@ -6197,6 +6197,14 @@ type AssistantTarget = {
   summary: string;
   imagePath?: string;
 };
+// Seed for Socratic mode: the exercise the learner got wrong. `correct` is
+// passed to the model but never shown in the visible chat.
+type SocraticSeed = {
+  question: string;
+  learnerAnswer: string;
+  correct?: string;
+  concept?: string;
+};
 type Note = {
   id: string;
   courseId: string;
@@ -6214,6 +6222,8 @@ function CourseAssistant({
   submoduleId,
   target,
   onTargetConsumed,
+  socraticSeed,
+  onSocraticConsumed,
   onChanged,
   onOpenSubmodule,
 }: {
@@ -6222,6 +6232,8 @@ function CourseAssistant({
   submoduleId: string;
   target?: AssistantTarget | null;
   onTargetConsumed?: () => void;
+  socraticSeed?: SocraticSeed | null;
+  onSocraticConsumed?: () => void;
   onChanged?: () => void | Promise<void>;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
@@ -6241,6 +6253,8 @@ function CourseAssistant({
   const [notes, setNotes] = useState<Note[]>([]);
   const [saved, setSaved] = useState(false);
   const [currentNoteId, setCurrentNoteId] = useState<string | null>(null);
+  const [socratic, setSocratic] = useState(false);
+  const [exercise, setExercise] = useState<SocraticSeed | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   function newChat() {
@@ -6252,6 +6266,7 @@ function CourseAssistant({
     setCandidates([]);
     setError(null);
     setCurrentNoteId(null);
+    setExercise(null);
     setMode("chat");
   }
 
@@ -6413,6 +6428,47 @@ function CourseAssistant({
     window.getSelection?.()?.removeAllRanges();
   }
 
+  // Consume a Socratic seed (the learner clicked "Разобраться" on a wrong
+  // answer): start a fresh guided thread. The correct answer goes only to the
+  // model, never into the visible chat.
+  useEffect(() => {
+    if (!socraticSeed) return;
+    const seed = socraticSeed;
+    onSocraticConsumed?.();
+    setMode("chat");
+    setOpen(true);
+    setSocratic(true);
+    setExercise(seed);
+    setFragment(null);
+    setImage(null);
+    setWidgetTarget(null);
+    setCandidates([]);
+    setCurrentNoteId(null);
+    setError(null);
+    const intro = t("socraticAutoIntro");
+    setMessages([{ role: "user", text: intro }]);
+    setBusy(true);
+    invoke<string>("ask_course_assistant", {
+      courseId,
+      moduleId,
+      submoduleId,
+      question: intro,
+      fragment: null,
+      imagePath: null,
+      widgetId: null,
+      history: [],
+      socratic: true,
+      exercise: seed,
+      exchangeCount: 0,
+    })
+      .then((answer) =>
+        setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }])
+      )
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socraticSeed]);
+
   // Consume a widget target ("✦ Ask"): open the panel focused on that widget.
   // Reset any prior candidate grid so it can't be applied to the new target. We
   // do NOT attach the image here — the backend re-derives an image widget's local
@@ -6439,8 +6495,8 @@ function CourseAssistant({
     }
   }
 
-  async function send() {
-    const q = input.trim();
+  async function send(overrideQ?: string) {
+    const q = (overrideQ ?? input).trim();
     if ((!q && !image && !widgetTarget) || busy || actionBusy) return;
     const userMsg: AssistantMsg = {
       role: "user",
@@ -6470,6 +6526,9 @@ function CourseAssistant({
         imagePath: userMsg.image ?? null,
         widgetId: wid,
         history,
+        socratic,
+        exercise,
+        exchangeCount: messages.filter((m) => m.role === "assistant").length,
       });
       setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }]);
     } catch (e) {
@@ -6626,6 +6685,15 @@ function CourseAssistant({
               </button>
             </div>
             <div className="assistant-head-actions">
+              {mode === "chat" && (
+                <button
+                  className={`assistant-save socratic-chip${socratic ? " active" : ""}`}
+                  onClick={() => setSocratic((s) => !s)}
+                  title={t("socraticToggleHint")}
+                >
+                  🦉 {t("socraticToggle")}
+                </button>
+              )}
               {mode === "chat" && messages.length > 0 && (
                 <>
                   <button className="assistant-save" onClick={newChat} title={t("notesNew")}>
@@ -6819,7 +6887,7 @@ function CourseAssistant({
                 />
                 <button
                   className="assistant-send"
-                  onClick={send}
+                  onClick={() => send()}
                   disabled={(!input.trim() && !image && !widgetTarget) || busy || !!actionBusy}
                   title={t("assistantSend")}
                   aria-label={t("assistantSend")}
@@ -6827,6 +6895,18 @@ function CourseAssistant({
                   {busy ? "…" : "↑"}
                 </button>
               </div>
+              {socratic && (
+                <div className="socratic-hint-row">
+                  <span>{t("socraticHint")}</span>
+                  <button
+                    className="socratic-show-answer"
+                    disabled={busy || !!actionBusy || messages.length === 0}
+                    onClick={() => send(t("socraticShowAnswerMsg"))}
+                  >
+                    {t("socraticShowAnswer")}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -6870,6 +6950,7 @@ function SubmoduleView({
   const editingRef = useRef(false);
   editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
+  const [socraticSeed, setSocraticSeed] = useState<SocraticSeed | null>(null);
   const [recallCards, setRecallCards] = useState<Record<string, SubCard>>({});
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
@@ -7074,6 +7155,8 @@ function SubmoduleView({
           submoduleId={submoduleId}
           target={assistantTarget}
           onTargetConsumed={() => setAssistantTarget(null)}
+          socraticSeed={socraticSeed}
+          onSocraticConsumed={() => setSocraticSeed(null)}
           onChanged={reloadContent}
           onOpenSubmodule={onOpenSubmodule}
         />
@@ -7290,6 +7373,7 @@ function SubmoduleView({
                     });
                     if (passed) await reloadTree();
                   }}
+                  onSocratic={setSocraticSeed}
                 />
               )}
               {content.flashcards && content.flashcards.length > 0 ? (
@@ -10111,6 +10195,7 @@ function TestSection({
   alreadyPassed,
   recall,
   onResult,
+  onSocratic,
 }: {
   questions: TestQuestion[];
   alreadyPassed: boolean;
@@ -10121,6 +10206,7 @@ function TestSection({
     passed: boolean,
     weakConcepts: string[]
   ) => void | Promise<void>;
+  onSocratic?: (seed: SocraticSeed) => void;
 }) {
   const t = useT();
   const title = recall ? t("recallTitle") : t("testTitle");
@@ -10229,6 +10315,22 @@ function TestSection({
             </div>
             {submitted && q.explanation && (
               <div className="test-explanation">{q.explanation}</div>
+            )}
+            {submitted && answers[i] !== q.correct && onSocratic && (
+              <button
+                className="socratic-figure-out"
+                onClick={() =>
+                  onSocratic({
+                    question: q.text,
+                    learnerAnswer:
+                      answers[i] !== null ? q.options[answers[i] as number] : "",
+                    correct: q.options[q.correct],
+                    concept: q.concept,
+                  })
+                }
+              >
+                🦉 {t("socraticFigureOut")}
+              </button>
             )}
           </li>
         ))}

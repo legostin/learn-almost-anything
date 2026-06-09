@@ -4720,6 +4720,9 @@ async fn ask_course_assistant(
     image_path: Option<String>,
     widget_id: Option<String>,
     history: Vec<serde_json::Value>,
+    socratic: Option<bool>,
+    exercise: Option<Value>,
+    exchange_count: Option<u32>,
 ) -> Result<String, String> {
     let q = question.trim().to_string();
     if q.is_empty() && image_path.is_none() && widget_id.is_none() {
@@ -4782,6 +4785,9 @@ async fn ask_course_assistant(
             "spaceStrict": strict,
             "modelConfig": model,
             "learnerProfile": course.learner_profile,
+            "socratic": socratic.unwrap_or(false),
+            "exercise": exercise,
+            "exchangeCount": exchange_count.unwrap_or(0),
         });
         let v = sidecar
             .call("course_assistant", params, Duration::from_secs(600))
