@@ -4243,6 +4243,94 @@ async fn ask_course_assistant(
     .map_err(|e| e.to_string())?
 }
 
+/// Persist hand-edited lesson content (article markdown + widgets) from the course
+/// editor. Writes article.md + widgets.json wholesale. When `mark_ready` (a freshly
+/// hand-authored lesson that was still "pending"), flips the submodule to "ready"
+/// and rewrites structure.json so the DB and the on-disk structure stay in sync.
+/// Emits the enrich event so any other open reader reloads.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn save_lesson_content(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    article: String,
+    widgets: serde_json::Value,
+    mark_ready: bool,
+) -> Result<(), String> {
+    let paths = paths_state.inner().clone();
+    courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &article)
+        .map_err(|e| e.to_string())?;
+    courses::write_submodule_widgets(&paths, &course_id, &module_id, &submodule_id, &widgets)
+        .map_err(|e| e.to_string())?;
+    if mark_ready {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::set_module_generation_state(&conn, &submodule_id, "ready").map_err(|e| e.to_string())?;
+        // Keep structure.json consistent with the DB (used by the static export and
+        // read_previous_articles). Best-effort; a failure here is non-fatal.
+        if let Ok(file) = courses::load_structure(&conn, &course_id) {
+            if let Ok(json) = serde_json::to_string_pretty(&file) {
+                let _ = std::fs::write(paths.course_dir(&course_id).join("structure.json"), json);
+            }
+        }
+    }
+    emit_enrich_event(&app, &course_id, &submodule_id);
+    Ok(())
+}
+
+/// Rewrite a selected text fragment via the agent (the editor's "edit selection
+/// with AI"). Returns the rewritten markdown only; the frontend applies it with
+/// accept/reject. Off-thread (LLM call).
+#[tauri::command]
+async fn edit_text(
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    selection: String,
+    instruction: String,
+    context: Option<String>,
+) -> Result<String, String> {
+    let sel = selection.trim().to_string();
+    let instr = instruction.trim().to_string();
+    if sel.is_empty() {
+        return Err("nothing selected".into());
+    }
+    if instr.is_empty() {
+        return Err("instruction is empty".into());
+    }
+    let db = db_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let model = settings.stage_model(&course.agent, "writing");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "selection": sel,
+            "instruction": instr,
+            "context": context,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("edit_text", params, Duration::from_secs(180))
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ===== Local notes (saved assistant chats with an optional fragment anchor) =====
 
 fn notes_path(paths: &AppPaths, course_id: &str) -> PathBuf {
@@ -4434,6 +4522,9 @@ fn update_widget_in_place(
         _ => serde_json::Value::Null,
     };
     w["generated"] = json!(generated);
+    // A widget with a real image is no longer a placeholder; clear the flag so
+    // the reader stops hiding it once a URL is attached (search/generate/upload).
+    w["placeholder"] = json!(false);
     courses::write_submodule_widgets(paths, course_id, module_id, submodule_id, &widgets)
         .map_err(|e| e.to_string())
 }
@@ -4548,6 +4639,44 @@ async fn set_widget_image(
         std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
         let jpeg = media::download_resize_jpeg(&normalize_wikimedia_thumbnail_url(&url), 2000)
             .map_err(|e| e.to_string())?;
+        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
+        update_widget_in_place(
+            &paths,
+            &course_id,
+            &module_id,
+            &submodule_id,
+            &widget_id,
+            &final_path.to_string_lossy(),
+            source.as_deref(),
+            false,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Import a user-picked local image file: resize to JPEG, store under the
+/// submodule's images dir, and attach it to the widget. Mirrors `set_widget_image`
+/// but reads bytes from disk instead of downloading. Off-thread (image transcode).
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn import_local_image(
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+    src_path: String,
+    source: Option<String>,
+) -> Result<(), String> {
+    let paths = paths_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let bytes = std::fs::read(&src_path).map_err(|e| format!("failed to read image: {e}"))?;
+        let jpeg = media::bytes_to_jpeg(&bytes, 2000).map_err(|e| e.to_string())?;
+        let images_dir =
+            media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
+        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
         let final_path = images_dir.join(format!("{widget_id}.jpg"));
         media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
         update_widget_in_place(
@@ -5500,6 +5629,9 @@ pub fn run() {
             fix_widget,
             extend_submodule,
             remove_widget,
+            save_lesson_content,
+            import_local_image,
+            edit_text,
             image_generation_available,
             list_spaces,
             get_space,

@@ -73,6 +73,7 @@ const methods = {
   course_assistant: async (params, ctx) => pickAgent(params).courseAssistant(params, ctx),
   fix_widget: async (params, ctx) => pickAgent(params).fixWidget(params, ctx),
   extend_article: async (params, ctx) => pickAgent(params).extendArticle(params, ctx),
+  edit_text: async (params, ctx) => pickAgent(params).editText(params, ctx),
   // Back-compat for the dev SmokeTest (always Claude).
   claude_chat: async (params) => claude.chat(params),
 };

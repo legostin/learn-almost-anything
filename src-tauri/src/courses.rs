@@ -420,11 +420,36 @@ pub fn save_structure(
         });
     }
 
+    // Delete removed nodes from the DB and collect their on-disk dirs so we don't
+    // orphan generated content (article.md, widgets, images, …). Reordered/renamed
+    // nodes keep their id and never land in this difference set. Resolve module vs
+    // submodule via the pre-delete `existing` list (which carries parent_id).
+    let mut dirs_to_remove: Vec<PathBuf> = Vec::new();
     for id in existing_ids.difference(&kept_ids) {
         db::delete_module(&tx, id)?;
+        if let Some(m) = existing.iter().find(|m| &m.id == id) {
+            let dir = match m.parent_id.as_deref() {
+                Some(mod_id) => submodule_dir(paths, course_id, mod_id, id),
+                None => paths.course_dir(course_id).join("modules").join(id),
+            };
+            dirs_to_remove.push(dir);
+        }
     }
 
     tx.commit()?;
+
+    // After the DB commit, drop the orphaned dirs (best-effort; a disk error here
+    // must not fail the structure save the user already committed).
+    for dir in dirs_to_remove {
+        if dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&dir) {
+                eprintln!(
+                    "save_structure: failed to remove orphaned dir {}: {e}",
+                    dir.display()
+                );
+            }
+        }
+    }
 
     let file = StructureFile {
         course_id: course_id.to_string(),

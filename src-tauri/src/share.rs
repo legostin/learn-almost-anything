@@ -296,6 +296,29 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             req("courseId")?,
             from_arg(a, "modules", json!([]))?,
         )?),
+        "save_lesson_content" => {
+            crate::save_lesson_content(
+                app.clone(),
+                app.state(),
+                app.state(),
+                req("courseId")?,
+                req("moduleId")?,
+                req("submoduleId")?,
+                req("article")?,
+                from_arg(a, "widgets", json!({}))?,
+                a.get("markReady").and_then(|v| v.as_bool()).unwrap_or(false),
+            )?;
+            Ok(Value::Null)
+        }
+        "edit_text" => to_val(tauri::async_runtime::block_on(crate::edit_text(
+            app.state(),
+            app.state(),
+            app.state(),
+            req("courseId")?,
+            req("selection")?,
+            req("instruction")?,
+            s("context"),
+        ))?),
         "read_submodule_article" => to_val(crate::read_submodule_article(
             app.state(),
             req("courseId")?,

@@ -5012,6 +5012,7 @@ function Structure({
   const [accepting, setAccepting] = useState<string | null>(null);
   const [showRefine, setShowRefine] = useState(false);
   const [startingFull, setStartingFull] = useState(false);
+  const [editStruct, setEditStruct] = useState(false);
   const [estimate, setEstimate] = useState<{
     pending: number;
     lowMinutes: number;
@@ -5076,6 +5077,7 @@ function Structure({
     setInput("");
     setShowRefine(false);
     setStartingFull(false);
+    setEditStruct(false);
     Promise.all([
       invoke<StructureFile>("get_structure", { courseId: course.id }),
       invoke<ChatMessage[]>("list_chat", { courseId: course.id }),
@@ -5191,6 +5193,15 @@ function Structure({
             >
               {showRefine ? t("closeRefine") : t("refinePlanButton")}
             </button>
+            <button
+              type="button"
+              className="ghost struct-edit-toggle"
+              onClick={() => setEditStruct((v) => !v)}
+              aria-expanded={editStruct}
+              title={t("editStructure")}
+            >
+              ✎ {t("editStructure")}
+            </button>
             {progress.queued > 0 && (
               <span className="toolbar-note">
                 {t("fullCourseQueueStatus", { count: progress.queued })}
@@ -5206,16 +5217,28 @@ function Structure({
               </span>
             )}
           </div>
-          <StructureTree
-            tree={tree}
-            onOpenSub={onOpenSub}
-            onStartSubGen={async (subId) => {
-              // Start (re)generation in the background — stay on the plan and
-              // just refresh the row's state, don't jump to the lesson page.
-              await onStartSubGen(subId);
-              await reloadTree();
-            }}
-          />
+          {editStruct ? (
+            <StructureEditor
+              course={course}
+              tree={tree}
+              onSaved={async () => {
+                setEditStruct(false);
+                await reloadTree();
+              }}
+              onCancel={() => setEditStruct(false)}
+            />
+          ) : (
+            <StructureTree
+              tree={tree}
+              onOpenSub={onOpenSub}
+              onStartSubGen={async (subId) => {
+                // Start (re)generation in the background — stay on the plan and
+                // just refresh the row's state, don't jump to the lesson page.
+                await onStartSubGen(subId);
+                await reloadTree();
+              }}
+            />
+          )}
         </>
       )}
 
@@ -5403,6 +5426,137 @@ function StructureTree({
         </li>
       ))}
     </ol>
+  );
+}
+
+// Editable course structure: rename / reorder / delete / add modules & lessons.
+// Diffs against the live tree via the existing save_structure command (empty id
+// = add, omitted = delete + on-disk cleanup). Preserves submodule prereqs.
+function StructureEditor({
+  course,
+  tree,
+  onSaved,
+  onCancel,
+}: {
+  course: Course;
+  tree: StructureFile;
+  onSaved: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  type ESub = { id: string; title: string; summary: string; prereqs: string[]; state: string };
+  type EMod = { id: string; title: string; summary: string; subs: ESub[] };
+  const [mods, setMods] = useState<EMod[]>(() =>
+    tree.modules.map((m) => ({
+      id: m.id,
+      title: m.title,
+      summary: m.summary || "",
+      subs: m.submodules.map((s) => ({
+        id: s.id,
+        title: s.title,
+        summary: s.summary || "",
+        prereqs: s.prereqs || [],
+        state: s.generation_state,
+      })),
+    }))
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const update = (fn: (m: EMod[]) => EMod[]) =>
+    setMods((prev) => fn(prev.map((m) => ({ ...m, subs: m.subs.map((s) => ({ ...s })) }))));
+  const renameMod = (i: number, title: string) => update((m) => { m[i].title = title; return m; });
+  const renameSub = (i: number, j: number, title: string) => update((m) => { m[i].subs[j].title = title; return m; });
+  const moveMod = (i: number, d: number) => update((m) => { const j = i + d; if (j < 0 || j >= m.length) return m; const [x] = m.splice(i, 1); m.splice(j, 0, x); return m; });
+  const moveSub = (i: number, j: number, d: number) => update((m) => { const subs = m[i].subs; const k = j + d; if (k < 0 || k >= subs.length) return m; const [x] = subs.splice(j, 1); subs.splice(k, 0, x); return m; });
+  const delMod = (i: number) => { if (!window.confirm(t("structDeleteConfirm"))) return; update((m) => { m.splice(i, 1); return m; }); };
+  const delSub = (i: number, j: number) => {
+    // Don't delete a lesson whose background generation job is still running —
+    // the in-flight job would recreate its dir right after save_structure removes it.
+    if (mods[i]?.subs[j]?.state === "generating") return;
+    if (!window.confirm(t("structDeleteConfirm"))) return;
+    update((m) => { m[i].subs.splice(j, 1); return m; });
+  };
+  const addMod = () => update((m) => [...m, { id: "", title: "", summary: "", subs: [] }]);
+  const addSub = (i: number) => update((m) => { m[i].subs.push({ id: "", title: "", summary: "", prereqs: [], state: "pending" }); return m; });
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // Prereqs are stored as submodule TITLES; drop any that no longer match a
+      // kept lesson so renames/deletes don't leave dangling references.
+      const keptTitles = new Set(
+        mods.flatMap((m) => m.subs.map((s) => s.title.trim()).filter(Boolean))
+      );
+      const modules = mods
+        .filter((m) => m.title.trim())
+        .map((m) => ({
+          id: m.id,
+          title: m.title.trim(),
+          summary: m.summary,
+          prereqs: [] as string[],
+          submodules: m.subs
+            .filter((s) => s.title.trim())
+            .map((s) => ({
+              id: s.id,
+              title: s.title.trim(),
+              summary: s.summary,
+              prereqs: s.prereqs.filter((p) => keptTitles.has(p.trim())),
+              submodules: [] as unknown[],
+            })),
+        }));
+      await invoke("save_structure", { courseId: course.id, modules });
+      await onSaved();
+    } catch (e) {
+      setError(String(e));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="struct-editor">
+      <div className="struct-editor-head">
+        <span className="struct-editor-title">✎ {t("editStructure")}</span>
+        <span className="sub-actions-spacer" />
+        <button className="ghost" onClick={onCancel} disabled={saving}>{t("structCancel")}</button>
+        <button className="le-save" onClick={save} disabled={saving}>
+          {saving ? t("editorSaving") : t("structSave")}
+        </button>
+      </div>
+      {error && <div className="le-error">{error}</div>}
+      <ol className="struct-edit-modules">
+        {mods.map((m, i) => (
+          <li key={i} className="struct-edit-module">
+            <div className="struct-edit-row">
+              <span className="num">{i + 1}.</span>
+              <input className="struct-edit-input" placeholder={t("structModuleTitle")} value={m.title} onChange={(e) => renameMod(i, e.target.value)} />
+              {m.id === "" && <span className="struct-new-badge">{t("structNew")}</span>}
+              <button title={t("blockUp")} disabled={i === 0} onClick={() => moveMod(i, -1)}>↑</button>
+              <button title={t("blockDown")} disabled={i === mods.length - 1} onClick={() => moveMod(i, 1)}>↓</button>
+              <button className="le-del" title={t("blockDelete")} onClick={() => delMod(i)}>✕</button>
+            </div>
+            <ol className="struct-edit-subs">
+              {m.subs.map((s, j) => (
+                <li key={j} className="struct-edit-sub">
+                  <span className="num">{i + 1}.{j + 1}</span>
+                  <input className="struct-edit-input" placeholder={t("structLessonTitle")} value={s.title} onChange={(e) => renameSub(i, j, e.target.value)} />
+                  {s.id === "" && <span className="struct-new-badge">{t("structNew")}</span>}
+                  <button title={t("blockUp")} disabled={j === 0} onClick={() => moveSub(i, j, -1)}>↑</button>
+                  <button title={t("blockDown")} disabled={j === m.subs.length - 1} onClick={() => moveSub(i, j, 1)}>↓</button>
+                  <button className="le-del" title={t("blockDelete")} disabled={s.state === "generating"} onClick={() => delSub(i, j)}>✕</button>
+                </li>
+              ))}
+              <li>
+                <button className="struct-add" onClick={() => addSub(i)}>＋ {t("structAddLesson")}</button>
+              </li>
+            </ol>
+          </li>
+        ))}
+      </ol>
+      <button className="struct-add" onClick={addMod}>＋ {t("structAddModule")}</button>
+      <div className="struct-edit-note">{t("structEditNote")}</div>
+    </div>
   );
 }
 
@@ -6263,6 +6417,9 @@ function SubmoduleView({
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [cardsBusy, setCardsBusy] = useState(false);
   const [editImages, setEditImages] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const editingRef = useRef(false);
+  editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
@@ -6310,6 +6467,7 @@ function SubmoduleView({
     setError(null);
     setRetryingImages(false);
     setImageRetryError(null);
+    setEditing(false);
     reloadTree();
   }, [reloadTree, submoduleId]);
 
@@ -6377,6 +6535,9 @@ function SubmoduleView({
       async (e) => {
         const p = e.payload;
         if (p.courseId !== course.id || p.submoduleId !== submoduleId) return;
+        // Never reload content out from under an open editor — it would remount
+        // the reader and discard unsaved edits. The editor reloads on save/exit.
+        if (editingRef.current) return;
         setRetryingImages(false);
         setImageRetryError(null);
         setCardsBusy(false);
@@ -6483,7 +6644,24 @@ function SubmoduleView({
         </div>
       )}
 
-      {(state === "pending" || state === "queued" || state === "failed") && (
+      {editing && (
+        <LessonEditor
+          courseId={course.id}
+          moduleId={moduleId}
+          submoduleId={submoduleId}
+          initialArticle={content?.article ?? ""}
+          initialWidgets={(content?.widgets as Record<string, WidgetData>) ?? {}}
+          canGenerate={canGenerate}
+          wasPending={state !== "ready"}
+          onClose={async () => {
+            setEditing(false);
+            await reloadTree();
+            await reloadContent();
+          }}
+        />
+      )}
+
+      {!editing && (state === "pending" || state === "queued" || state === "failed") && (
         <div className="sub-empty">
           <p>
             {state === "failed"
@@ -6495,23 +6673,30 @@ function SubmoduleView({
           {state === "failed" && (lastError || savedError) && (
             <pre className="sub-error">{lastError || savedError}</pre>
           )}
-          {state === "queued" ? (
-            <button disabled>{t("subQueued")}</button>
-          ) : (
-            <button
-              onClick={async () => {
-                await onStartGen(submoduleId);
-                await reloadTree();
-              }}
-            >
-              {state === "failed" ? t("subContinue") : t("subGenerate")}
-            </button>
-          )}
+          <div className="sub-empty-actions">
+            {state === "queued" ? (
+              <button disabled>{t("subQueued")}</button>
+            ) : (
+              <button
+                onClick={async () => {
+                  await onStartGen(submoduleId);
+                  await reloadTree();
+                }}
+              >
+                {state === "failed" ? t("subContinue") : t("subGenerate")}
+              </button>
+            )}
+            {state !== "queued" && (
+              <button className="ghost" onClick={() => setEditing(true)}>
+                ✎ {t("editorWriteManually")}
+              </button>
+            )}
+          </div>
           {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
         </div>
       )}
 
-      {state === "generating" && (
+      {!editing && state === "generating" && (
         <div className="sub-generating">
           <StageStrip current={stageDetail?.stage ?? "draft"} />
           <LiveActivity stageDetail={stageDetail} />
@@ -6519,7 +6704,7 @@ function SubmoduleView({
         </div>
       )}
 
-      {state === "ready" && (
+      {!editing && state === "ready" && (
         <>
           <div className="sub-actions">
             <div className="font-control" title={t("fontSize")}>
@@ -6530,6 +6715,16 @@ function SubmoduleView({
               <LectureAudio article={content.article} lang={course.language} title={sub.title} />
             )}
             <span className="sub-actions-spacer" />
+            {content && !isPodcast && (
+              <button
+                className="sub-edit-toggle"
+                onClick={() => setEditing(true)}
+                disabled={enriching}
+                title={enriching ? t("editLessonBusy") : t("editLessonHint")}
+              >
+                ✎ {t("editLesson")}
+              </button>
+            )}
             {confirmingRegen ? (
               <>
                 <span className="sub-regen-warn">{t("subRegenerateConfirm")}</span>
@@ -8183,6 +8378,841 @@ function collectLightboxImages(
     }
   }
   return images;
+}
+
+// ===========================================================================
+// Course editor — a "block editor" over the existing article.md + widgets.json.
+// Blocks are exactly the segments the marker parser yields (text segment or
+// widget). Editing is tucked behind a discreet pencil in the lesson toolbar.
+// ===========================================================================
+
+const TABLE_TEMPLATE = "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n";
+
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return v;
+}
+
+type EditorBlock =
+  | { kind: "md"; bid: string; text: string }
+  | { kind: "widget"; bid: string; id: string; wtype: string; raw?: string };
+
+let __editorBidSeq = 0;
+function nextBid(): string {
+  __editorBidSeq += 1;
+  return `eb${__editorBidSeq}`;
+}
+
+// Char-offset ranges of fenced code blocks so a `::widget` line inside a code
+// sample is never mistaken for a real widget marker.
+function fencedRanges(md: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let inFence = false;
+  let fenceChar = "";
+  let start = 0;
+  let offset = 0;
+  for (const line of md.split("\n")) {
+    const fm = /^\s*(```+|~~~+)/.exec(line);
+    if (fm) {
+      const ch = fm[1][0];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = ch;
+        start = offset;
+      } else if (ch === fenceChar) {
+        inFence = false;
+        ranges.push([start, offset + line.length]);
+      }
+    }
+    offset += line.length + 1; // +1 for the "\n" consumed by split
+  }
+  if (inFence) ranges.push([start, md.length]);
+  return ranges;
+}
+
+// Editor-only parser. Byte-exact partition: text segments keep their own
+// newlines verbatim and each widget keeps its raw marker line. Leaves the
+// reader's splitWidgetMarkers untouched.
+function parseArticleBlocks(article: string, widgets: Record<string, any>): EditorBlock[] {
+  const md = article ?? "";
+  const fences = fencedRanges(md);
+  const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
+  const out: EditorBlock[] = [];
+  const pushMd = (text: string) => {
+    if (text.length) out.push({ kind: "md", bid: nextBid(), text });
+  };
+  const re = /^::widget\{([^}]+)\}[ \t]*$/gm;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md))) {
+    if (inFence(m.index)) continue;
+    pushMd(md.slice(last, m.index));
+    const id = /id="([^"]+)"/.exec(m[1])?.[1] ?? "unknown";
+    const w = widgets[id];
+    const wtype =
+      (w && typeof w.type === "string" && w.type) ||
+      /type="?([a-zA-Z]+)"?/.exec(m[1])?.[1] ||
+      "widget";
+    // Trim any trailing spaces/tabs the editor regex tolerated but the reader's
+    // marker regex does not, so a re-emitted marker always parses for readers.
+    out.push({ kind: "widget", bid: nextBid(), id, wtype, raw: m[0].replace(/[ \t]+$/, "") });
+    last = m.index + m[0].length;
+  }
+  pushMd(md.slice(last));
+  if (out.length === 0) out.push({ kind: "md", bid: nextBid(), text: "" });
+  return out;
+}
+
+function widgetMarkerLine(id: string, wtype: string): string {
+  return `::widget{type="${wtype}" id="${id}"}`;
+}
+
+// Blocks → article markdown. Every widget marker must occupy its own line so the
+// reader's line-anchored regex re-mounts it. We guarantee a newline before the
+// marker and a single newline after it — unless the following md block already
+// begins with one, or this is the last block. For an UNCHANGED article both
+// guards are no-ops (preceding slice ends in "\n", following slice starts with
+// "\n"), so the round-trip stays byte-exact; reorder/insert that break those
+// invariants get the separators they need instead of gluing markers to text.
+function serializeBlocks(blocks: EditorBlock[]): string {
+  let out = "";
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.kind === "md") {
+      out += b.text;
+      continue;
+    }
+    const marker = b.raw ?? widgetMarkerLine(b.id, b.wtype);
+    if (out.length && !out.endsWith("\n")) out += "\n";
+    out += marker;
+    const next = blocks[i + 1];
+    const nextStartsWithNl = !!next && next.kind === "md" && next.text.startsWith("\n");
+    if (next && !nextStartsWithNl) out += "\n";
+  }
+  return out;
+}
+
+function newWidgetId(wtype: string, widgets: Record<string, any>): string {
+  let id = "";
+  do {
+    id = `usr-${wtype}-${crypto.randomUUID().slice(0, 8)}`;
+  } while (widgets[id]);
+  return id;
+}
+
+function defaultWidget(kind: string): any {
+  switch (kind) {
+    case "image":
+      return { type: "image", placeholder: true, description: "" };
+    case "video":
+      return { type: "video", url: "", title: "" };
+    case "diagram":
+      return { type: "diagram", source: "", caption: "" };
+    case "interactive":
+      return { type: "interactive", html: "", css: "", js: "", title: "" };
+    case "checkpoint":
+      return { type: "checkpoint", question: "", answer: "" };
+    default:
+      return { type: kind };
+  }
+}
+
+// A single text block: click-to-edit. When focused, a markdown textarea with an
+// insert toolbar, a debounced live preview, and AI-edit-on-selection.
+function LeTextBlock({
+  text,
+  focused,
+  onFocus,
+  onChange,
+  courseId,
+}: {
+  text: string;
+  focused: boolean;
+  onFocus: () => void;
+  onChange: (t: string) => void;
+  courseId: string;
+}) {
+  const t = useT();
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [sel, setSel] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
+  const [ai, setAi] = useState<null | {
+    start: number;
+    end: number;
+    original: string;
+    instruction: string;
+    busy: boolean;
+    result: string | null;
+    error: string | null;
+  }>(null);
+  const preview = useDebounced(text, 200);
+
+  useEffect(() => {
+    const ta = taRef.current;
+    if (ta && focused) {
+      ta.style.height = "auto";
+      ta.style.height = `${ta.scrollHeight}px`;
+    }
+  }, [text, focused]);
+
+  if (!focused) {
+    return (
+      <div className="le-md-view" onClick={onFocus} role="button" tabIndex={0}>
+        {text.trim() ? (
+          <MathMarkdown>{text}</MathMarkdown>
+        ) : (
+          <span className="le-empty">{t("editorEmptyBlock")}</span>
+        )}
+      </div>
+    );
+  }
+
+  const updateSel = () => {
+    const ta = taRef.current;
+    if (ta) setSel({ start: ta.selectionStart, end: ta.selectionEnd });
+  };
+  const insertAtCursor = (before: string, after = "", placeholder = "") => {
+    const ta = taRef.current;
+    if (!ta) return;
+    const s = ta.selectionStart;
+    const e = ta.selectionEnd;
+    const chosen = text.slice(s, e) || placeholder;
+    const next = text.slice(0, s) + before + chosen + after + text.slice(e);
+    onChange(next);
+    requestAnimationFrame(() => {
+      const pos = s + before.length + chosen.length + after.length;
+      ta.focus();
+      ta.setSelectionRange(pos, pos);
+    });
+  };
+  const hasSel = sel.end > sel.start;
+
+  const runAi = async () => {
+    if (!ai || !ai.instruction.trim()) return;
+    setAi({ ...ai, busy: true, error: null });
+    try {
+      const out = await invoke<string>("edit_text", {
+        courseId,
+        selection: ai.original,
+        instruction: ai.instruction,
+        context: text.slice(0, 4000),
+      });
+      setAi((a) => (a ? { ...a, busy: false, result: out } : a));
+    } catch (err) {
+      setAi((a) => (a ? { ...a, busy: false, error: String(err) } : a));
+    }
+  };
+  const acceptAi = () => {
+    if (!ai || ai.result == null) return;
+    let next: string;
+    if (text.slice(ai.start, ai.end) === ai.original) {
+      next = text.slice(0, ai.start) + ai.result + text.slice(ai.end);
+    } else {
+      const idx = text.indexOf(ai.original);
+      next =
+        idx >= 0
+          ? text.slice(0, idx) + ai.result + text.slice(idx + ai.original.length)
+          : text;
+    }
+    onChange(next);
+    setAi(null);
+  };
+
+  const quick: Array<{ k: string; label: string }> = [
+    { k: "s", label: t("aiSimplify") },
+    { k: "e", label: t("aiExpand") },
+    { k: "f", label: t("aiFix") },
+    { k: "t", label: t("aiTranslate") },
+  ];
+
+  return (
+    <div className="le-text-edit">
+      <div className="le-toolbar">
+        <button title={t("fmtBold")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("**", "**", t("fmtBold"))}><b>B</b></button>
+        <button title={t("fmtItalic")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("*", "*", t("fmtItalic"))}><i>I</i></button>
+        <button title={t("fmtH2")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("## ", "", "")}>H</button>
+        <button title={t("fmtLink")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("[", "](https://)", t("fmtLink"))}>🔗</button>
+        <button title={t("fmtCode")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("\n```\n", "\n```\n", "")}>{"</>"}</button>
+        <button title={t("fmtTable")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor(TABLE_TEMPLATE, "", "")}>▦</button>
+        <button title={t("fmtFormula")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("$$\n", "\n$$", "")}>∑</button>
+        {hasSel && !ai && (
+          <button
+            className="le-ai-btn"
+            onClick={() =>
+              setAi({
+                start: sel.start,
+                end: sel.end,
+                original: text.slice(sel.start, sel.end),
+                instruction: "",
+                busy: false,
+                result: null,
+                error: null,
+              })
+            }
+          >
+            ✦ {t("aiEdit")}
+          </button>
+        )}
+      </div>
+      <textarea
+        ref={taRef}
+        className="le-textarea"
+        value={text}
+        readOnly={!!ai}
+        onChange={(e) => onChange(e.target.value)}
+        onSelect={updateSel}
+        onKeyUp={updateSel}
+        onMouseUp={updateSel}
+        autoFocus
+      />
+      {ai && (
+        <div className="le-ai">
+          <div className="le-ai-orig">“{ai.original.slice(0, 160)}”</div>
+          {ai.result == null ? (
+            <>
+              <div className="le-ai-quick">
+                {quick.map((q) => (
+                  <button key={q.k} onClick={() => setAi((a) => (a ? { ...a, instruction: q.label } : a))}>
+                    {q.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="le-ai-input"
+                placeholder={t("aiEditPlaceholder")}
+                value={ai.instruction}
+                onChange={(e) => setAi((a) => (a ? { ...a, instruction: e.target.value } : a))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    runAi();
+                  }
+                }}
+              />
+              <div className="le-ai-actions">
+                <button disabled={!ai.instruction.trim() || ai.busy} onClick={runAi}>
+                  {ai.busy ? (
+                    <>
+                      <span className="spinner" /> {t("aiBusy")}
+                    </>
+                  ) : (
+                    t("aiEditApply")
+                  )}
+                </button>
+                <button className="ghost" onClick={() => setAi(null)}>
+                  {t("editorCancel")}
+                </button>
+              </div>
+              {ai.error && <div className="le-ai-error">{ai.error}</div>}
+            </>
+          ) : (
+            <>
+              <div className="le-ai-result">
+                <MathMarkdown>{ai.result}</MathMarkdown>
+              </div>
+              <div className="le-ai-actions">
+                <button onClick={acceptAi}>{t("aiAccept")}</button>
+                <button className="ghost" onClick={() => setAi((a) => (a ? { ...a, result: null } : a))}>
+                  {t("aiRetry")}
+                </button>
+                <button className="ghost" onClick={() => setAi(null)}>
+                  {t("aiReject")}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {!ai && (
+        <div className="le-preview">
+          <MathMarkdown>{preview}</MathMarkdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Per-widget editor. Manual fields go into the editor's widgets map (saved
+// wholesale); heavy ops (upload / search / generate / AI-fix) run via runHeavy,
+// which persists first so the widget exists on disk, then re-reads it back.
+function LeWidgetBlock({
+  wid,
+  widget,
+  ctx,
+  canGenerate,
+  busy,
+  onPatch,
+  runHeavy,
+}: {
+  wid: string;
+  widget: any;
+  ctx: { courseId: string; moduleId: string; submoduleId: string };
+  canGenerate: boolean;
+  busy: boolean;
+  onPatch: (fields: Record<string, any>) => void;
+  runHeavy: (op: () => Promise<void>, opts?: { refresh?: boolean }) => Promise<void>;
+}) {
+  const t = useT();
+  const type = widget?.type ?? "widget";
+  const [cands, setCands] = useState<
+    Array<{ url: string; source?: string; title?: string; thumbnail?: string }>
+  >([]);
+  const [urlInput, setUrlInput] = useState("");
+  const [genDesc, setGenDesc] = useState("");
+  const [showCode, setShowCode] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const args = { courseId: ctx.courseId, moduleId: ctx.moduleId, submoduleId: ctx.submoduleId, widgetId: wid };
+
+  if (type === "image") {
+    const { imgSrc } = resolveWidgetImage(widget?.url, widget?.source);
+    return (
+      <figure className="le-widget le-widget-image">
+        <div className="le-widget-tag">🖼 {t("blockImage")}</div>
+        {imgSrc ? (
+          <img className="le-widget-img" src={imgSrc} alt={widget?.alt || ""} />
+        ) : (
+          <div className="le-img-empty">{t("widgetImageNone")}</div>
+        )}
+        <div className="le-widget-actions">
+          <button
+            disabled={busy}
+            onClick={() =>
+              runHeavy(async () => {
+                const sel = await openFileDialog({
+                  multiple: false,
+                  filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+                });
+                const path = typeof sel === "string" ? sel : null;
+                if (path) await invoke("import_local_image", { ...args, srcPath: path });
+              })
+            }
+          >
+            ⤓ {t("widgetImageUpload")}
+          </button>
+          <button
+            disabled={busy}
+            onClick={() =>
+              runHeavy(
+                async () => {
+                  const c = await invoke<any[]>("search_widget_candidates", args);
+                  setCands((c as any) || []);
+                },
+                { refresh: false }
+              )
+            }
+          >
+            🔍 {t("widgetImageSearch")}
+          </button>
+          {canGenerate && (
+            <button
+              disabled={busy}
+              onClick={() => runHeavy(async () => { await invoke("generate_widget_image", args); })}
+            >
+              ✦ {t("widgetImageGenerate")}
+            </button>
+          )}
+        </div>
+        <div className="le-url-row">
+          <input
+            placeholder={t("widgetImageUrl")}
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+          />
+          <button
+            disabled={busy || !urlInput.trim()}
+            onClick={() =>
+              runHeavy(async () => {
+                await invoke("set_widget_image", { ...args, url: urlInput.trim(), source: null });
+                setUrlInput("");
+              })
+            }
+          >
+            OK
+          </button>
+        </div>
+        {cands.length > 0 && (
+          <div className="le-cands">
+            {cands.map((c, i) => (
+              <button
+                key={i}
+                className="le-cand"
+                disabled={busy}
+                onClick={() =>
+                  runHeavy(async () => {
+                    await invoke("set_widget_image", { ...args, url: c.url, source: c.source ?? null });
+                    setCands([]);
+                  })
+                }
+              >
+                <img src={c.thumbnail || c.url} alt={c.title || ""} />
+              </button>
+            ))}
+          </div>
+        )}
+        <input
+          className="le-cap"
+          placeholder={t("descriptionLabel")}
+          value={widget?.description || ""}
+          disabled={busy}
+          onChange={(e) => onPatch({ description: e.target.value })}
+        />
+      </figure>
+    );
+  }
+  if (type === "diagram") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">📊 {t("blockDiagram")}</div>
+        {widget?.source?.trim() && <DiagramWidget id={wid} widget={widget} />}
+        <textarea
+          className="le-code"
+          placeholder={t("diagramSource")}
+          value={widget?.source || ""}
+          disabled={busy}
+          onChange={(e) => onPatch({ source: e.target.value, error: undefined })}
+        />
+        <input
+          className="le-cap"
+          placeholder={t("captionLabel")}
+          value={widget?.caption || ""}
+          disabled={busy}
+          onChange={(e) => onPatch({ caption: e.target.value })}
+        />
+        <div className="le-gen-row">
+          <input
+            placeholder={t("genDescribePlaceholder")}
+            value={genDesc}
+            onChange={(e) => setGenDesc(e.target.value)}
+          />
+          <button
+            disabled={busy || !genDesc.trim()}
+            onClick={() =>
+              runHeavy(async () => {
+                await invoke("fix_widget", { ...args, instruction: genDesc });
+                setGenDesc("");
+              })
+            }
+          >
+            ✦ {t("widgetGenerate")}
+          </button>
+        </div>
+      </figure>
+    );
+  }
+  if (type === "interactive") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">⚙ {t("blockInteractive")}</div>
+        <input
+          className="le-cap"
+          placeholder={t("titleLabel")}
+          value={widget?.title || ""}
+          disabled={busy}
+          onChange={(e) => onPatch({ title: e.target.value })}
+        />
+        <div className="le-gen-row">
+          <input
+            placeholder={t("genDescribePlaceholder")}
+            value={genDesc}
+            onChange={(e) => setGenDesc(e.target.value)}
+          />
+          <button
+            disabled={busy || !genDesc.trim()}
+            onClick={() =>
+              runHeavy(async () => {
+                await invoke("fix_widget", { ...args, instruction: genDesc });
+                setGenDesc("");
+              })
+            }
+          >
+            ✦ {t("widgetGenerate")}
+          </button>
+        </div>
+        <button className="ghost le-toggle" onClick={() => setShowCode((v) => !v)}>
+          {showCode ? t("hideCode") : t("interactiveEdit")}
+        </button>
+        {showCode && (
+          <>
+            <textarea className="le-code" placeholder="HTML" value={widget?.html || ""} disabled={busy} onChange={(e) => onPatch({ html: e.target.value, error: undefined })} />
+            <textarea className="le-code" placeholder="CSS" value={widget?.css || ""} disabled={busy} onChange={(e) => onPatch({ css: e.target.value, error: undefined })} />
+            <textarea className="le-code" placeholder="JS" value={widget?.js || ""} disabled={busy} onChange={(e) => onPatch({ js: e.target.value, error: undefined })} />
+          </>
+        )}
+        {(widget?.html || "").trim() && (
+          <>
+            <button className="ghost le-toggle" onClick={() => setShowPreview((v) => !v)}>
+              {showPreview ? t("hidePreview") : t("showPreview")}
+            </button>
+            {showPreview && <InteractiveWidget id={wid} widget={widget} />}
+          </>
+        )}
+      </figure>
+    );
+  }
+  if (type === "video") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">▶ {t("blockVideo")}</div>
+        <input className="le-cap" placeholder={t("videoUrl")} value={widget?.url || ""} disabled={busy} onChange={(e) => onPatch({ url: e.target.value })} />
+        <input className="le-cap" placeholder={t("videoTitle")} value={widget?.title || ""} disabled={busy} onChange={(e) => onPatch({ title: e.target.value })} />
+        {(widget?.url || "").trim() && <VideoWidget id={wid} widget={widget} />}
+      </figure>
+    );
+  }
+  if (type === "checkpoint") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">✓ {t("blockCheckpoint")}</div>
+        <textarea className="le-cap" placeholder={t("checkpointQuestion")} value={widget?.question || ""} disabled={busy} onChange={(e) => onPatch({ question: e.target.value })} />
+        <textarea className="le-cap" placeholder={t("checkpointAnswer")} value={widget?.answer || ""} disabled={busy} onChange={(e) => onPatch({ answer: e.target.value })} />
+      </figure>
+    );
+  }
+  if (type === "gallery") {
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">🖼 {t("blockImage")} ×{Array.isArray(widget?.items) ? widget.items.length : 0}</div>
+        <WidgetRenderer id={wid} widget={widget} />
+        <input className="le-cap" placeholder={t("captionLabel")} value={widget?.caption || ""} disabled={busy} onChange={(e) => onPatch({ caption: e.target.value })} />
+        <div className="le-note">{t("galleryEditNote")}</div>
+      </figure>
+    );
+  }
+  return (
+    <div className="le-widget le-widget-unknown">
+      {type} <span className="widget-id">#{wid}</span>
+    </div>
+  );
+}
+
+function InsertBar({ onInsert }: { onInsert: (k: string) => void }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const items: Array<{ k: string; label: string }> = [
+    { k: "text", label: t("blockText") },
+    { k: "image", label: t("blockImage") },
+    { k: "table", label: t("blockTable") },
+    { k: "formula", label: t("blockFormula") },
+    { k: "video", label: t("blockVideo") },
+    { k: "diagram", label: t("blockDiagram") },
+    { k: "interactive", label: t("blockInteractive") },
+    { k: "checkpoint", label: t("blockCheckpoint") },
+  ];
+  return (
+    <div className="le-insert">
+      {open ? (
+        <div className="le-insert-menu">
+          {items.map((it) => (
+            <button key={it.k} onClick={() => { onInsert(it.k); setOpen(false); }}>
+              {it.label}
+            </button>
+          ))}
+          <button className="ghost" onClick={() => setOpen(false)}>×</button>
+        </div>
+      ) : (
+        <button className="le-insert-add" onClick={() => setOpen(true)}>
+          ＋ {t("editorAddBlock")}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function LessonEditor({
+  courseId,
+  moduleId,
+  submoduleId,
+  initialArticle,
+  initialWidgets,
+  canGenerate,
+  wasPending,
+  onClose,
+}: {
+  courseId: string;
+  moduleId: string;
+  submoduleId: string;
+  initialArticle: string;
+  initialWidgets: Record<string, WidgetData>;
+  canGenerate: boolean;
+  wasPending: boolean;
+  onClose: (saved: boolean) => void | Promise<void>;
+}) {
+  const t = useT();
+  const [blocks, setBlocks] = useState<EditorBlock[]>(() =>
+    parseArticleBlocks(initialArticle, initialWidgets as Record<string, any>)
+  );
+  const [widgets, setWidgets] = useState<Record<string, any>>(() => ({ ...(initialWidgets || {}) }));
+  const [focusedBid, setFocusedBid] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const patchWidget = (id: string, fields: Record<string, any>) => {
+    setWidgets((w) => ({ ...w, [id]: { ...(w[id] || {}), ...fields } }));
+    setDirty(true);
+  };
+  const setBlockText = (bid: string, text: string) => {
+    setBlocks((bs) => bs.map((b) => (b.bid === bid && b.kind === "md" ? { ...b, text } : b)));
+    setDirty(true);
+  };
+  const moveBlock = (idx: number, delta: number) => {
+    setBlocks((bs) => {
+      const j = idx + delta;
+      if (j < 0 || j >= bs.length) return bs;
+      const next = bs.slice();
+      const [it] = next.splice(idx, 1);
+      next.splice(j, 0, it);
+      return next;
+    });
+    setDirty(true);
+  };
+  const deleteBlock = (idx: number) => {
+    const b = blocks[idx];
+    if (b && b.kind === "widget") {
+      setWidgets((w) => {
+        const n = { ...w };
+        delete n[b.id];
+        return n;
+      });
+    }
+    setBlocks((bs) => {
+      const next = bs.slice();
+      next.splice(idx, 1);
+      return next.length ? next : [{ kind: "md", bid: nextBid(), text: "" }];
+    });
+    setDirty(true);
+  };
+  const insertAt = (idx: number, kind: string) => {
+    let block: EditorBlock;
+    if (kind === "table") block = { kind: "md", bid: nextBid(), text: TABLE_TEMPLATE };
+    else if (kind === "formula") block = { kind: "md", bid: nextBid(), text: "\n$$\n  \n$$\n" };
+    else if (kind === "text") block = { kind: "md", bid: nextBid(), text: "" };
+    else {
+      const id = newWidgetId(kind, widgets);
+      setWidgets((m) => ({ ...m, [id]: defaultWidget(kind) }));
+      block = { kind: "widget", bid: nextBid(), id, wtype: kind };
+    }
+    setBlocks((bs) => {
+      const next = bs.slice();
+      next.splice(idx, 0, block);
+      return next;
+    });
+    if (block.kind === "md") setFocusedBid(block.bid);
+    setDirty(true);
+  };
+
+  const persist = async () => {
+    const article = serializeBlocks(blocks);
+    await invoke("save_lesson_content", {
+      courseId,
+      moduleId,
+      submoduleId,
+      article,
+      widgets,
+      markReady: wasPending,
+    });
+    setDirty(false);
+  };
+  const refreshWidgets = async () => {
+    const c = await invoke<SubmoduleContent>("read_submodule_article", {
+      courseId,
+      moduleId,
+      submoduleId,
+    });
+    setWidgets({ ...((c.widgets as any) || {}) });
+  };
+  const runHeavy = async (op: () => Promise<void>, opts?: { refresh?: boolean }) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await persist();
+      await op();
+      if (opts?.refresh !== false) await refreshWidgets();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await persist();
+      await onClose(true);
+    } catch (e) {
+      setError(String(e));
+      setSaving(false);
+    }
+  };
+  const cancel = () => {
+    if (dirty && !window.confirm(t("editorExitDirty"))) return;
+    onClose(false);
+  };
+
+  return (
+    <div className="lesson-editor">
+      <div className="le-header">
+        <span className="le-title">✎ {t("editorTitle")}</span>
+        <span className="le-spacer" />
+        {busy && (
+          <span className="le-busy">
+            <span className="spinner" /> {t("aiBusy")}
+          </span>
+        )}
+        <button className="ghost" onClick={cancel} disabled={saving || busy}>
+          {t("editorCancel")}
+        </button>
+        <button className="le-save" onClick={save} disabled={saving || busy}>
+          {saving ? (
+            <>
+              <span className="spinner" /> {t("editorSaving")}
+            </>
+          ) : (
+            t("editorSave")
+          )}
+        </button>
+      </div>
+      {error && <div className="le-error">{error}</div>}
+      <div className="le-blocks">
+        <InsertBar onInsert={(k) => insertAt(0, k)} />
+        {blocks.map((b, i) => (
+          <div className="le-block" key={b.bid}>
+            <div className="le-block-chrome">
+              <button title={t("blockUp")} disabled={i === 0} onClick={() => moveBlock(i, -1)}>↑</button>
+              <button title={t("blockDown")} disabled={i === blocks.length - 1} onClick={() => moveBlock(i, 1)}>↓</button>
+              <button title={t("blockDelete")} className="le-del" onClick={() => deleteBlock(i)}>✕</button>
+            </div>
+            {b.kind === "md" ? (
+              <LeTextBlock
+                text={b.text}
+                focused={focusedBid === b.bid}
+                onFocus={() => setFocusedBid(b.bid)}
+                onChange={(text) => setBlockText(b.bid, text)}
+                courseId={courseId}
+              />
+            ) : (
+              <LeWidgetBlock
+                wid={b.id}
+                widget={widgets[b.id]}
+                ctx={{ courseId, moduleId, submoduleId }}
+                canGenerate={canGenerate}
+                busy={busy}
+                onPatch={(fields) => patchWidget(b.id, fields)}
+                runHeavy={runHeavy}
+              />
+            )}
+            <InsertBar onInsert={(k) => insertAt(i + 1, k)} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function WidgetRenderer({

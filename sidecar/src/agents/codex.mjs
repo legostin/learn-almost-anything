@@ -814,6 +814,38 @@ Output ONLY the new Markdown sections — no preamble, no surrounding code fence
   return { markdown: (text || "").trim() };
 }
 
+// Rewrite a selected text fragment per an instruction (the course editor's
+// "edit selection with AI"). Returns ONLY the replacement markdown.
+export async function editText({ language, topic, selection, instruction, context, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const sel = (selection ?? "").toString();
+  const instr = (instruction || "").trim();
+  if (!sel.trim() || !instr) return { text: sel };
+  const ctxBlock = (context || "").toString().trim()
+    ? `Surrounding lesson text (context only — do NOT rewrite or echo it):\n<context>\n${context}\n</context>\n\n`
+    : "";
+  const prompt = `You are editing a fragment of a lesson on "${topic}" (language "${lang}").
+${ctxBlock}The learner selected EXACTLY this fragment:
+<selection>
+${sel}
+</selection>
+
+Apply this instruction to the selected fragment: ${instr}
+
+Rules:
+- Rewrite ONLY the selected fragment; your output replaces the selection verbatim.
+- Preserve Markdown formatting and any LaTeX math ($...$ / $$...$$) where appropriate.
+- Do NOT add ::widget markers, new headings, or any preamble/explanation.
+- Keep the same language ("${lang}") unless the instruction asks to translate.
+- Output ONLY the replacement Markdown — no code fence, no commentary.
+
+${languageStyleGuide(lang)}`;
+  const text = await runStreamed(prompt, undefined, ctx?.progress, { modelConfig });
+  const lead = sel.match(/^\s*/)[0];
+  const trail = sel.match(/\s*$/)[0];
+  return { text: lead + (text || "").trim() + trail };
+}
+
 // Vision text-language detection is done via Claude (the Rust side forces
 // backend="claude"); this codex stub keeps the method present and safe.
 export async function detectImageTextLanguage() {
