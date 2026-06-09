@@ -3562,6 +3562,45 @@ button {
   font-size: 13px;
   color: var(--status-ready-fg, #15803d);
 }
+/* Entry diagnostic + learner profile */
+.diagnostic-offer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.diagnostic-offer-actions {
+  display: flex;
+  gap: 10px;
+}
+.diagnostic-intro {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.lp-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+}
+.lp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.lp-field span {
+  color: var(--text-muted);
+}
+.lp-field input,
+.lp-field select,
+.lp-field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+}
 .test-header {
   display: flex;
   align-items: center;

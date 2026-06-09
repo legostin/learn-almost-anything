@@ -538,6 +538,7 @@ fn start_build_structure(
             "spaceDirs": space_dirs,
             "spaceStrict": space_strict,
             "genProfile": gen_profile,
+            "learnerProfile": course.learner_profile,
         });
         // Durability: the planning agent can fail (timeout, bad JSON, transient
         // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the
@@ -677,6 +678,7 @@ fn start_structure_refine(
             "chatHistory": chat_for_prompt,
             "userMessage": text,
             "modelConfig": model_config,
+            "learnerProfile": course.learner_profile,
         });
         let cb = {
             let app3 = app2.clone();
@@ -899,6 +901,7 @@ fn spawn_generate_submodule(
             "spaceStrict": space_strict,
             "category": course.category,
             "genProfile": gen_profile.clone(),
+            "learnerProfile": course.learner_profile.clone(),
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
@@ -1155,6 +1158,7 @@ fn spawn_generate_submodule(
                 "genProfile": gen_profile.clone(),
                 "category": course.category,
                 "structure": structure_value,
+                "learnerProfile": course.learner_profile.clone(),
             });
             Some(thread::spawn(move || {
                 let test_started = Instant::now();
@@ -1209,6 +1213,7 @@ fn spawn_generate_submodule(
                 "modelConfig": tests_model,
                 "genProfile": gen_profile.clone(),
                 "category": course.category,
+                "learnerProfile": course.learner_profile.clone(),
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -1263,6 +1268,7 @@ fn spawn_generate_submodule(
                 "modelConfig": tests_model,
                 "genProfile": gen_profile.clone(),
                 "category": course.category,
+                "learnerProfile": course.learner_profile.clone(),
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -2963,6 +2969,222 @@ fn replace_card(
     srs::replace_card(&conn, &card_id, &cards, now).map_err(|e| e.to_string())
 }
 
+// ===== Learner profile + entry diagnostic =====
+
+#[tauri::command]
+fn get_learner_profile(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+) -> Result<Option<Value>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    Ok(db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|c| c.learner_profile))
+}
+
+#[tauri::command]
+fn set_learner_profile(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    profile: Value,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&profile).map_err(|e| e.to_string())?;
+    db::set_course_learner_profile(&conn, &course_id, Some(&json)).map_err(|e| e.to_string())
+}
+
+/// Distill the wizard Q&A (course.md) into a normalized learner profile and
+/// persist it. Existing diagnostic/knownTopics fields are preserved. Off-thread
+/// (LLM call); failures are the caller's to tolerate — the profile is an
+/// enhancement, never a gate.
+#[tauri::command]
+async fn extract_learner_profile(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<Value, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let course_md = courses::read_course_md(&paths, &course_id).map_err(|e| e.to_string())?;
+        let model = settings.stage_model(&course.agent, "tests");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "courseMd": course_md,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("extract_learner_profile", params, Duration::from_secs(120))
+            .map_err(|e| e.to_string())?;
+        let mut profile = v.get("profile").cloned().unwrap_or_else(|| json!({}));
+        // Merge: keep diagnostic results / knownTopics captured earlier.
+        if let Some(prev) = course.learner_profile.as_ref().and_then(|p| p.as_object()) {
+            if let Some(obj) = profile.as_object_mut() {
+                for key in ["diagnostic", "knownTopics"] {
+                    if !obj.contains_key(key) {
+                        if let Some(val) = prev.get(key) {
+                            obj.insert(key.to_string(), val.clone());
+                        }
+                    }
+                }
+                obj.entry("version").or_insert(json!(1));
+            }
+        }
+        let jsons = serde_json::to_string(&profile).map_err(|e| e.to_string())?;
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        db::set_course_learner_profile(&conn, &course_id, Some(&jsons))
+            .map_err(|e| e.to_string())?;
+        Ok(profile)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Generate the optional entry diagnostic (5-8 MCQs laddered novice→advanced).
+/// Off-thread (LLM call). Questions are returned, not persisted.
+#[tauri::command]
+async fn generate_diagnostic(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<Value, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let course_md = courses::read_course_md(&paths, &course_id).unwrap_or_default();
+        let model = settings.stage_model(&course.agent, "tests");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "courseMd": course_md,
+            "learnerProfile": course.learner_profile,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("generate_diagnostic", params, Duration::from_secs(300))
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("questions").cloned().unwrap_or_else(|| json!([])))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Persist diagnostic results: learner_profile.diagnostic + knownTopics, and a
+/// `## Diagnostic` section in course.md so buildStructure sees it verbatim.
+#[tauri::command]
+fn submit_diagnostic_result(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    results: Vec<Value>, // [{concept, difficulty, correct}]
+) -> Result<(), String> {
+    let now = now_unix_secs()?;
+    let total = results.len();
+    let correct = results
+        .iter()
+        .filter(|r| r.get("correct").and_then(|c| c.as_bool()).unwrap_or(false))
+        .count();
+    let score = if total > 0 {
+        correct as f64 / total as f64
+    } else {
+        0.0
+    };
+    // Concepts answered fully correctly become knownTopics.
+    let mut per_concept: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for r in &results {
+        let concept = r
+            .get("concept")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if concept.is_empty() {
+            continue;
+        }
+        let entry = per_concept.entry(concept).or_insert((0, 0));
+        entry.1 += 1;
+        if r.get("correct").and_then(|c| c.as_bool()).unwrap_or(false) {
+            entry.0 += 1;
+        }
+    }
+    let known: Vec<String> = per_concept
+        .iter()
+        .filter(|(_, (ok, n))| ok == n && *n > 0)
+        .map(|(c, _)| c.clone())
+        .collect();
+    let weak: Vec<String> = per_concept
+        .iter()
+        .filter(|(_, (ok, _))| *ok == 0)
+        .map(|(c, _)| c.clone())
+        .collect();
+
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let course = db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("course not found: {course_id}"))?;
+    let mut profile = course.learner_profile.clone().unwrap_or_else(|| json!({}));
+    if let Some(obj) = profile.as_object_mut() {
+        obj.insert(
+            "diagnostic".into(),
+            json!({ "takenAt": now, "score": score, "perConcept": per_concept
+                .iter()
+                .map(|(c, (ok, n))| json!({ "concept": c, "correct": ok, "total": n }))
+                .collect::<Vec<_>>() }),
+        );
+        let mut topics: Vec<String> = obj
+            .get("knownTopics")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for k in &known {
+            if !topics.contains(k) {
+                topics.push(k.clone());
+            }
+        }
+        obj.insert("knownTopics".into(), json!(topics));
+        obj.entry("version").or_insert(json!(1));
+    }
+    let jsons = serde_json::to_string(&profile).map_err(|e| e.to_string())?;
+    db::set_course_learner_profile(&conn, &course_id, Some(&jsons)).map_err(|e| e.to_string())?;
+
+    let body = format!(
+        "Score: {correct}/{total}.\nAlready solid (compress or fold into other lessons): {}.\nWeak (start from fundamentals, extra scaffolding): {}.",
+        if known.is_empty() { "—".to_string() } else { known.join(", ") },
+        if weak.is_empty() { "—".to_string() } else { weak.join(", ") },
+    );
+    courses::upsert_course_md_section(&paths_state, &course_id, "Diagnostic", &body)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3333,6 +3555,7 @@ fn start_generate_flashcards(
             "modelConfig": tests_model,
             "genProfile": gen_profile,
             "category": course.category,
+            "learnerProfile": course.learner_profile,
         });
         let out = match sidecar.call_with_progress(
             "generate_flashcards",
@@ -4531,6 +4754,7 @@ async fn ask_course_assistant(
             "spaceDirs": dirs,
             "spaceStrict": strict,
             "modelConfig": model,
+            "learnerProfile": course.learner_profile,
         });
         let v = sidecar
             .call("course_assistant", params, Duration::from_secs(600))
@@ -5946,6 +6170,11 @@ pub fn run() {
             grade_card_with_ai,
             rewrite_leech_card,
             replace_card,
+            get_learner_profile,
+            set_learner_profile,
+            extract_learner_profile,
+            generate_diagnostic,
+            submit_diagnostic_result,
             get_assignments,
             submit_assignment,
             start_generate_assignments,

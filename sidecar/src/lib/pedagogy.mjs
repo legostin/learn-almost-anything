@@ -37,6 +37,45 @@ Each kept card:
 All card text in language "${lang}".`;
 }
 
+/**
+ * Learner profile → prompt block. Inserted right under categoryPedagogyBlock
+ * in every generation prompt so the whole course adapts to one person.
+ * `p` is the normalized profile JSON (level/goals/weeklyMinutes/...); returns
+ * "" when absent so call sites can interpolate unconditionally.
+ */
+export function learnerProfileBlock(p) {
+  if (!p || typeof p !== "object") return "";
+  const lines = [];
+  if (p.level) {
+    const depth =
+      p.level === "novice"
+        ? "define every term on first use, go slower, use more analogies"
+        : p.level === "advanced"
+          ? "skip basics, go deeper, address edge cases and trade-offs"
+          : "brief reminders for fundamentals, full depth for new material";
+    lines.push(`- current level: ${p.level} — pitch explanations at this level; ${depth}`);
+  }
+  if (p.goals)
+    lines.push(
+      `- goals: ${p.goals} — prioritize material that serves these goals; cut detours that don't`
+    );
+  if (p.weeklyMinutes)
+    lines.push(
+      `- time budget: ~${p.weeklyMinutes} min/week — calibrate lesson length and homework size so a week's slice fits it`
+    );
+  if (p.priorKnowledge)
+    lines.push(
+      `- already knows: ${p.priorKnowledge} — build on it explicitly, don't re-teach it`
+    );
+  if (Array.isArray(p.knownTopics) && p.knownTopics.length)
+    lines.push(
+      `- diagnostic showed solid command of: ${p.knownTopics.join(", ")} — compress these, don't re-teach from zero`
+    );
+  if (p.examplesStyle) lines.push(`- preferred examples: ${p.examplesStyle}`);
+  if (!lines.length) return "";
+  return `LEARNER PROFILE (adapt everything you write to this person):\n${lines.join("\n")}\n`;
+}
+
 /** Free-recall grading: judge meaning vs the reference, map to FSRS 1-4. */
 export function gradeAnswerBlock(lang) {
   return `Judge MEANING, not wording: paraphrases, synonyms, different ordering,

@@ -31,6 +31,7 @@ import {
   flashcardRulesBlock,
   gradeAnswerBlock,
   leechRewriteBlock,
+  learnerProfileBlock,
 } from "../lib/pedagogy.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
@@ -465,6 +466,12 @@ what they already told you: follow up on, drill into, disambiguate, or branch
 from a previous answer. Never repeat covered ground, and never ask the learner
 to choose the generation format again. Skip pleasantries.
 
+By the END of the interview you must have covered these four LEARNER-PROFILE
+dimensions (they drive personalization of every future lesson): (1) current
+level, (2) goals — what they want to be able to DO, (3) weekly time budget,
+(4) prior/adjacent knowledge. When no better topic-specific question exists,
+ask about an uncovered dimension; weave it naturally into the topic.
+
 Conduct between 3 and 10 questions in TOTAL. You have asked ${asked.length} so far.
 - If you have asked FEWER than 3, you MUST ask another question (done=false).
 - If you have asked AT LEAST 3 and now have enough to build an excellent,
@@ -721,6 +728,129 @@ function widgetContextBlock(widget) {
   return `The learner is asking about THIS specific ${type} widget in the lesson (id ${widget.id || "?"}) — focus your answer on it:\n<widget>\n${detail}\n</widget>\n\n`;
 }
 
+// ── Learner profile + entry diagnostic ──────────────────────────────────────
+
+const LEARNER_LEVELS = ["novice", "amateur", "intermediate", "advanced"];
+
+const learnerProfileSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    level: { type: "string", enum: LEARNER_LEVELS },
+    goals: { type: "string" },
+    weeklyMinutes: { type: "integer" },
+    priorKnowledge: { type: "string" },
+    examplesStyle: { type: "string" },
+  },
+  required: ["level", "goals", "weeklyMinutes", "priorKnowledge", "examplesStyle"],
+};
+
+export async function extractLearnerProfile({ topic, language, courseMd, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const prompt = `From this pre-course interview (wizard Q&A) extract the LEARNER PROFILE.
+
+<course-md>
+${courseMd || ""}
+</course-md>
+
+Fields:
+- "level": one of ${JSON.stringify(LEARNER_LEVELS)} — infer conservatively from what they said;
+- "goals": 1-2 sentences in language "${lang}" — what they want to be able to DO;
+- "weeklyMinutes": integer — their weekly time budget in minutes (estimate from answers; 0 if truly unknown);
+- "priorKnowledge": 1-2 sentences in "${lang}" — what they already know (adjacent skills count); "" if none mentioned;
+- "examplesStyle": short phrase in "${lang}" for the example style they'd respond to (e.g. practical/code-first, theory-first, visual); "" if no signal.
+
+Infer only from the interview — do not invent facts. Concise values, no commentary.`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, learnerProfileSchema, ctx?.progress, { modelConfig });
+  const parsed = JSON.parse(text);
+  const out = { version: 1 };
+  if (LEARNER_LEVELS.includes(parsed?.level)) out.level = parsed.level;
+  if (typeof parsed?.goals === "string" && parsed.goals.trim()) out.goals = parsed.goals.trim();
+  const mins = Math.round(Number(parsed?.weeklyMinutes));
+  if (Number.isFinite(mins) && mins > 0) out.weeklyMinutes = Math.min(mins, 7 * 24 * 60);
+  if (typeof parsed?.priorKnowledge === "string" && parsed.priorKnowledge.trim())
+    out.priorKnowledge = parsed.priorKnowledge.trim();
+  if (typeof parsed?.examplesStyle === "string" && parsed.examplesStyle.trim())
+    out.examplesStyle = parsed.examplesStyle.trim();
+  return { profile: out };
+}
+
+const diagnosticSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          options: { type: "array", items: { type: "string" } },
+          correct: { type: "integer" },
+          explanation: { type: "string" },
+          concept: { type: "string" },
+          difficulty: { type: "integer", enum: [1, 2, 3] },
+        },
+        required: ["text", "options", "correct", "explanation", "concept", "difficulty"],
+      },
+    },
+  },
+  required: ["questions"],
+};
+
+export async function generateDiagnostic({ topic, language, courseMd, learnerProfile, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const prompt = `You are writing a short ENTRY DIAGNOSTIC for a learner about to
+start a personalized course on "${topic}" (language "${lang}"). Its purpose is to
+find WHERE this learner's knowledge stops, so the course can skip what they know
+and scaffold what they don't.
+
+${learnerProfileBlock(learnerProfile)}
+The pre-course interview:
+<course-md>
+${courseMd || ""}
+</course-md>
+
+Write 5-8 multiple-choice questions that ladder in difficulty:
+- start at fundamentals a motivated beginner could answer, end at questions only
+  someone genuinely experienced in "${topic}" would get right;
+- each question tests UNDERSTANDING (why/how/what-happens-if), not trivia;
+- options must be plausible and mutually exclusive — distractors should reflect
+  real misconceptions; no "all of the above";
+- the question must not leak its answer; keep options similar in length/register;
+- "difficulty": 1 fundamentals, 2 working knowledge, 3 advanced; "concept" is a
+  2-4 word tag in "${lang}".
+All text in language "${lang}".
+
+${languageStyleGuide(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, diagnosticSchema, ctx?.progress, { modelConfig });
+  const parsed = JSON.parse(text);
+  const questions = (Array.isArray(parsed?.questions) ? parsed.questions : [])
+    .map((q) => {
+      if (!q || typeof q.text !== "string" || !q.text.trim()) return null;
+      const options = Array.isArray(q.options)
+        ? q.options.filter((o) => typeof o === "string" && o.trim()).map((o) => o.trim())
+        : [];
+      if (options.length < 3) return null;
+      const correct =
+        Number.isInteger(q.correct) && q.correct >= 0 && q.correct < options.length ? q.correct : 0;
+      return {
+        text: q.text.trim(),
+        options,
+        correct,
+        explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+        concept: typeof q.concept === "string" ? q.concept.trim() : "",
+        difficulty: [1, 2, 3].includes(q.difficulty) ? q.difficulty : 2,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 8);
+  return { questions };
+}
+
 export async function courseAssistant(
   {
     language,
@@ -737,6 +867,7 @@ export async function courseAssistant(
     imagePath,
     widget,
     modelConfig,
+    learnerProfile,
   },
   ctx
 ) {
@@ -758,7 +889,7 @@ export async function courseAssistant(
       : "";
   const prompt = `You are a knowledgeable, friendly tutor for a learner taking a course on "${topic}". Answer the learner's question in language "${lang}".
 Ground your answer in the COURSE PROGRAM and the lesson material below; prefer the course's own framing and terminology. If the question is outside the course's scope, say so briefly and still help where you can.
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
+${learnerProfileBlock(learnerProfile)}${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
 Course program (curriculum):
 <structure>
 ${JSON.stringify(structure ?? {}, null, 2)}
@@ -857,7 +988,7 @@ export async function detectImageTextLanguage() {
   return { hasText: false, language: "", translate: false };
 }
 
-export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, structure }, ctx) {
+export async function generateTest({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, structure, learnerProfile }, ctx) {
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
@@ -880,7 +1011,7 @@ export async function generateTest({ topic, language, courseFormat, submodulePat
 a course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-${categoryPedagogyBlock(category, lang, intensity)}${recallGuide}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}${recallGuide}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 ${isPodcast ? "Episode transcript the test must be based on" : "Article the test must be based on"}:
@@ -976,7 +1107,7 @@ function normalizeFlashcards(raw) {
 }
 
 export async function generateFlashcards(
-  { topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile },
+  { topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, learnerProfile },
   ctx
 ) {
   if (typeof article !== "string" || !article.trim()) {
@@ -989,7 +1120,7 @@ export async function generateFlashcards(
   const prompt = `You are extracting active-recall FLASHCARDS for a submodule of a
 course on "${topic}" (language: ${lang}).
 
-${categoryPedagogyBlock(category, lang, intensity)}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The ${source} the learner just studied:
@@ -1180,7 +1311,7 @@ function normalizeReview(parsed) {
 }
 
 /** Design a short chain of practical homework assignments for a submodule. */
-export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile }, ctx) {
+export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, learnerProfile }, ctx) {
   if (normalizeCourseFormat(courseFormat) === "podcast_series") {
     return { assignments: [] };
   }
@@ -1197,7 +1328,7 @@ export async function generateAssignments({ topic, language, courseFormat, submo
 course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-${categoryPedagogyBlock(category, lang, intensity)}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The article the learner just studied:
@@ -1594,6 +1725,7 @@ async function draftArticleInternal(
     spaceDirs,
     spaceStrict,
     category,
+    learnerProfile,
   },
   onProgress
 ) {
@@ -1606,7 +1738,8 @@ async function draftArticleInternal(
     (Array.isArray(spaceDirs) && spaceDirs.length);
   const categoryBlock =
     spaceStrict && hasSpaceMaterial ? "" : categoryPreferredSourcesBlock(category, lang);
-  const pedagogyBlock = categoryPedagogyBlock(category, lang, "standard");
+  const pedagogyBlock =
+    categoryPedagogyBlock(category, lang, "standard") + learnerProfileBlock(learnerProfile);
   const memoryBlock =
     memoryFiles && memoryFiles.length
       ? `Past user feedback (apply to tone and content):\n${memoryFiles
@@ -2629,6 +2762,7 @@ export async function buildStructure(
     spaceLinks,
     spaceDirs,
     spaceStrict,
+    learnerProfile,
   },
   ctx
 ) {
@@ -2643,7 +2777,7 @@ export async function buildStructure(
 The course will be delivered in language code "${lang}".
 
 ${courseFormatGuide(courseFormat, lang)}
-
+${learnerProfileBlock(learnerProfile)}
 Below is the course brief — a markdown file with the wizard Q&A.
 
 <course-md>
@@ -2672,6 +2806,8 @@ exist.
 Constraints:
 - Reflect the learner's specific goals, prior knowledge, and constraints.
 - Skip modules irrelevant to those goals; do not produce a generic textbook.
+- Size the curriculum to the learner's time budget — fewer, denser submodules for small budgets.
+- If the brief has a "## Diagnostic" section, honor it: compress what is already solid, scaffold what is weak.
 - Follow the chosen generation format exactly for module/submodule counts and tone.
 - All titles and summaries in language "${lang}".
 - For NON-LINEAR subjects, if a submodule genuinely requires understanding an EARLIER submodule first, list those earlier submodule titles verbatim in its "prereqs". For linear/sequential courses where each part simply follows the previous, leave "prereqs" empty. Never list a later submodule and never create cycles.

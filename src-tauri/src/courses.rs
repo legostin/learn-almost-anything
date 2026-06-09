@@ -142,6 +142,35 @@ pub fn read_course_md(paths: &AppPaths, course_id: &str) -> Result<String, Cours
     Ok(fs::read_to_string(path)?)
 }
 
+/// Append (or replace) a `## {heading}` section at the end of course.md.
+/// Used by the entry diagnostic so buildStructure sees the results inside
+/// <course-md> with no extra plumbing.
+pub fn upsert_course_md_section(
+    paths: &AppPaths,
+    course_id: &str,
+    heading: &str,
+    body: &str,
+) -> Result<(), CourseError> {
+    let path = paths.course_dir(course_id).join("course.md");
+    let mut md = fs::read_to_string(&path).unwrap_or_default();
+    let marker = format!("## {heading}");
+    if let Some(start) = md.find(&marker) {
+        let after = &md[start + marker.len()..];
+        let end = after
+            .find("\n## ")
+            .map(|i| start + marker.len() + i)
+            .unwrap_or(md.len());
+        md.replace_range(start..end, &format!("{marker}\n\n{body}\n"));
+    } else {
+        if !md.ends_with('\n') {
+            md.push('\n');
+        }
+        md.push_str(&format!("\n{marker}\n\n{body}\n"));
+    }
+    fs::write(&path, md)?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SidecarSubmodule {
     pub title: String,

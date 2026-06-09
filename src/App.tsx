@@ -4365,6 +4365,7 @@ function CourseView({
   const t = useT();
   const [uiLang] = useLang();
   const [translateOpen, setTranslateOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -4524,8 +4525,14 @@ function CourseView({
               {publishing ? t("catalogPublishing") : t("catalogPublish")}
             </button>
           )}
+          <button className="meta-action" onClick={() => setProfileOpen(true)}>
+            {t("profileTitle")}
+          </button>
         </div>
       </div>
+      {profileOpen && (
+        <LearnerProfileModal course={course} onClose={() => setProfileOpen(false)} />
+      )}
       {(translateStatus ||
         (course.status === "ready" &&
           (publishUrl ||
@@ -4695,6 +4702,126 @@ function DeleteCourseModal({
   );
 }
 
+// Edit the learner profile (level/goals/time/prior knowledge) that modulates
+// every future generation. Affects newly generated/regenerated lessons only.
+function LearnerProfileModal({
+  course,
+  onClose,
+}: {
+  course: Course;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [loaded, setLoaded] = useState(false);
+  const [profile, setProfile] = useState<Record<string, unknown>>({});
+  const [level, setLevel] = useState("");
+  const [goals, setGoals] = useState("");
+  const [weeklyMinutes, setWeeklyMinutes] = useState("");
+  const [priorKnowledge, setPriorKnowledge] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<Record<string, unknown> | null>("get_learner_profile", { courseId: course.id })
+      .then((p) => {
+        if (cancelled) return;
+        const prof = p ?? {};
+        setProfile(prof);
+        setLevel(typeof prof.level === "string" ? prof.level : "");
+        setGoals(typeof prof.goals === "string" ? prof.goals : "");
+        setWeeklyMinutes(
+          typeof prof.weeklyMinutes === "number" ? String(prof.weeklyMinutes) : ""
+        );
+        setPriorKnowledge(typeof prof.priorKnowledge === "string" ? prof.priorKnowledge : "");
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      const next: Record<string, unknown> = { ...profile, version: 1 };
+      if (level) next.level = level;
+      else delete next.level;
+      if (goals.trim()) next.goals = goals.trim();
+      else delete next.goals;
+      const mins = Math.round(Number(weeklyMinutes));
+      if (Number.isFinite(mins) && mins > 0) next.weeklyMinutes = mins;
+      else delete next.weeklyMinutes;
+      if (priorKnowledge.trim()) next.priorKnowledge = priorKnowledge.trim();
+      else delete next.priorKnowledge;
+      await invoke("set_learner_profile", { courseId: course.id, profile: next });
+      onClose();
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <h2>{t("profileTitle")}</h2>
+        <p className="setting-note">{t("profileSavedNote")}</p>
+        {!loaded ? (
+          <div className="placeholder">{t("loadingStructure")}</div>
+        ) : (
+          <div className="lp-fields">
+            <label className="lp-field">
+              <span>{t("profileLevel")}</span>
+              <select value={level} onChange={(e) => setLevel(e.target.value)}>
+                <option value="">—</option>
+                <option value="novice">{t("profileLevelNovice")}</option>
+                <option value="amateur">{t("profileLevelAmateur")}</option>
+                <option value="intermediate">{t("profileLevelIntermediate")}</option>
+                <option value="advanced">{t("profileLevelAdvanced")}</option>
+              </select>
+            </label>
+            <label className="lp-field">
+              <span>{t("profileGoals")}</span>
+              <textarea rows={2} value={goals} onChange={(e) => setGoals(e.target.value)} />
+            </label>
+            <label className="lp-field">
+              <span>{t("profileTime")}</span>
+              <input
+                type="number"
+                min={0}
+                value={weeklyMinutes}
+                onChange={(e) => setWeeklyMinutes(e.target.value)}
+              />
+            </label>
+            <label className="lp-field">
+              <span>{t("profilePrior")}</span>
+              <textarea
+                rows={2}
+                value={priorKnowledge}
+                onChange={(e) => setPriorKnowledge(e.target.value)}
+              />
+            </label>
+          </div>
+        )}
+        {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+        <div className="modal-actions">
+          <button onClick={onClose} disabled={busy}>
+            {t("cancel")}
+          </button>
+          <button onClick={save} disabled={busy || !loaded}>
+            {busy ? t("profileSaving") : t("profileSave")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const WIZARD_MIN_QUESTIONS = 3;
 
 // Animated loader shown while the next wizard question is being generated (the
@@ -4823,6 +4950,14 @@ function Wizard({
     setError(null);
     try {
       await invoke("save_wizard_answers", { courseId: course.id, answers: history });
+      // Distill the interview into a learner profile (level/goals/time/prior
+      // knowledge) that every later generation stage adapts to. Best-effort:
+      // a failed extraction must never block the course.
+      try {
+        await invoke("extract_learner_profile", { courseId: course.id });
+      } catch {
+        /* profile is an enhancement, not a gate */
+      }
       await onSaved();
     } catch (e) {
       setError(String(e));
@@ -4985,6 +5120,110 @@ function WizardQuestion({
   );
 }
 
+// Optional entry diagnostic (5-8 laddered MCQs) offered before structure
+// generation: results land in learner_profile + course.md ## Diagnostic, so
+// buildStructure compresses what's solid and scaffolds what's weak.
+function DiagnosticQuiz({
+  course,
+  onDone,
+}: {
+  course: Course;
+  onDone: () => void;
+}) {
+  const t = useT();
+  const [phase, setPhase] = useState<"offer" | "loading" | "quiz" | "saving">("offer");
+  const [questions, setQuestions] = useState<TestQuestion[]>([]);
+  const [answers, setAnswers] = useState<(number | null)[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function start() {
+    setPhase("loading");
+    setError(null);
+    try {
+      const qs = await invoke<TestQuestion[]>("generate_diagnostic", {
+        courseId: course.id,
+      });
+      if (!qs.length) throw new Error("empty diagnostic");
+      setQuestions(qs);
+      setAnswers(qs.map(() => null));
+      setPhase("quiz");
+    } catch (e) {
+      setError(String(e));
+      setPhase("offer");
+    }
+  }
+
+  async function submit() {
+    setPhase("saving");
+    try {
+      await invoke("submit_diagnostic_result", {
+        courseId: course.id,
+        results: questions.map((q, i) => ({
+          concept: (q as { concept?: string }).concept ?? "",
+          difficulty: (q as { difficulty?: number }).difficulty ?? 2,
+          correct: answers[i] === q.correct,
+        })),
+      });
+    } catch {
+      /* non-fatal: the course just builds without diagnostic data */
+    }
+    onDone();
+  }
+
+  if (phase === "offer") {
+    return (
+      <div className="diagnostic-offer">
+        <p>{t("diagnosticOffer")}</p>
+        <div className="diagnostic-offer-actions">
+          <button onClick={start}>{t("diagnosticStart")}</button>
+          <button className="ghost" onClick={onDone}>
+            {t("diagnosticSkip")}
+          </button>
+        </div>
+        {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
+      </div>
+    );
+  }
+  if (phase === "loading" || phase === "saving") {
+    return (
+      <div className="diagnostic-offer">
+        <span className="spinner" /> {phase === "loading" ? t("diagnosticLoading") : t("diagnosticSaving")}
+      </div>
+    );
+  }
+  const allAnswered = answers.every((a) => a !== null);
+  return (
+    <div className="diagnostic-quiz">
+      <p className="diagnostic-intro">{t("diagnosticIntro")}</p>
+      <ol className="test-questions">
+        {questions.map((q, i) => (
+          <li key={i} className="test-q">
+            <div className="test-q-text">{q.text}</div>
+            <div className="test-options">
+              {q.options.map((opt, j) => (
+                <label key={j} className={`test-option${answers[i] === j ? " chosen" : ""}`}>
+                  <input
+                    type="radio"
+                    name={`diag-${i}`}
+                    checked={answers[i] === j}
+                    onChange={() =>
+                      setAnswers((prev) => prev.map((a, k) => (k === i ? j : a)))
+                    }
+                  />
+                  <span>{opt}</span>
+                </label>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ol>
+      <button className="test-start" onClick={submit} disabled={!allAnswered}>
+        {t("diagnosticSubmit")}
+      </button>
+    </div>
+  );
+}
+
 function StructureBuilder({
   job,
   course,
@@ -5002,6 +5241,32 @@ function StructureBuilder({
   const running = job?.status === "running";
   const errored = job?.status === "error";
   const other = course.agent === "claude" ? "codex" : "claude";
+  // Offer the diagnostic once: skip if already taken (profile.diagnostic) or
+  // dismissed this session.
+  const [diagState, setDiagState] = useState<"unknown" | "offer" | "done">("unknown");
+  useEffect(() => {
+    let cancelled = false;
+    invoke<Record<string, unknown> | null>("get_learner_profile", { courseId: course.id })
+      .then((p) => {
+        if (!cancelled) setDiagState(p && p.diagnostic ? "done" : "offer");
+      })
+      .catch(() => {
+        if (!cancelled) setDiagState("offer");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+  if (diagState === "unknown") {
+    return <WizardLoader />;
+  }
+  if (diagState === "offer" && !running && !errored) {
+    return (
+      <div className="wizard">
+        <DiagnosticQuiz course={course} onDone={() => setDiagState("done")} />
+      </div>
+    );
+  }
   return (
     <div className="wizard">
       <p>{t("builderIntro")}</p>
