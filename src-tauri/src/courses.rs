@@ -823,6 +823,19 @@ pub fn write_submodule_assignments(
     Ok(())
 }
 
+pub fn read_submodule_flashcards(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+) -> serde_json::Value {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::read_to_string(dir.join("flashcards.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!([]))
+}
+
 pub fn read_submodule_assignments(
     paths: &AppPaths,
     course_id: &str,

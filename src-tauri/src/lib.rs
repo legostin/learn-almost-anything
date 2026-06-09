@@ -16,6 +16,7 @@ mod media;
 mod settings;
 mod share;
 mod sidecar;
+mod srs;
 
 use courses::{AppPaths, QnA};
 use db::{Course, Db};
@@ -1366,6 +1367,13 @@ fn spawn_generate_submodule(
         }
         if let Err(e) = courses::write_submodule_flashcards(&paths, &cid, &mid, &sid, &flashcards) {
             eprintln!("[generate_submodule] write flashcards (non-fatal): {e}");
+        } else if let Ok(conn) = db.0.lock() {
+            if let Ok(now) = now_unix_secs() {
+                if let Err(e) = srs::sync_cards_for_submodule(&conn, &cid, &mid, &sid, &flashcards, now)
+                {
+                    eprintln!("[generate_submodule] sync cards (non-fatal): {e}");
+                }
+            }
         }
         if let Err(e) =
             courses::write_submodule_assignments(&paths, &cid, &mid, &sid, &assignments)
@@ -2623,28 +2631,14 @@ fn submit_test_result(
     }
     if passed {
         db::set_test_passed(&conn, &submodule_id, now).map_err(|e| e.to_string())?;
-        // Seed spaced review on first pass, graded by the honest FIRST-attempt
-        // ratio (so brute-forcing the retake can't win a long interval).
-        if db::get_review(&conn, &submodule_id)
+        // Seed FSRS schedules on pass, graded by the honest FIRST-attempt ratio
+        // (so brute-forcing the retake can't win a long interval). Only cards
+        // with reps = 0 are touched, so re-passing later changes nothing.
+        let seed_ratio = db::first_attempt_ratio(&conn, &submodule_id)
             .map_err(|e| e.to_string())?
-            .is_none()
-        {
-            if let Some(course_id) =
-                db::course_id_for_submodule(&conn, &submodule_id).map_err(|e| e.to_string())?
-            {
-                let seed_ratio = db::first_attempt_ratio(&conn, &submodule_id)
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or(ratio);
-                db::apply_review_grade(
-                    &conn,
-                    &submodule_id,
-                    &course_id,
-                    ratio_to_quality(seed_ratio),
-                    now,
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
+            .unwrap_or(ratio);
+        srs::seed_from_test_ratio(&conn, &submodule_id, seed_ratio, now)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -2681,6 +2675,78 @@ fn grade_review(
         .ok_or_else(|| format!("submodule not found: {submodule_id}"))?;
     db::apply_review_grade(&conn, &submodule_id, &course_id, ratio_to_quality(ratio), now)
         .map_err(|e| e.to_string())
+}
+
+// ===== Card-level spaced repetition (FSRS) =====
+
+#[tauri::command]
+fn get_due_cards(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: Option<String>,
+    tz_offset_secs: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<srs::DueCard>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::get_due_cards(
+        &conn,
+        course_id.as_deref(),
+        now,
+        tz_offset_secs.unwrap_or(0),
+        limit.unwrap_or(srs::DEFAULT_QUEUE_LIMIT),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn due_card_counts(
+    db_state: tauri::State<'_, Arc<Db>>,
+    tz_offset_secs: Option<i64>,
+) -> Result<std::collections::HashMap<String, i64>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::due_card_counts(&conn, now, tz_offset_secs.unwrap_or(0)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn grade_card(
+    db_state: tauri::State<'_, Arc<Db>>,
+    card_id: String,
+    rating: u8,
+    source: Option<String>,
+) -> Result<srs::GradeOutcome, String> {
+    if !(1..=4).contains(&rating) {
+        return Err(format!("rating out of range: {rating}"));
+    }
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::schedule_card(
+        &conn,
+        &card_id,
+        rating,
+        source.as_deref().unwrap_or("manual"),
+        now,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_submodule_cards(
+    db_state: tauri::State<'_, Arc<Db>>,
+    submodule_id: String,
+) -> Result<Vec<srs::CardRow>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::cards_for_submodule(&conn, &submodule_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_card_suspended(
+    db_state: tauri::State<'_, Arc<Db>>,
+    card_id: String,
+    suspended: bool,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::set_card_suspended(&conn, &card_id, suspended).map_err(|e| e.to_string())
 }
 
 fn now_ms() -> i64 {
@@ -3030,6 +3096,7 @@ fn start_generate_flashcards(
     let gen_profile = gen_profile_json(&profile, course.category.as_deref());
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let sidecar = sidecar_state.inner().clone();
+    let db = db_state.inner().clone();
     let app2 = app.clone();
     let article = content.article;
     thread::spawn(move || {
@@ -3069,6 +3136,19 @@ fn start_generate_flashcards(
             courses::write_submodule_flashcards(&paths, &course_id, &module_id, &submodule_id, &out)
         {
             eprintln!("[start_generate_flashcards] write (non-fatal): {e}");
+        } else if let Ok(conn) = db.0.lock() {
+            if let Ok(now) = now_unix_secs() {
+                if let Err(e) = srs::sync_cards_for_submodule(
+                    &conn,
+                    &course_id,
+                    &module_id,
+                    &submodule_id,
+                    &out,
+                    now,
+                ) {
+                    eprintln!("[start_generate_flashcards] sync cards (non-fatal): {e}");
+                }
+            }
         }
         emit_enrich_event(&app2, &course_id, &submodule_id);
     });
@@ -5530,12 +5610,31 @@ pub fn run() {
                     Err(e) => eprintln!("[startup] reset_stuck_generations: {e}"),
                 }
             }
-            app.manage(Arc::new(db));
-
-            app.manage(Arc::new(AppPaths {
+            let app_paths = Arc::new(AppPaths {
                 courses_root: dir.join("courses"),
                 spaces_root: dir.join("spaces"),
-            }));
+            });
+            {
+                // One-time card backfill from existing flashcards.json decks
+                // (guarded by an app_meta flag; idempotent on crash).
+                let conn = db.0.lock().expect("db lock");
+                let paths = app_paths.clone();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                match srs::backfill_cards(
+                    &conn,
+                    |cid, mid, sid| courses::read_submodule_flashcards(&paths, cid, mid, sid),
+                    now,
+                ) {
+                    Ok(n) if n > 0 => eprintln!("[startup] backfilled {n} SRS cards"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[startup] card backfill failed: {e}"),
+                }
+            }
+            app.manage(Arc::new(db));
+            app.manage(app_paths);
 
             let settings = Arc::new(SettingsState::load(dir.clone()));
             // Reflect the persisted debug-logging choice into the runtime flag
@@ -5589,6 +5688,11 @@ pub fn run() {
             get_due_reviews,
             due_review_counts,
             grade_review,
+            get_due_cards,
+            due_card_counts,
+            grade_card,
+            get_submodule_cards,
+            set_card_suspended,
             get_assignments,
             submit_assignment,
             start_generate_assignments,
