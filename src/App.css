@@ -3395,6 +3395,122 @@ button {
   font-size: 13px;
   color: var(--text-muted);
 }
+/* Optional free-recall answer + AI grading */
+.ai-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 14px;
+}
+.ai-check-input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+  resize: vertical;
+}
+.ai-check-btn {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ai-check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ai-grade-panel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+.ai-grade-feedback {
+  font-size: 14px;
+}
+.ai-grade-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* Leech (auto-suspended card) banner */
+.leech-banner {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--status-pending-fg, #b45309);
+  border-radius: 10px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.06));
+  text-align: left;
+}
+.leech-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.leech-card-ref {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.leech-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.leech-rewrite,
+.leech-dismiss {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.leech-rewrite {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.leech-proposals {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.leech-proposals li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.leech-p-front {
+  font-size: 13px;
+  font-weight: 600;
+}
+.leech-p-back {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.leech-failed {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--status-failed-fg, #b91c1c);
+}
 .test-header {
   display: flex;
   align-items: center;

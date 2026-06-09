@@ -36,3 +36,29 @@ Each kept card:
   anchor an in-lesson recall prompt.
 All card text in language "${lang}".`;
 }
+
+/** Free-recall grading: judge meaning vs the reference, map to FSRS 1-4. */
+export function gradeAnswerBlock(lang) {
+  return `Judge MEANING, not wording: paraphrases, synonyms, different ordering,
+or the learner's own notation are all fine. Code, identifiers, and numbers must
+match in substance. Map the answer to one FSRS rating:
+- 4 (easy): fully correct and confident, possibly with correct extra detail;
+- 3 (good): correct with minor imprecision or one small omission;
+- 2 (hard): partially correct — the core idea is there but incomplete or shaky;
+- 1 (again): wrong, contradicts the reference, or empty / "I don't know".
+"feedback": ONE sentence in language "${lang}", friendly and concrete — confirm
+what was right and name the one thing missing or wrong, if any. Never scold.`;
+}
+
+/** Rewrite a leech card into 1-3 better atomic cards grounded in the article. */
+export function leechRewriteBlock(lang) {
+  return `Leeches usually mean the card is badly formed: too broad, two ideas at
+once, missing context, or an unmemorable list. Rewrite it as 1-3 BETTER cards
+that teach the same knowledge:
+- each atomic (one idea), minimum information, self-contained front;
+- prefer why/how framing; break a list into per-item cards; or add the
+  distinguishing context that makes the answer derivable rather than memorized;
+- grounded strictly in the article — invent nothing.
+Each card: "front", "back" (max 2 sentences), "concept" (2-4 word tag).
+All text in language "${lang}".`;
+}

@@ -2749,6 +2749,126 @@ fn set_card_suspended(
     srs::set_card_suspended(&conn, &card_id, suspended).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiGradeSuggestion {
+    rating: u8,
+    feedback: String,
+}
+
+/// LLM-grade a free-text answer to a card. Returns a SUGGESTION only — the
+/// frontend confirms and then calls grade_card (the learner has the last word).
+/// Off-thread (LLM call).
+#[tauri::command]
+async fn grade_card_with_ai(
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    card_id: String,
+    answer: String,
+) -> Result<AiGradeSuggestion, String> {
+    let db = db_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<AiGradeSuggestion, String> {
+        let (card, course) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let card = srs::card_meta(&conn, &card_id).map_err(|e| e.to_string())?;
+            let course = db::get_course(&conn, &card.course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {}", card.course_id))?;
+            (card, course)
+        };
+        let model = settings.stage_model(&course.agent, "tests");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "card": { "front": card.front, "back": card.back },
+            "userAnswer": answer,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("grade_answer", params, Duration::from_secs(120))
+            .map_err(|e| e.to_string())?;
+        let rating = v
+            .get("rating")
+            .and_then(|x| x.as_u64())
+            .map(|r| r.clamp(1, 4) as u8)
+            .unwrap_or(2);
+        let feedback = v
+            .get("feedback")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(AiGradeSuggestion { rating, feedback })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Ask the agent to rewrite a leech card into 1-3 better atomic cards.
+/// Returns proposals only; replace_card applies the accepted ones.
+#[tauri::command]
+async fn rewrite_leech_card(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    card_id: String,
+) -> Result<Value, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let (card, course) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let card = srs::card_meta(&conn, &card_id).map_err(|e| e.to_string())?;
+            let course = db::get_course(&conn, &card.course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {}", card.course_id))?;
+            (card, course)
+        };
+        let article = courses::read_submodule_content(
+            &paths,
+            &card.course_id,
+            &card.module_id,
+            &card.submodule_id,
+        )
+        .map(|c| c.article)
+        .unwrap_or_default();
+        let model = settings.stage_model(&course.agent, "tests");
+        let params = json!({
+            "backend": course.agent,
+            "language": course.language,
+            "topic": course.topic,
+            "card": { "front": card.front, "back": card.back },
+            "article": article,
+            "lapses": card.lapses,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("rewrite_leech_card", params, Duration::from_secs(180))
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("cards").cloned().unwrap_or_else(|| json!([])))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Apply an accepted leech rewrite: suspend the old card, insert replacements.
+#[tauri::command]
+fn replace_card(
+    db_state: tauri::State<'_, Arc<Db>>,
+    card_id: String,
+    cards: Vec<Value>,
+) -> Result<Vec<srs::CardRow>, String> {
+    let now = now_unix_secs()?;
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    srs::replace_card(&conn, &card_id, &cards, now).map_err(|e| e.to_string())
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5693,6 +5813,9 @@ pub fn run() {
             grade_card,
             get_submodule_cards,
             set_card_suspended,
+            grade_card_with_ai,
+            rewrite_leech_card,
+            replace_card,
             get_assignments,
             submit_assignment,
             start_generate_assignments,

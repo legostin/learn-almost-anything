@@ -383,6 +383,56 @@ pub fn cards_for_submodule(
     rows.collect()
 }
 
+/// Card metadata needed by the leech-rewrite flow (article lookup, prompts).
+pub fn card_meta(conn: &Connection, card_id: &str) -> Result<CardRow, rusqlite::Error> {
+    get_card(conn, card_id)
+}
+
+/// Replace a (leech) card with 1-3 rewritten cards: the old card is suspended
+/// (history kept), the new ones start fresh at the end of the deck.
+pub fn replace_card(
+    conn: &Connection,
+    card_id: &str,
+    new_cards: &[serde_json::Value],
+    now: i64,
+) -> Result<Vec<CardRow>, rusqlite::Error> {
+    let old = get_card(conn, card_id)?;
+    conn.execute("UPDATE cards SET suspended = 1 WHERE id = ?1", [card_id])?;
+    let max_pos: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), 0) FROM cards WHERE submodule_id = ?1",
+        [&old.submodule_id],
+        |r| r.get(0),
+    )?;
+    let mut out = Vec::new();
+    for (i, v) in new_cards.iter().take(3).enumerate() {
+        let Some((front, back, concept, _)) = card_fields(v) else {
+            continue;
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO cards (id, course_id, module_id, submodule_id, kind, position, \
+             front, back, concept, anchor, content_hash, created_at, due_at) \
+             VALUES (?1, ?2, ?3, ?4, 'flashcard', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                id,
+                old.course_id,
+                old.module_id,
+                old.submodule_id,
+                max_pos + 1 + i as i64,
+                front,
+                back,
+                concept,
+                old.anchor,
+                content_hash(&front, &back),
+                now,
+                now,
+            ],
+        )?;
+        out.push(get_card(conn, &id)?);
+    }
+    Ok(out)
+}
+
 pub fn set_card_suspended(
     conn: &Connection,
     card_id: &str,

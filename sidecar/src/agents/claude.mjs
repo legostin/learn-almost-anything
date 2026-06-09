@@ -25,7 +25,11 @@ import {
   categoryPedagogyBlock,
   normalizeCategory,
 } from "../lib/categories.mjs";
-import { flashcardRulesBlock } from "../lib/pedagogy.mjs";
+import {
+  flashcardRulesBlock,
+  gradeAnswerBlock,
+  leechRewriteBlock,
+} from "../lib/pedagogy.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
@@ -1993,6 +1997,72 @@ Output ONLY a JSON object with the KEPT cards on a single line, no prose, no mar
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
   return { flashcards: normalizeFlashcards(parsed?.flashcards) };
+}
+
+// ── Spaced-repetition support: free-recall grading, leech rewrite ───────────
+
+export async function gradeAnswer({ topic, language, card, userAnswer, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const front = (card?.front || "").toString().trim();
+  const back = (card?.back || "").toString().trim();
+  const answer = (userAnswer || "").toString().trim();
+  if (!front || !back) throw new Error("card front/back required");
+  const prompt = `You are grading one spaced-repetition answer for a course on "${topic}".
+
+Card question:
+<front>
+${front}
+</front>
+Reference answer:
+<back>
+${back}
+</back>
+Learner's answer (free text):
+<answer>
+${answer || "(empty)"}
+</answer>
+
+${gradeAnswerBlock(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"rating":3,"feedback":"..."}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  const rating = Math.min(4, Math.max(1, Math.round(Number(parsed?.rating)) || 2));
+  const feedback = typeof parsed?.feedback === "string" ? parsed.feedback.trim() : "";
+  return { rating, feedback };
+}
+
+export async function rewriteLeechCard({ topic, language, card, article, lapses, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const front = (card?.front || "").toString().trim();
+  const back = (card?.back || "").toString().trim();
+  if (!front || !back) throw new Error("card front/back required");
+  const prompt = `This flashcard from a course on "${topic}" keeps being forgotten
+(failed ${Number(lapses) || "many"} times) — it is a "leech".
+
+The card:
+<front>
+${front}
+</front>
+<back>
+${back}
+</back>
+
+The lesson it came from:
+<article>
+${(article || "").toString()}
+</article>
+
+${leechRewriteBlock(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"cards":[{"front":"...","back":"...","concept":"..."}]}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  return { cards: normalizeFlashcards(parsed?.cards).slice(0, 3) };
 }
 
 // ── Homework assignments ────────────────────────────────────────────────────

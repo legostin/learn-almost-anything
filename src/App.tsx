@@ -9872,9 +9872,29 @@ function ReviewFlipCard({
   card: DueCard;
   flipped: boolean;
   onFlip: () => void;
-  onGrade: (rating: 1 | 2 | 3 | 4) => void;
+  onGrade: (rating: 1 | 2 | 3 | 4, viaAi: boolean) => void;
 }) {
   const t = useT();
+  const [answer, setAnswer] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [ai, setAi] = useState<{ rating: number; feedback: string } | null>(null);
+
+  async function checkWithAi() {
+    setAiBusy(true);
+    try {
+      const res = await invoke<{ rating: number; feedback: string }>(
+        "grade_card_with_ai",
+        { cardId: card.id, answer }
+      );
+      setAi(res);
+      if (!flipped) onFlip();
+    } catch {
+      setAi(null);
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
   return (
     <div className="review-flip">
       <div className="review-flip-crumb">
@@ -9892,8 +9912,116 @@ function ReviewFlipCard({
           {flipped ? t("reviewFlipHint") : t("flashcardsFlip")}
         </div>
       </button>
-      {flipped && <GradeButtons preview={card.preview} onGrade={onGrade} />}
+      {!flipped && (
+        <div className="ai-check">
+          <textarea
+            className="ai-check-input"
+            placeholder={t("aiCheckPlaceholder")}
+            value={answer}
+            rows={2}
+            onChange={(e) => setAnswer(e.target.value)}
+          />
+          <button
+            className="ai-check-btn"
+            disabled={aiBusy || !answer.trim()}
+            onClick={checkWithAi}
+          >
+            {aiBusy ? t("aiCheckBusy") : t("aiCheckButton")}
+          </button>
+        </div>
+      )}
+      {flipped && ai && (
+        <div className="ai-grade-panel">
+          <div className="ai-grade-feedback">{ai.feedback}</div>
+          <div className="ai-grade-hint">{t("aiCheckOverrideHint")}</div>
+        </div>
+      )}
+      {flipped && (
+        <GradeButtons
+          preview={card.preview}
+          suggested={ai?.rating ?? null}
+          onGrade={(r) => onGrade(r, ai !== null)}
+        />
+      )}
       {flipped && <div className="grade-safety">{t("gradeSafetyNote")}</div>}
+    </div>
+  );
+}
+
+// Leech flow: a card failed too many times got auto-suspended; offer an
+// LLM rewrite into better atomic cards (or leave it paused).
+function LeechBanner({ card, onClose }: { card: SrsCard; onClose: () => void }) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  const [proposals, setProposals] = useState<
+    { front: string; back: string; concept?: string }[] | null
+  >(null);
+  const [failed, setFailed] = useState(false);
+
+  async function rewrite() {
+    setBusy(true);
+    setFailed(false);
+    try {
+      const cards = await invoke<{ front: string; back: string; concept?: string }[]>(
+        "rewrite_leech_card",
+        { cardId: card.id }
+      );
+      if (cards.length === 0) setFailed(true);
+      else setProposals(cards);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function accept() {
+    if (!proposals) return;
+    setBusy(true);
+    try {
+      await invoke("replace_card", { cardId: card.id, cards: proposals });
+      onClose();
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="leech-banner">
+      <div className="leech-title">{t("leechSuspended")}</div>
+      <div className="leech-card-ref">«{card.front}»</div>
+      {proposals === null ? (
+        <div className="leech-actions">
+          <button className="leech-rewrite" disabled={busy} onClick={rewrite}>
+            {busy ? t("leechRewriteBusy") : t("leechRewrite")}
+          </button>
+          <button className="leech-dismiss" disabled={busy} onClick={onClose}>
+            {t("leechKeepPaused")}
+          </button>
+        </div>
+      ) : (
+        <>
+          <ul className="leech-proposals">
+            {proposals.map((c, i) => (
+              <li key={i}>
+                <span className="leech-p-front">{c.front}</span>
+                <span className="leech-p-back">{c.back}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="leech-actions">
+            <button className="leech-rewrite" disabled={busy} onClick={accept}>
+              {t("leechAcceptCards", { count: proposals.length })}
+            </button>
+            <button className="leech-dismiss" disabled={busy} onClick={onClose}>
+              {t("leechKeepPaused")}
+            </button>
+          </div>
+        </>
+      )}
+      {failed && <div className="leech-failed">{t("leechRewriteFailed")}</div>}
     </div>
   );
 }
@@ -9912,6 +10040,7 @@ function ReviewSession({
   const [pos, setPos] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [ratings, setRatings] = useState<number[]>([]);
+  const [leech, setLeech] = useState<SrsCard | null>(null);
   // Cards whose grade_card failed (offline, lock contention): retried once at
   // session end; per-card modal errors would destroy the flow.
   const failedGrades = useRef<{ cardId: string; rating: number }[]>([]);
@@ -9927,14 +10056,22 @@ function ReviewSession({
   }, [courseId]);
 
   const grade = useCallback(
-    (card: DueCard, rating: 1 | 2 | 3 | 4) => {
+    (card: DueCard, rating: 1 | 2 | 3 | 4, viaAi = false) => {
       // Optimistic: advance immediately, persist in the background.
       setRatings((r) => [...r, rating]);
       setFlipped(false);
       setPos((p) => p + 1);
-      invoke<GradeOutcome>("grade_card", { cardId: card.id, rating }).catch(() => {
-        failedGrades.current.push({ cardId: card.id, rating });
-      });
+      invoke<GradeOutcome>("grade_card", {
+        cardId: card.id,
+        rating,
+        source: viaAi ? "ai" : "manual",
+      })
+        .then((out) => {
+          if (out.becameLeech) setLeech(out.card);
+        })
+        .catch(() => {
+          failedGrades.current.push({ cardId: card.id, rating });
+        });
     },
     []
   );
@@ -9987,6 +10124,7 @@ function ReviewSession({
     const counts = [1, 2, 3, 4].map((r) => ratings.filter((x) => x === r).length);
     return (
       <div className="review-done">
+        {leech && <LeechBanner card={leech} onClose={() => setLeech(null)} />}
         <div className="review-done-icon">🎉</div>
         <div className="review-done-title">{t("reviewSessionSummaryTitle")}</div>
         <div className="review-done-sub">
@@ -10010,12 +10148,13 @@ function ReviewSession({
       <div className="review-progress">
         {t("reviewProgress", { current: pos + 1, total: queue.length })}
       </div>
+      {leech && <LeechBanner card={leech} onClose={() => setLeech(null)} />}
       <ReviewFlipCard
         key={card.id}
         card={card}
         flipped={flipped}
         onFlip={() => setFlipped((f) => !f)}
-        onGrade={(r) => grade(card, r)}
+        onGrade={(r, viaAi) => grade(card, r, viaAi)}
       />
     </section>
   );

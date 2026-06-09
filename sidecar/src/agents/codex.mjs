@@ -27,7 +27,11 @@ import {
   normalizeCategory,
   CATEGORY_IDS,
 } from "../lib/categories.mjs";
-import { flashcardRulesBlock } from "../lib/pedagogy.mjs";
+import {
+  flashcardRulesBlock,
+  gradeAnswerBlock,
+  leechRewriteBlock,
+} from "../lib/pedagogy.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
@@ -1001,6 +1005,97 @@ ${languageStyleGuide(lang)}`;
   const text = await runStreamed(prompt, flashcardSchema, ctx?.progress, { braveApiKey, modelConfig });
   const parsed = JSON.parse(text);
   return { flashcards: normalizeFlashcards(parsed?.flashcards) };
+}
+
+// ── Spaced-repetition support: free-recall grading, leech rewrite ───────────
+
+const gradeAnswerSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    rating: { type: "integer", enum: [1, 2, 3, 4] },
+    feedback: { type: "string" },
+  },
+  required: ["rating", "feedback"],
+};
+
+export async function gradeAnswer({ topic, language, card, userAnswer, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const front = (card?.front || "").toString().trim();
+  const back = (card?.back || "").toString().trim();
+  const answer = (userAnswer || "").toString().trim();
+  if (!front || !back) throw new Error("card front/back required");
+  const prompt = `You are grading one spaced-repetition answer for a course on "${topic}".
+
+Card question:
+<front>
+${front}
+</front>
+Reference answer:
+<back>
+${back}
+</back>
+Learner's answer (free text):
+<answer>
+${answer || "(empty)"}
+</answer>
+
+${gradeAnswerBlock(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, gradeAnswerSchema, ctx?.progress, { modelConfig });
+  const parsed = JSON.parse(text);
+  const rating = Math.min(4, Math.max(1, Math.round(Number(parsed?.rating)) || 2));
+  const feedback = typeof parsed?.feedback === "string" ? parsed.feedback.trim() : "";
+  return { rating, feedback };
+}
+
+const leechRewriteSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    cards: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          front: { type: "string" },
+          back: { type: "string" },
+          concept: { type: "string" },
+        },
+        required: ["front", "back", "concept"],
+      },
+    },
+  },
+  required: ["cards"],
+};
+
+export async function rewriteLeechCard({ topic, language, card, article, lapses, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const front = (card?.front || "").toString().trim();
+  const back = (card?.back || "").toString().trim();
+  if (!front || !back) throw new Error("card front/back required");
+  const prompt = `This flashcard from a course on "${topic}" keeps being forgotten
+(failed ${Number(lapses) || "many"} times) — it is a "leech".
+
+The card:
+<front>
+${front}
+</front>
+<back>
+${back}
+</back>
+
+The lesson it came from:
+<article>
+${(article || "").toString()}
+</article>
+
+${leechRewriteBlock(lang)}`;
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, leechRewriteSchema, ctx?.progress, { modelConfig });
+  const parsed = JSON.parse(text);
+  return { cards: normalizeFlashcards(parsed?.cards).slice(0, 3) };
 }
 
 // Minimal JSON extractor for Codex review (no schema — needs LLM image input
