@@ -25,6 +25,7 @@ import {
   categoryPedagogyBlock,
   normalizeCategory,
 } from "../lib/categories.mjs";
+import { flashcardRulesBlock } from "../lib/pedagogy.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
@@ -1944,7 +1945,17 @@ function normalizeFlashcards(raw) {
       const front = typeof c.front === "string" ? c.front.trim() : "";
       const back = typeof c.back === "string" ? c.back.trim() : "";
       if (!front || !back) return null;
-      return { front, back };
+      // Mechanical answer-leak guard: a front that contains the full back
+      // tests nothing.
+      if (back.length > 3 && front.toLowerCase().includes(back.toLowerCase())) return null;
+      const concept = typeof c.concept === "string" ? c.concept.trim() : "";
+      const section = typeof c.section === "string" ? c.section.trim() : "";
+      return {
+        front,
+        back,
+        ...(concept ? { concept } : {}),
+        ...(section ? { section } : {}),
+      };
     })
     .filter(Boolean)
     .slice(0, 14);
@@ -1972,18 +1983,12 @@ The ${source} the learner just studied:
 ${article}
 </article>
 
-Write 6-12 flashcards covering the load-bearing facts, definitions, and
-relationships from this ${source}. Each card:
-- "front": a single focused prompt (a question, a term, or a cloze with one blank);
-- "back": the concise correct answer (1-2 sentences, or the term's definition);
-- is ATOMIC — one idea per card; split compound facts into separate cards;
-- tests RECALL, not recognition (no multiple choice);
-- keep code/identifiers/numbers verbatim; written in language "${lang}".
+${flashcardRulesBlock(lang, source)}
 
 ${languageStyleGuide(lang)}
 
-Output ONLY a JSON object on a single line, no prose, no markdown fence:
-{"flashcards":[{"front":"...","back":"..."}]}`;
+Output ONLY a JSON object with the KEPT cards on a single line, no prose, no markdown fence:
+{"flashcards":[{"front":"...","back":"...","concept":"...","section":"..."}]}`;
   ctx?.progress?.({ label: "thinking" });
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);

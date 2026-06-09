@@ -27,6 +27,7 @@ import {
   normalizeCategory,
   CATEGORY_IDS,
 } from "../lib/categories.mjs";
+import { flashcardRulesBlock } from "../lib/pedagogy.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
 // instance per call when Brave MCP is needed so the key isn't held in
@@ -936,8 +937,10 @@ const flashcardSchema = {
         properties: {
           front: { type: "string" },
           back: { type: "string" },
+          concept: { type: "string" },
+          section: { type: "string" },
         },
-        required: ["front", "back"],
+        required: ["front", "back", "concept", "section"],
       },
     },
   },
@@ -952,7 +955,17 @@ function normalizeFlashcards(raw) {
       const front = typeof c.front === "string" ? c.front.trim() : "";
       const back = typeof c.back === "string" ? c.back.trim() : "";
       if (!front || !back) return null;
-      return { front, back };
+      // Mechanical answer-leak guard: a front that contains the full back
+      // tests nothing.
+      if (back.length > 3 && front.toLowerCase().includes(back.toLowerCase())) return null;
+      const concept = typeof c.concept === "string" ? c.concept.trim() : "";
+      const section = typeof c.section === "string" ? c.section.trim() : "";
+      return {
+        front,
+        back,
+        ...(concept ? { concept } : {}),
+        ...(section ? { section } : {}),
+      };
     })
     .filter(Boolean)
     .slice(0, 14);
@@ -980,12 +993,8 @@ The ${source} the learner just studied:
 ${article}
 </article>
 
-Write 6-12 flashcards covering the load-bearing facts, definitions, and
-relationships from this ${source}. Each card has a "front" (a single focused
-prompt — a question, term, or cloze with one blank) and a concise "back"
-(the answer, 1-2 sentences or a definition). Make them ATOMIC (one idea per
-card), test RECALL not recognition, keep code/identifiers/numbers verbatim,
-and write in language "${lang}".
+${flashcardRulesBlock(lang, source)}
+Output only the KEPT cards.
 
 ${languageStyleGuide(lang)}`;
   ctx?.progress?.({ label: "thinking" });

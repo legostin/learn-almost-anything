@@ -268,17 +268,44 @@ type View =
   | { kind: "spaces" }
   | { kind: "space"; id: string }
   | { kind: "course"; id: string }
-  | { kind: "review" }
+  | { kind: "review"; courseId?: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
 
-type DueReview = {
-  course_id: string;
-  module_id: string;
-  submodule_id: string;
-  course_title: string;
-  submodule_title: string;
-  due_at: number;
+// One FSRS card row (srs::CardRow, camelCase via serde).
+type SrsCard = {
+  id: string;
+  courseId: string;
+  moduleId: string;
+  submoduleId: string;
+  kind: string;
+  front: string;
+  back: string;
+  concept?: string | null;
+  anchor?: string | null;
+  state: number; // 0 New, 1 Learning, 2 Review, 3 Relearning
+  dueAt: number;
+  stability: number;
+  difficulty: number;
+  reps: number;
+  lapses: number;
+  lastReviewAt?: number | null;
+  suspended: boolean;
+  leech: boolean;
 };
+
+// Queue entry from get_due_cards: card fields flattened + context + previews.
+type DueCard = SrsCard & {
+  courseTitle: string;
+  submoduleTitle: string;
+  preview: { again: number; hard: number; good: number; easy: number };
+};
+
+type GradeOutcome = { card: SrsCard; becameLeech: boolean };
+
+/** Local-midnight offset the SRS daily budget math needs (seconds east of UTC). */
+function tzOffsetSecs(): number {
+  return -new Date().getTimezoneOffset() * 60;
+}
 
 type Space = {
   id: string;
@@ -894,7 +921,9 @@ function App() {
 
   const refreshReviewDue = useCallback(async () => {
     try {
-      const counts = await invoke<Record<string, number>>("due_review_counts");
+      const counts = await invoke<Record<string, number>>("due_card_counts", {
+        tzOffsetSecs: tzOffsetSecs(),
+      });
       setReviewDueTotal(Object.values(counts).reduce((a, b) => a + b, 0));
     } catch {
       setReviewDueTotal(0);
@@ -1459,8 +1488,12 @@ function App() {
           />
         )}
         {view.kind === "review" && (
-          <ReviewView
-            onClose={() => setView({ kind: "empty" })}
+          <ReviewSession
+            courseId={view.courseId ?? null}
+            onClose={() => {
+              refreshReviewDue();
+              setView({ kind: "empty" });
+            }}
             onGraded={refreshReviewDue}
           />
         )}
@@ -2181,7 +2214,9 @@ function CourseDashboard({
       if (cancelled) return;
       const map = new Map(entries);
       try {
-        const counts = await invoke<Record<string, number>>("due_review_counts");
+        const counts = await invoke<Record<string, number>>("due_card_counts", {
+          tzOffsetSecs: tzOffsetSecs(),
+        });
         for (const [cid, n] of Object.entries(counts)) {
           const p = map.get(cid);
           if (p) p.reviewDue = n;
@@ -9782,184 +9817,206 @@ function TestSection({
   );
 }
 
-// Spaced-repetition Review screen: steps through due submodule MCQ sets,
-// re-quizzes, and grades each via SM-2 (grade_review).
-function ReviewView({
+// ===== FSRS review session: flip cards, grade Again/Hard/Good/Easy =====
+
+/** "4 д." / "2 мес." — grade-button interval labels from a day count. */
+function fmtInterval(days: number, t: ReturnType<typeof useT>) {
+  if (days < 1) return t("gradeIntLessDay");
+  if (days < 30) return t("gradeIntDays", { count: Math.round(days) });
+  if (days < 365) return t("gradeIntMonths", { count: Math.round(days / 30.4) });
+  return t("gradeIntYears", { count: Math.round(days / 365) });
+}
+
+/** Shared by ReviewFlipCard and (later) in-lesson recall widgets. */
+function GradeButtons({
+  preview,
+  suggested,
+  disabled,
+  onGrade,
+}: {
+  preview: { again: number; hard: number; good: number; easy: number };
+  suggested?: number | null;
+  disabled?: boolean;
+  onGrade: (rating: 1 | 2 | 3 | 4) => void;
+}) {
+  const t = useT();
+  const buttons: { rating: 1 | 2 | 3 | 4; cls: string; label: string; days: number }[] = [
+    { rating: 1, cls: "again", label: t("gradeAgain"), days: preview.again },
+    { rating: 2, cls: "hard", label: t("gradeHard"), days: preview.hard },
+    { rating: 3, cls: "good", label: t("gradeGood"), days: preview.good },
+    { rating: 4, cls: "easy", label: t("gradeEasy"), days: preview.easy },
+  ];
+  return (
+    <div className="grade-row">
+      {buttons.map((b) => (
+        <button
+          key={b.rating}
+          className={`grade-btn grade-${b.cls}${suggested === b.rating ? " suggested" : ""}`}
+          disabled={disabled}
+          onClick={() => onGrade(b.rating)}
+        >
+          <span className="grade-label">{b.label}</span>
+          <span className="grade-interval">{fmtInterval(b.days, t)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReviewFlipCard({
+  card,
+  flipped,
+  onFlip,
+  onGrade,
+}: {
+  card: DueCard;
+  flipped: boolean;
+  onFlip: () => void;
+  onGrade: (rating: 1 | 2 | 3 | 4) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="review-flip">
+      <div className="review-flip-crumb">
+        {card.courseTitle} · {card.submoduleTitle}
+        {card.state === 0 && <span className="review-new-chip">{t("reviewNewBadge")}</span>}
+      </div>
+      <button
+        className={`flashcard review-flashcard${flipped ? " is-flipped" : ""}`}
+        onClick={onFlip}
+      >
+        <div className="flashcard-face">
+          <MathMarkdown>{flipped ? card.back : card.front}</MathMarkdown>
+        </div>
+        <div className="flashcard-hint">
+          {flipped ? t("reviewFlipHint") : t("flashcardsFlip")}
+        </div>
+      </button>
+      {flipped && <GradeButtons preview={card.preview} onGrade={onGrade} />}
+      {flipped && <div className="grade-safety">{t("gradeSafetyNote")}</div>}
+    </div>
+  );
+}
+
+function ReviewSession({
+  courseId,
   onClose,
   onGraded,
 }: {
+  courseId: string | null;
   onClose: () => void;
   onGraded: () => void | Promise<void>;
 }) {
   const t = useT();
-  const [due, setDue] = useState<DueReview[] | null>(null);
-  const [idx, setIdx] = useState(0);
+  const [queue, setQueue] = useState<DueCard[] | null>(null);
+  const [pos, setPos] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [ratings, setRatings] = useState<number[]>([]);
+  // Cards whose grade_card failed (offline, lock contention): retried once at
+  // session end; per-card modal errors would destroy the flow.
+  const failedGrades = useRef<{ cardId: string; rating: number }[]>([]);
 
   useEffect(() => {
-    invoke<DueReview[]>("get_due_reviews", { courseId: null })
-      .then((d) => setDue(d))
-      .catch(() => setDue([]));
-  }, []);
+    invoke<DueCard[]>("get_due_cards", {
+      courseId,
+      tzOffsetSecs: tzOffsetSecs(),
+      limit: 100,
+    })
+      .then((d) => setQueue(d))
+      .catch(() => setQueue([]));
+  }, [courseId]);
 
-  if (due === null) {
+  const grade = useCallback(
+    (card: DueCard, rating: 1 | 2 | 3 | 4) => {
+      // Optimistic: advance immediately, persist in the background.
+      setRatings((r) => [...r, rating]);
+      setFlipped(false);
+      setPos((p) => p + 1);
+      invoke<GradeOutcome>("grade_card", { cardId: card.id, rating }).catch(() => {
+        failedGrades.current.push({ cardId: card.id, rating });
+      });
+    },
+    []
+  );
+
+  // Keyboard: Space flips, 1-4 grades the flipped card.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!queue || pos >= queue.length) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.code === "Space") {
+        e.preventDefault();
+        setFlipped((f) => !f);
+      } else if (flipped && ["1", "2", "3", "4"].includes(e.key)) {
+        e.preventDefault();
+        grade(queue[pos], Number(e.key) as 1 | 2 | 3 | 4);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [queue, pos, flipped, grade]);
+
+  // Session over: flush failed grades once, then refresh the badge.
+  const finished = queue !== null && pos >= queue.length;
+  useEffect(() => {
+    if (!finished) return;
+    const failed = failedGrades.current.splice(0);
+    Promise.allSettled(
+      failed.map((f) => invoke("grade_card", { cardId: f.cardId, rating: f.rating }))
+    ).then(() => onGraded());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finished]);
+
+  if (queue === null) {
     return <div className="placeholder">{t("loadingStructure")}</div>;
   }
-  if (idx >= due.length) {
+  if (queue.length === 0) {
     return (
       <div className="review-done">
         <div className="review-done-icon">✓</div>
         <div className="review-done-title">{t("reviewAllDone")}</div>
+        <div className="review-done-sub">{t("reviewSessionEmpty")}</div>
         <button className="test-start" onClick={onClose}>
           {t("reviewBackHome")}
         </button>
       </div>
     );
   }
-  const item = due[idx];
-  return (
-    <ReviewCard
-      key={item.submodule_id}
-      item={item}
-      index={idx}
-      total={due.length}
-      onGraded={onGraded}
-      onNext={() => setIdx((i) => i + 1)}
-    />
-  );
-}
-
-function ReviewCard({
-  item,
-  index,
-  total,
-  onGraded,
-  onNext,
-}: {
-  item: DueReview;
-  index: number;
-  total: number;
-  onGraded: () => void | Promise<void>;
-  onNext: () => void;
-}) {
-  const t = useT();
-  const [questions, setQuestions] = useState<TestQuestion[] | null>(null);
-  const [answers, setAnswers] = useState<(number | null)[]>([]);
-  const [submitted, setSubmitted] = useState(false);
-
-  useEffect(() => {
-    invoke<SubmoduleContent>("read_submodule_article", {
-      courseId: item.course_id,
-      moduleId: item.module_id,
-      submoduleId: item.submodule_id,
-    })
-      .then((c) => {
-        const pool = ((c.test as TestQuestion[]) ?? []).filter(
-          (q) => q && Array.isArray(q.options) && q.options.length > 0
-        );
-        const qs = sampleQuestions(pool, TEST_QUESTIONS_PER_ATTEMPT);
-        setQuestions(qs);
-        setAnswers(qs.map(() => null));
-        // No test to re-quiz — deschedule so it doesn't stay due forever.
-        if (pool.length === 0) {
-          invoke("grade_review", { submoduleId: item.submodule_id, ratio: 1 })
-            .then(() => onGraded())
-            .catch(() => {});
-        }
-      })
-      .catch(() => setQuestions([]));
-  }, [item.submodule_id, item.course_id, item.module_id]);
-
-  if (questions === null) {
-    return <div className="placeholder">{t("loadingStructure")}</div>;
-  }
-
-  const correctCount = questions.reduce(
-    (n, q, i) => (answers[i] === q.correct ? n + 1 : n),
-    0
-  );
-  const ratio = questions.length > 0 ? correctCount / questions.length : 1;
-  const allAnswered = answers.every((a) => a !== null);
-  const passed = ratio >= TEST_PASS_THRESHOLD;
-
-  async function check() {
-    setSubmitted(true);
-    try {
-      await invoke("grade_review", { submoduleId: item.submodule_id, ratio });
-    } catch {
-      /* ignore */
-    }
-    await onGraded();
-  }
-
-  return (
-    <section className="review-card test">
-      <div className="review-progress">
-        {t("reviewProgress", { current: index + 1, total })}
+  if (finished) {
+    const counts = [1, 2, 3, 4].map((r) => ratings.filter((x) => x === r).length);
+    return (
+      <div className="review-done">
+        <div className="review-done-icon">🎉</div>
+        <div className="review-done-title">{t("reviewSessionSummaryTitle")}</div>
+        <div className="review-done-sub">
+          {t("reviewSessionSummaryCards", { count: ratings.length })}
+        </div>
+        <div className="review-summary-grades">
+          <span className="sum-again">{t("gradeAgain")}: {counts[0]}</span>
+          <span className="sum-hard">{t("gradeHard")}: {counts[1]}</span>
+          <span className="sum-good">{t("gradeGood")}: {counts[2]}</span>
+          <span className="sum-easy">{t("gradeEasy")}: {counts[3]}</span>
+        </div>
+        <button className="test-start" onClick={onClose}>
+          {t("reviewBackHome")}
+        </button>
       </div>
-      <h3 className="test-title">
-        {item.course_title} · {item.submodule_title}
-      </h3>
-      {questions.length === 0 ? (
-        <>
-          <div className="review-empty">{t("reviewNoTest")}</div>
-          <button className="test-start" onClick={onNext}>
-            {t("reviewNext")} →
-          </button>
-        </>
-      ) : (
-        <>
-          <ol className="test-questions">
-            {questions.map((q, i) => (
-              <li key={i} className="test-q">
-                <div className="test-q-text">{q.text}</div>
-                <div className="test-options">
-                  {q.options.map((opt, j) => {
-                    const chosen = answers[i] === j;
-                    let cls = "test-option";
-                    if (submitted) {
-                      if (j === q.correct) cls += " correct";
-                      else if (chosen) cls += " wrong";
-                    } else if (chosen) {
-                      cls += " chosen";
-                    }
-                    return (
-                      <label key={j} className={cls}>
-                        <input
-                          type="radio"
-                          name={`rev-${item.submodule_id}-${i}`}
-                          checked={chosen}
-                          disabled={submitted}
-                          onChange={() =>
-                            setAnswers((prev) => prev.map((a, k) => (k === i ? j : a)))
-                          }
-                        />
-                        <span>{opt}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-                {submitted && q.explanation && (
-                  <div className="test-explanation">{q.explanation}</div>
-                )}
-              </li>
-            ))}
-          </ol>
-          {!submitted ? (
-            <button className="test-start" onClick={check} disabled={!allAnswered}>
-              {t("testSubmit")}
-            </button>
-          ) : (
-            <div className={`test-result ${passed ? "pass" : "fail"}`}>
-              <div className="test-result-score">
-                {t("testScore", { correct: correctCount, total: questions.length })}
-              </div>
-              <button className="test-start" onClick={onNext}>
-                {t("reviewNext")} →
-              </button>
-            </div>
-          )}
-        </>
-      )}
+    );
+  }
+  const card = queue[pos];
+  return (
+    <section className="review-session">
+      <div className="review-progress">
+        {t("reviewProgress", { current: pos + 1, total: queue.length })}
+      </div>
+      <ReviewFlipCard
+        key={card.id}
+        card={card}
+        flipped={flipped}
+        onFlip={() => setFlipped((f) => !f)}
+        onGrade={(r) => grade(card, r)}
+      />
     </section>
   );
 }

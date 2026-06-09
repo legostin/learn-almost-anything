@@ -3305,6 +3305,96 @@ button {
   font-size: 18px;
   font-weight: 600;
 }
+.review-done-sub {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+/* FSRS card session */
+.review-session {
+  max-width: 640px;
+  margin: 32px auto;
+}
+.review-flip-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.review-new-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.review-flashcard {
+  min-height: 220px;
+}
+.review-flashcard .flashcard-face {
+  white-space: normal;
+  text-align: left;
+}
+.grade-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 16px;
+}
+.grade-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.grade-btn:hover {
+  border-color: var(--accent);
+}
+.grade-btn.suggested {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.grade-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.grade-interval {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.grade-again .grade-label {
+  color: var(--status-failed-fg, #b91c1c);
+}
+.grade-hard .grade-label {
+  color: var(--status-pending-fg, #b45309);
+}
+.grade-good .grade-label {
+  color: var(--accent);
+}
+.grade-easy .grade-label {
+  color: var(--status-ready-fg, #15803d);
+}
+.grade-safety {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.review-summary-grades {
+  display: flex;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
 .test-header {
   display: flex;
   align-items: center;
