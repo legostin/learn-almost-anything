@@ -1478,9 +1478,21 @@ This course is built inside a SPACE. Form the BASE of the course from the materi
     out += `\nLocal directories you can READ and explore with your file tools (list, open, grep) — live source material such as a codebase. Read what you need to ground the course in the ACTUAL files; do not invent file contents:\n`;
     out += dirs.map((d) => `- ${d}`).join("\n") + "\n";
   }
-  if (docs.length) {
+  const inlineDocs = docs.filter((d) => !d.file);
+  const refDocs = docs.filter((d) => d.file);
+  if (refDocs.length) {
+    out += `\nLarge source documents — provided as FILES in the attached read-only directory (their converted-markdown folder is the first local directory listed above). READ them with your file tools (Read/Grep) while you work; the excerpt is only a hint of what's inside. Do NOT limit yourself to the excerpts${strict ? " — for this strict course these files ARE the mandatory base material" : ""}:\n`;
+    out +=
+      refDocs
+        .map(
+          (d) =>
+            `- [${d.kind || "document"}] "${String(d.title || "").replace(/"/g, "'")}" — file ${d.file} (${d.chars} chars), starts: ${String(d.excerpt || "").replace(/\s+/g, " ").trim()}…`
+        )
+        .join("\n") + "\n";
+  }
+  if (inlineDocs.length) {
     out += `\nSource documents (the authoritative material for this course):\n`;
-    out += docs
+    out += inlineDocs
       .map(
         (d, i) =>
           `\n<source ${i + 1} title="${String(d.title || "").replace(/"/g, "'")}" kind="${d.kind || "document"}">\n${d.content || ""}\n</source>`

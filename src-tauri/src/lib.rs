@@ -5790,12 +5790,17 @@ fn document_to_markdown_once(input: &std::path::Path) -> Result<String, String> 
     ))
 }
 
-const SPACE_DOC_CHAR_CAP: usize = 24_000;
+/// Documents up to this size are inlined into the prompt; larger ones become
+/// FILE REFERENCES (the agent reads them via Read/Grep from the sources dir).
+const SPACE_DOC_INLINE_CAP: usize = 6_000;
+/// Excerpt length for referenced (non-inlined) documents.
+const SPACE_DOC_EXCERPT: usize = 600;
 
 /// Build the grounding context for a space-scoped course: converted-markdown
 /// documents/tables (`spaceSources`) and site/repo links (`spaceLinks`), shaped
-/// for the sidecar prompt. Returns empty vecs when the space has no usable
-/// content. Each document is capped so one huge PDF can't blow the context.
+/// for the sidecar prompt. Small documents are inlined; large ones are passed
+/// as file references (no truncation — the converted-markdown directory is
+/// granted to the agent read-only as the FIRST entry of `dirs`).
 fn space_context(
     paths: &AppPaths,
     conn: &rusqlite::Connection,
@@ -5808,9 +5813,14 @@ fn space_context(
         return (docs, links, dirs);
     };
     let dir = paths.space_sources_dir(space_id);
+    let mut has_referenced_doc = false;
     for s in sources {
+        // A disabled source stays in the space but is invisible to generation.
+        if !s.enabled {
+            continue;
+        }
         match s.kind.as_str() {
-            "site" | "repo" => {
+            "repo" => {
                 links.push(json!({ "kind": s.kind, "title": s.title, "url": s.r#ref }));
             }
             // A live directory on disk the agent may read/explore directly.
@@ -5820,20 +5830,38 @@ fn space_context(
                 }
             }
             _ => {
+                // site links are listed as links AND, when a snapshot exists,
+                // their markdown joins the docs like any document.
+                if s.kind == "site" {
+                    links.push(json!({ "kind": s.kind, "title": s.title, "url": s.r#ref }));
+                }
                 let Some(md) = s.md_path else { continue };
-                let Ok(mut content) = std::fs::read_to_string(dir.join(md)) else {
+                let Ok(content) = std::fs::read_to_string(dir.join(&md)) else {
                     continue;
                 };
                 if content.trim().is_empty() {
                     continue;
                 }
-                if content.len() > SPACE_DOC_CHAR_CAP {
-                    content.truncate(SPACE_DOC_CHAR_CAP);
-                    content.push_str("\n\n…[обрезано]");
+                if content.len() <= SPACE_DOC_INLINE_CAP {
+                    docs.push(json!({ "title": s.title, "kind": s.kind, "content": content }));
+                } else {
+                    let excerpt: String = content.chars().take(SPACE_DOC_EXCERPT).collect();
+                    docs.push(json!({
+                        "title": s.title,
+                        "kind": s.kind,
+                        "file": md,
+                        "chars": content.len(),
+                        "excerpt": excerpt,
+                    }));
+                    has_referenced_doc = true;
                 }
-                docs.push(json!({ "title": s.title, "kind": s.kind, "content": content }));
             }
         }
+    }
+    // Grant the converted-markdown directory itself when any doc is referenced
+    // by file — FIRST, so it is codex's working directory too.
+    if has_referenced_doc {
+        dirs.insert(0, dir.to_string_lossy().to_string());
     }
     (docs, links, dirs)
 }
@@ -6077,6 +6105,7 @@ fn list_space_sources(
 #[tauri::command]
 fn add_space_link(
     db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
     space_id: String,
     url: String,
     title: Option<String>,
@@ -6087,19 +6116,101 @@ fn add_space_link(
         return Err("ссылка обязательна".into());
     }
     let kind = if kind == "repo" { "repo" } else { "site" };
-    let title = title
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| url.clone());
+    let user_title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let title = user_title.clone().unwrap_or_else(|| url.clone());
     let id = Uuid::new_v4().to_string();
     let now = now_unix_secs()?;
-    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    db::insert_space_source(&conn, &id, &space_id, kind, &title, &url, "ready", None, now)
+    // Sites get a markdown SNAPSHOT (fetched + converted in the background) so
+    // strict courses can actually read the linked material and the source
+    // survives the page dying. Repos stay URL-only (too big to snapshot).
+    let initial_status = if kind == "site" { "converting" } else { "ready" };
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::insert_space_source(
+            &conn, &id, &space_id, kind, &title, &url, initial_status, None, now,
+        )
         .map_err(|e| e.to_string())?;
-    let _ = db::touch_space(&conn, &space_id, now);
+        let _ = db::touch_space(&conn, &space_id, now);
+    }
+    if kind == "site" {
+        let db = db_state.inner().clone();
+        let paths = paths_state.inner().clone();
+        let (sid, src_id, url2) = (space_id.clone(), id.clone(), url.clone());
+        let auto_title = user_title.is_none();
+        thread::spawn(move || {
+            let dir = paths.space_sources_dir(&sid);
+            let result = fetch_link_snapshot(&url2, &dir, &src_id);
+            let Ok(conn) = db.0.lock() else { return };
+            match result {
+                Ok((md_name, page_title)) => {
+                    let _ =
+                        db::set_space_source_status(&conn, &src_id, "ready", Some(&md_name), None);
+                    if auto_title {
+                        if let Some(t) = page_title {
+                            let _ = conn.execute(
+                                "UPDATE space_sources SET title = ?2 WHERE id = ?1",
+                                rusqlite::params![src_id, t],
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // The URL itself stays usable as a link; only the snapshot failed.
+                    let _ = db::set_space_source_status(&conn, &src_id, "failed", None, Some(&e));
+                }
+            }
+        });
+    }
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
     db::get_space_source(&conn, &id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "source not found after insert".to_string())
+}
+
+/// Fetch a web page and store it as a markdown snapshot ({id}.md in `dir`).
+/// Returns the md file name and the page <title> (for auto-naming).
+fn fetch_link_snapshot(
+    url: &str,
+    dir: &std::path::Path,
+    id: &str,
+) -> Result<(String, Option<String>), String> {
+    use std::io::Read;
+    let resp = ureq::get(url)
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) learn-anything/0.1",
+        )
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let mut body = String::new();
+    resp.into_reader()
+        .take(2_000_000)
+        .read_to_string(&mut body)
+        .map_err(|e| e.to_string())?;
+    if body.trim().is_empty() {
+        return Err("страница пустая".into());
+    }
+    let page_title = body
+        .get(..body.len().min(8_192))
+        .and_then(|head| {
+            let lower = head.to_lowercase();
+            let start = lower.find("<title")?;
+            let open_end = head[start..].find('>')? + start + 1;
+            let close = lower[open_end..].find("</title")? + open_end;
+            Some(head[open_end..close].trim().to_string())
+        })
+        .filter(|t| !t.is_empty());
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let html_path = dir.join(format!("{id}.html"));
+    std::fs::write(&html_path, &body).map_err(|e| e.to_string())?;
+    let md = document_to_markdown(&html_path)?;
+    if md.trim().is_empty() {
+        return Err("после конвертации страница пуста".into());
+    }
+    let md_name = format!("{id}.md");
+    std::fs::write(dir.join(&md_name), md).map_err(|e| e.to_string())?;
+    Ok((md_name, page_title))
 }
 
 /// Add a local document/image/table. Documents and tables are converted to
@@ -6219,6 +6330,87 @@ fn add_space_directory(
 }
 
 #[tauri::command]
+fn set_space_source_enabled(
+    db_state: tauri::State<'_, Arc<Db>>,
+    source_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::set_space_source_enabled(&conn, &source_id, enabled).map_err(|e| e.to_string())
+}
+
+/// Re-run a source's conversion: documents re-convert from the stored original
+/// file; site links re-fetch their snapshot. Directories/repos are a no-op.
+#[tauri::command]
+async fn refresh_space_source(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    source_id: String,
+) -> Result<db::SpaceSource, String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<db::SpaceSource, String> {
+        let src = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let src = db::get_space_source(&conn, &source_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "источник не найден".to_string())?;
+            if matches!(src.kind.as_str(), "directory" | "repo") {
+                return Ok(src); // nothing to refresh
+            }
+            db::set_space_source_status(&conn, &source_id, "converting", None, None)
+                .map_err(|e| e.to_string())?;
+            src
+        };
+        let dir = paths.space_sources_dir(&src.space_id);
+        let (status, md_path, error): (&str, Option<String>, Option<String>) =
+            if src.kind == "site" {
+                match fetch_link_snapshot(&src.r#ref, &dir, &src.id) {
+                    Ok((md_name, _)) => ("ready", Some(md_name), None),
+                    Err(e) => ("failed", None, Some(e)),
+                }
+            } else {
+                // Find the stored original ({id}.{ext}, not the .md output).
+                let original = std::fs::read_dir(&dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| {
+                        p.file_stem().and_then(|s| s.to_str()) == Some(src.id.as_str())
+                            && p.extension().and_then(|e| e.to_str()) != Some("md")
+                    });
+                match original {
+                    Some(orig) => match document_to_markdown(&orig) {
+                        Ok(md) => {
+                            let md_name = format!("{}.md", src.id);
+                            match std::fs::write(dir.join(&md_name), md) {
+                                Ok(()) => ("ready", Some(md_name), None),
+                                Err(e) => ("failed", None, Some(e.to_string())),
+                            }
+                        }
+                        Err(e) => ("failed", None, Some(e)),
+                    },
+                    None => (
+                        "failed",
+                        None,
+                        Some("исходный файл не найден — удалите источник и добавьте заново".into()),
+                    ),
+                }
+            };
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        db::set_space_source_status(&conn, &source_id, status, md_path.as_deref(), error.as_deref())
+            .map_err(|e| e.to_string())?;
+        db::get_space_source(&conn, &source_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "источник не найден".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn remove_space_source(
     db_state: tauri::State<'_, Arc<Db>>,
     paths_state: tauri::State<'_, Arc<AppPaths>>,
@@ -6237,6 +6429,64 @@ fn remove_space_source(
         }
     }
     db::delete_space_source(&conn, &source_id).map_err(|e| e.to_string())
+}
+
+/// Ask the knowledge base of a space directly (no course): reuses the course
+/// assistant with the space context as the only grounding. Off-thread (LLM).
+#[tauri::command]
+async fn ask_space_assistant(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    space_id: String,
+    question: String,
+    history: Vec<serde_json::Value>,
+    language: Option<String>,
+) -> Result<String, String> {
+    let q = question.trim().to_string();
+    if q.is_empty() {
+        return Err("вопрос пуст".into());
+    }
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let (space, docs, links, dirs) = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let space = db::get_space(&conn, &space_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "пространство не найдено".to_string())?;
+            let (docs, links, dirs) = space_context(&paths, &conn, &space_id);
+            (space, docs, links, dirs)
+        };
+        let backend = if cli_present("claude") { "claude" } else { "codex" };
+        let model = settings.stage_model(backend, "assistant");
+        let params = json!({
+            "backend": backend,
+            "language": language.unwrap_or_default(),
+            "topic": space.name,
+            "structure": json!({}),
+            "article": serde_json::Value::Null,
+            "fragment": serde_json::Value::Null,
+            "imagePath": serde_json::Value::Null,
+            "widget": serde_json::Value::Null,
+            "question": q,
+            "history": history,
+            "spaceSources": docs,
+            "spaceLinks": links,
+            "spaceDirs": dirs,
+            "spaceStrict": space.strict,
+            "modelConfig": model,
+        });
+        let v = sidecar
+            .call("course_assistant", params, Duration::from_secs(600))
+            .map_err(|e| e.to_string())?;
+        Ok(v.get("answer").and_then(|x| x.as_str()).unwrap_or("").to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -6649,6 +6899,9 @@ pub fn run() {
             add_space_document,
             add_space_directory,
             remove_space_source,
+            set_space_source_enabled,
+            refresh_space_source,
+            ask_space_assistant,
             read_space_source_md,
             markitdown_status,
             install_markitdown

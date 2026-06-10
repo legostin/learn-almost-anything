@@ -334,6 +334,7 @@ type SpaceSource = {
   md_path?: string | null;
   error?: string | null;
   created_at: number;
+  enabled: boolean;
 };
 
 type StageName = "draft" | "annotate" | "illustrate" | "test";
@@ -1523,7 +1524,13 @@ function App() {
           <SpacesView onOpenSpace={(id) => setView({ kind: "space", id })} />
         )}
         {view.kind === "space" && (
-          <SpaceView spaceId={view.id} onBack={() => setView({ kind: "spaces" })} />
+          <SpaceView
+            spaceId={view.id}
+            courses={courses.filter((c) => c.space_id === view.id)}
+            onBack={() => setView({ kind: "spaces" })}
+            onOpenCourse={openCourse}
+            onCreateCourse={() => setView({ kind: "creating", spaceId: view.id })}
+          />
         )}
         {view.kind === "course" && (
           <CourseView
@@ -3720,12 +3727,19 @@ const SOURCE_KIND_ICON: Record<string, string> = {
 
 function SpaceView({
   spaceId,
+  courses,
   onBack,
+  onOpenCourse,
+  onCreateCourse,
 }: {
   spaceId: string;
+  courses: Course[];
   onBack: () => void;
+  onOpenCourse: (id: string) => void;
+  onCreateCourse: () => void;
 }) {
   const t = useT();
+  const [uiLang] = useLang();
   const [space, setSpace] = useState<Space | null>(null);
   const [sources, setSources] = useState<SpaceSource[]>([]);
   const [linkUrl, setLinkUrl] = useState("");
@@ -3733,6 +3747,13 @@ function SpaceView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [preview, setPreview] = useState<{ title: string; md: string } | null>(null);
+  const [refreshing, setRefreshing] = useState<Set<string>>(() => new Set());
+  // Space chat (ask the knowledge base without a course).
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMsgs, setChatMsgs] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
   const [converter, setConverter] = useState<{
     available: boolean;
     full: boolean;
@@ -3870,6 +3891,63 @@ function SpaceView({
     }
   }
 
+  async function toggleSource(s: SpaceSource) {
+    try {
+      await invoke("set_space_source_enabled", { sourceId: s.id, enabled: !s.enabled });
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function refreshSource(id: string) {
+    setRefreshing((prev) => new Set(prev).add(id));
+    try {
+      await invoke("refresh_space_source", { sourceId: id });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRefreshing((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      await reload();
+    }
+  }
+
+  async function openPreview(s: SpaceSource) {
+    if (!s.md_path) return;
+    try {
+      const md = await invoke<string>("read_space_source_md", { sourceId: s.id });
+      setPreview({ title: s.title, md });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function sendChat() {
+    const q = chatInput.trim();
+    if (!q || chatBusy) return;
+    const history = chatMsgs.map((m) => ({ role: m.role, text: m.text }));
+    setChatMsgs((prev) => [...prev, { role: "user", text: q }]);
+    setChatInput("");
+    setChatBusy(true);
+    try {
+      const answer = await invoke<string>("ask_space_assistant", {
+        spaceId,
+        question: q,
+        history,
+        language: uiLang,
+      });
+      setChatMsgs((prev) => [...prev, { role: "assistant", text: answer || "…" }]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
   async function deleteSpace() {
     try {
       await invoke("delete_space", { spaceId });
@@ -3954,20 +4032,55 @@ function SpaceView({
       ) : (
         <ul className="source-list">
           {sources.map((s) => (
-            <li key={s.id} className={`source-item status-${s.status}`}>
+            <li
+              key={s.id}
+              className={`source-item status-${s.status}${s.enabled ? "" : " source-disabled"}`}
+            >
               <span className="source-icon">{SOURCE_KIND_ICON[s.kind] ?? "📄"}</span>
               <div className="source-body">
-                <div className="source-title">{s.title}</div>
+                {s.md_path ? (
+                  <button className="source-title source-title-link" onClick={() => openPreview(s)}>
+                    {s.title}
+                  </button>
+                ) : (
+                  <div className="source-title">{s.title}</div>
+                )}
                 {(s.kind === "site" || s.kind === "repo" || s.kind === "directory") && (
                   <div className="source-ref">{s.ref}</div>
                 )}
                 {s.status === "failed" && s.error && (
                   <div className="source-error">{s.error}</div>
                 )}
-                {s.status === "converting" && (
+                {(s.status === "converting" || refreshing.has(s.id)) && (
                   <div className="source-ref">{t("spaceConverting")}</div>
                 )}
               </div>
+              {s.status === "failed" && (
+                <button
+                  className="source-action"
+                  disabled={refreshing.has(s.id)}
+                  onClick={() => refreshSource(s.id)}
+                >
+                  {t("spaceSrcRetry")}
+                </button>
+              )}
+              {s.status === "ready" && (s.kind === "site" || s.md_path) && (
+                <button
+                  className="source-action"
+                  title={t("spaceSrcRefresh")}
+                  disabled={refreshing.has(s.id)}
+                  onClick={() => refreshSource(s.id)}
+                >
+                  🔄
+                </button>
+              )}
+              <button
+                className="source-action"
+                title={s.enabled ? t("spaceSrcDisable") : t("spaceSrcEnable")}
+                onClick={() => toggleSource(s)}
+              >
+                {s.enabled ? "👁" : "🚫"}
+              </button>
               <button
                 className="source-remove"
                 onClick={() => removeSource(s.id)}
@@ -3978,6 +4091,97 @@ function SpaceView({
             </li>
           ))}
         </ul>
+      )}
+
+      <div className="space-chat">
+        <button className="space-chat-toggle" onClick={() => setChatOpen((v) => !v)}>
+          💬 {t("spaceChatTitle")}
+        </button>
+        {chatOpen && (
+          <div className="space-chat-panel">
+            {chatMsgs.length === 0 && (
+              <div className="setting-note">{t("spaceChatHint")}</div>
+            )}
+            {chatMsgs.map((m, i) => (
+              <div key={i} className={`space-chat-msg ${m.role}`}>
+                <MathMarkdown>{m.text}</MathMarkdown>
+              </div>
+            ))}
+            {chatBusy && <div className="setting-note">{t("aiBusyShort")}</div>}
+            <div className="space-chat-input">
+              <textarea
+                rows={2}
+                value={chatInput}
+                placeholder={t("spaceChatPlaceholder")}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    sendChat();
+                  }
+                }}
+              />
+              <button disabled={chatBusy || !chatInput.trim()} onClick={sendChat}>
+                ↑
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="space-courses">
+        <div className="space-courses-head">
+          <h3>{t("spaceCoursesTitle")}</h3>
+          <button className="meta-action" onClick={onCreateCourse}>
+            ＋ {t("spaceCoursesCreate")}
+          </button>
+        </div>
+        {courses.length === 0 ? (
+          <div className="setting-note">{t("spaceCoursesEmpty")}</div>
+        ) : (
+          <>
+            {(() => {
+              const newestSource = Math.max(0, ...sources.map((s) => s.created_at));
+              const stale = courses.some(
+                (c) => c.status === "ready" && newestSource > c.updated_at
+              );
+              return stale ? (
+                <div className="space-stale-hint">{t("spaceCoursesStale")}</div>
+              ) : null;
+            })()}
+            <ul className="space-course-list">
+              {courses.map((c) => (
+                <li key={c.id}>
+                  <button className="space-course-item" onClick={() => onOpenCourse(c.id)}>
+                    <span className="space-course-title">
+                      {c.title || c.topic}
+                    </span>
+                    <span className="space-course-status">{c.status}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+
+      {preview && (
+        <div className="modal-backdrop" onClick={() => setPreview(null)}>
+          <div
+            className="modal space-preview-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h2>{preview.title}</h2>
+            <div className="space-preview-body reader">
+              <MathMarkdown>{preview.md}</MathMarkdown>
+            </div>
+            <div className="modal-actions">
+              <button onClick={() => setPreview(null)}>{t("cancel")}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="course-danger-zone">

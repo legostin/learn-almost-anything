@@ -871,6 +871,8 @@ pub struct SpaceSource {
     pub md_path: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
+    /// Disabled sources stay in the space but are excluded from generation.
+    pub enabled: bool,
 }
 
 const SPACE_SELECT: &str = "SELECT s.id, s.name, s.description, s.created_at, s.updated_at, \
@@ -944,7 +946,7 @@ pub fn delete_space(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> 
 }
 
 const SOURCE_COLS: &str =
-    "id, space_id, kind, title, ref, status, md_path, error, created_at";
+    "id, space_id, kind, title, ref, status, md_path, error, created_at, enabled";
 
 fn row_to_source(r: &rusqlite::Row) -> rusqlite::Result<SpaceSource> {
     Ok(SpaceSource {
@@ -957,6 +959,7 @@ fn row_to_source(r: &rusqlite::Row) -> rusqlite::Result<SpaceSource> {
         md_path: r.get(6)?,
         error: r.get(7)?,
         created_at: r.get(8)?,
+        enabled: r.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -1013,6 +1016,18 @@ pub fn set_space_source_status(
     conn.execute(
         "UPDATE space_sources SET status = ?2, md_path = ?3, error = ?4 WHERE id = ?1",
         rusqlite::params![id, status, md_path, error],
+    )?;
+    Ok(())
+}
+
+pub fn set_space_source_enabled(
+    conn: &Connection,
+    id: &str,
+    enabled: bool,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE space_sources SET enabled = ?2 WHERE id = ?1",
+        rusqlite::params![id, enabled as i64],
     )?;
     Ok(())
 }
