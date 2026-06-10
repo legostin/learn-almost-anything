@@ -75,6 +75,7 @@ const methods = {
   rewrite_leech_card: async (params, ctx) => pickAgent(params).rewriteLeechCard(params, ctx),
   extract_learner_profile: async (params, ctx) => pickAgent(params).extractLearnerProfile(params, ctx),
   generate_diagnostic: async (params, ctx) => pickAgent(params).generateDiagnostic(params, ctx),
+  verify_facts: async (params, ctx) => pickAgent(params).verifyFacts(params, ctx),
   fix_widget: async (params, ctx) => pickAgent(params).fixWidget(params, ctx),
   extend_article: async (params, ctx) => pickAgent(params).extendArticle(params, ctx),
   edit_text: async (params, ctx) => pickAgent(params).editText(params, ctx),

@@ -137,8 +137,15 @@ pub struct TierPreset {
 
 /// Categories where accuracy matters most — the cheap-tier safety floor forbids
 /// dropping web research below "normal" here regardless of tier.
+/// (Distinct from FACT_CHECK_ALWAYS_CATEGORIES, which gates the post-ready
+/// verification pass.)
 pub const ACCURACY_CRITICAL_CATEGORIES: &[&str] =
     &["science_math", "health", "business"];
+
+/// Categories that ALWAYS get the background fact-check pass, regardless of
+/// tier. data_ai is included: version/benchmark claims rot fastest.
+pub const FACT_CHECK_ALWAYS_CATEGORIES: &[&str] =
+    &["science_math", "health", "business", "data_ai"];
 
 pub fn normalize_gen_tier(value: Option<&str>) -> &'static str {
     match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
@@ -222,6 +229,15 @@ impl GenerationProfile {
             "deep" => 16,
             _ => 10,
         }
+    }
+
+    /// Whether this lesson gets the background fact-check pass: always for
+    /// accuracy-critical categories, otherwise on every tier except "quick".
+    pub fn should_fact_check(&self, category: Option<&str>) -> bool {
+        let critical = category
+            .map(|c| FACT_CHECK_ALWAYS_CATEGORIES.contains(&c))
+            .unwrap_or(false);
+        critical || self.tier() != "quick"
     }
 
     /// Draft-stage research budget: halved when a course research pack exists —

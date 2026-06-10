@@ -1413,7 +1413,105 @@ fn spawn_generate_submodule(
         {
             eprintln!("[generate_submodule] write assignments (non-fatal): {e}");
         }
+        // Background fact-check: the lesson is already readable; the article
+        // quietly self-corrects. Gated by category+tier; soft-fail throughout.
+        if profile.should_fact_check(course.category.as_deref()) {
+            let fc_started = Instant::now();
+            emit_stage_event(&app2, &cid, &sid, "fact_check");
+            // Re-read from disk: illustrate + recall embedding rewrote the
+            // article after the draft.
+            match courses::read_submodule_content(&paths, &cid, &mid, &sid) {
+                Ok(current) => {
+                    let fc_params = json!({
+                        "backend": course.agent,
+                        "topic": course.topic,
+                        "language": course.language,
+                        "category": course.category,
+                        "article": current.article,
+                        "sources": current.sources,
+                        "modelConfig": tests_model,
+                    });
+                    let cb = {
+                        let app3 = app2.clone();
+                        let cid3 = cid.clone();
+                        let sid3 = sid.clone();
+                        move |p: sidecar::ProgressPayload| {
+                            emit_progress_event(
+                                &app3,
+                                &cid3,
+                                &sid3,
+                                "fact_check",
+                                &p.label,
+                                p.detail.as_deref(),
+                            );
+                        }
+                    };
+                    match sidecar.call_with_progress(
+                        "verify_facts",
+                        fc_params,
+                        Duration::from_secs(600),
+                        cb,
+                    ) {
+                        Ok(v) => {
+                            let claims = v.get("claims").cloned().unwrap_or_else(|| json!([]));
+                            let patches: Vec<Value> = v
+                                .get("patches")
+                                .and_then(|p| p.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut article = current.article.clone();
+                            let mut applied = 0u32;
+                            let mut outcomes: Vec<Value> = Vec::new();
+                            for p in &patches {
+                                let find = p.get("find").and_then(|x| x.as_str()).unwrap_or("");
+                                let replace =
+                                    p.get("replace").and_then(|x| x.as_str()).unwrap_or("");
+                                // Exact-substring guard: a paraphrased `find`
+                                // simply skips — never corrupts the article.
+                                let ok = !find.is_empty()
+                                    && !replace.is_empty()
+                                    && find != replace
+                                    && article.contains(find);
+                                if ok {
+                                    article = article.replacen(find, replace, 1);
+                                    applied += 1;
+                                }
+                                outcomes.push(json!({ "find": find, "applied": ok }));
+                            }
+                            if applied > 0 {
+                                if let Err(e) = courses::write_submodule_article(
+                                    &paths, &cid, &mid, &sid, &article,
+                                ) {
+                                    eprintln!(
+                                        "[generate_submodule] fact-check write (non-fatal): {e}"
+                                    );
+                                }
+                            }
+                            let report = json!({
+                                "checkedAt": now_unix_secs().unwrap_or(0),
+                                "claims": claims,
+                                "patches": outcomes,
+                                "applied": applied,
+                            });
+                            if let Err(e) = courses::write_submodule_fact_check(
+                                &paths, &cid, &mid, &sid, &report,
+                            ) {
+                                eprintln!(
+                                    "[generate_submodule] fact-check report (non-fatal): {e}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[generate_submodule] fact check failed (soft): {e}")
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[generate_submodule] fact check read (soft): {e}"),
+            }
+            log_timing(&app2, &cid, &sid, "fact_check", fc_started);
+        }
         // Mechanical source check: mark dead URLs so the reader can flag them.
+        // Runs after the fact-check so freshly cited URLs are covered too.
         if let Err(e) = validate_submodule_sources(&paths, &cid, &mid, &sid) {
             eprintln!("[generate_submodule] validate sources (non-fatal): {e}");
         }

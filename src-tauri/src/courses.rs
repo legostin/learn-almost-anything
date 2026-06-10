@@ -876,6 +876,22 @@ pub fn write_submodule_assignments(
     Ok(())
 }
 
+/// Persist the fact-check report (claims, verdicts, patch outcomes) next to
+/// review_notes.md.
+pub fn write_submodule_fact_check(
+    paths: &AppPaths,
+    course_id: &str,
+    mod_id: &str,
+    sub_id: &str,
+    report: &serde_json::Value,
+) -> Result<(), CourseError> {
+    let dir = submodule_dir(paths, course_id, mod_id, sub_id);
+    fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+    fs::write(dir.join("fact_check.json"), json)?;
+    Ok(())
+}
+
 pub fn read_submodule_flashcards(
     paths: &AppPaths,
     course_id: &str,

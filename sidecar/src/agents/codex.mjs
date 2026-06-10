@@ -37,6 +37,7 @@ import {
   leechRewriteBlock,
   learnerProfileBlock,
   socraticBlock,
+  factCheckBlock,
 } from "../lib/pedagogy.mjs";
 
 // Codex SDK takes config overrides via constructor; we make a fresh
@@ -735,6 +736,96 @@ function widgetContextBlock(widget) {
     detail = JSON.stringify(w).slice(0, 1000);
   }
   return `The learner is asking about THIS specific ${type} widget in the lesson (id ${widget.id || "?"}) — focus your answer on it:\n<widget>\n${detail}\n</widget>\n\n`;
+}
+
+// ── Fact-check (post-ready background verification pass) ────────────────────
+
+const factCheckSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    claims: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          claim: { type: "string" },
+          verdict: { type: "string", enum: ["confirmed", "wrong", "unverifiable"] },
+          correction: { type: "string" },
+          sourceUrl: { type: "string" },
+        },
+        required: ["claim", "verdict", "correction", "sourceUrl"],
+      },
+    },
+    patches: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          find: { type: "string" },
+          replace: { type: "string" },
+        },
+        required: ["find", "replace"],
+      },
+    },
+  },
+  required: ["claims", "patches"],
+};
+
+export async function verifyFacts(
+  { topic, language, category, article, sources, modelConfig },
+  ctx
+) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for fact check");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are a fact-checker for one lesson of a course on "${topic}" (language "${lang}").
+
+<article>
+${article}
+</article>
+
+Sources the writer claims to have consulted:
+<sources>
+${JSON.stringify(sources ?? [], null, 2)}
+</sources>
+
+${factCheckBlock(lang)}`;
+  ctx?.progress?.({ label: "fact-checking" });
+  const text = await runStreamed(prompt, factCheckSchema, ctx?.progress, {
+    modelConfig,
+    category,
+    stage: "verify",
+    idleTimeoutMs: 120_000,
+    totalTimeoutMs: 540_000,
+  });
+  const parsed = JSON.parse(text);
+  const verdicts = new Set(["confirmed", "wrong", "unverifiable"]);
+  const claims = (Array.isArray(parsed?.claims) ? parsed.claims : [])
+    .map((c) => {
+      if (!c || typeof c.claim !== "string" || !c.claim.trim()) return null;
+      return {
+        claim: c.claim.trim(),
+        verdict: verdicts.has(c.verdict) ? c.verdict : "unverifiable",
+        correction: typeof c.correction === "string" ? c.correction.trim() : "",
+        sourceUrl: typeof c.sourceUrl === "string" ? c.sourceUrl.trim() : "",
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+  const patches = (Array.isArray(parsed?.patches) ? parsed.patches : [])
+    .map((p) => {
+      const find = typeof p?.find === "string" ? p.find : "";
+      const replace = typeof p?.replace === "string" ? p.replace : "";
+      if (!find.trim() || !replace.trim() || find === replace) return null;
+      return { find, replace };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+  return { claims, patches };
 }
 
 // ── Learner profile + entry diagnostic ──────────────────────────────────────

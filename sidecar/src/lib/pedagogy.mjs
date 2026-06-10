@@ -125,6 +125,27 @@ Rules of the dialogue:
 Ground everything in the course material below; prefer the course's own framing and terminology.`;
 }
 
+/**
+ * Fact-check instructions: extract the riskiest verifiable claims, verify on
+ * the web, output verdicts + exact-substring patches for wrong claims only.
+ */
+export function factCheckBlock(lang) {
+  return `1. Extract the up-to-10 RISKIEST VERIFIABLE claims from the article:
+   specific numbers, dates, names, dosages/safety thresholds, formulas,
+   version-specific API/library claims, and "first/largest/only" superlatives.
+   Skip opinions, pedagogy, and genuinely common knowledge.
+2. Verify each against the web (WebSearch/WebFetch; for scientific or medical
+   claims prefer the arXiv / OpenAlex / Semantic Scholar tools when available).
+   1-2 lookups per claim, then decide.
+3. "verdict": "confirmed" | "wrong" | "unverifiable". For "wrong", give the
+   correction and the URL that proves it.
+4. For every WRONG claim produce a patch:
+   {"find": "<EXACT substring copied VERBATIM from the article, long enough to
+   be unique>", "replace": "<corrected text, same style and language '${lang}'>"}.
+   Patches only for wrong claims; never patch style or wording you merely
+   dislike. If nothing is wrong, "patches" is [].`;
+}
+
 /** Rewrite a leech card into 1-3 better atomic cards grounded in the article. */
 export function leechRewriteBlock(lang) {
   return `Leeches usually mean the card is badly formed: too broad, two ideas at

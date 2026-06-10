@@ -36,6 +36,7 @@ import {
   leechRewriteBlock,
   learnerProfileBlock,
   socraticBlock,
+  factCheckBlock,
 } from "../lib/pedagogy.mjs";
 
 function terminologyGuide(lang) {
@@ -2062,6 +2063,68 @@ Output ONLY a JSON object with the KEPT cards on a single line, no prose, no mar
   const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
   const parsed = extractJson(text);
   return { flashcards: normalizeFlashcards(parsed?.flashcards) };
+}
+
+// ── Fact-check (post-ready background verification pass) ────────────────────
+
+function normalizeFactCheck(parsed) {
+  const verdicts = new Set(["confirmed", "wrong", "unverifiable"]);
+  const claims = (Array.isArray(parsed?.claims) ? parsed.claims : [])
+    .map((c) => {
+      if (!c || typeof c.claim !== "string" || !c.claim.trim()) return null;
+      return {
+        claim: c.claim.trim(),
+        verdict: verdicts.has(c.verdict) ? c.verdict : "unverifiable",
+        correction: typeof c.correction === "string" ? c.correction.trim() : "",
+        sourceUrl: typeof c.sourceUrl === "string" ? c.sourceUrl.trim() : "",
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+  const patches = (Array.isArray(parsed?.patches) ? parsed.patches : [])
+    .map((p) => {
+      const find = typeof p?.find === "string" ? p.find : "";
+      const replace = typeof p?.replace === "string" ? p.replace : "";
+      if (!find.trim() || !replace.trim() || find === replace) return null;
+      return { find, replace };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+  return { claims, patches };
+}
+
+export async function verifyFacts(
+  { topic, language, category, article, sources, modelConfig },
+  ctx
+) {
+  if (typeof article !== "string" || !article.trim()) {
+    throw new Error("article required for fact check");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are a fact-checker for one lesson of a course on "${topic}" (language "${lang}").
+
+<article>
+${article}
+</article>
+
+Sources the writer claims to have consulted:
+<sources>
+${JSON.stringify(sources ?? [], null, 2)}
+</sources>
+
+${factCheckBlock(lang)}
+
+Output ONLY a JSON object on a single line, no prose, no markdown fence:
+{"claims":[{"claim":"...","verdict":"confirmed","correction":"","sourceUrl":""}],"patches":[{"find":"...","replace":"..."}]}`;
+  ctx?.progress?.({ label: "fact-checking" });
+  const text = await runStreamed(prompt, ctx?.progress, {
+    web: true,
+    modelConfig,
+    category,
+    stage: "verify",
+    maxTurns: 14,
+  });
+  return normalizeFactCheck(extractJson(text));
 }
 
 // ── Spaced-repetition support: free-recall grading, leech rewrite ───────────
