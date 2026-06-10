@@ -671,6 +671,7 @@ button {
 .home-header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   flex: 0 0 auto;
 }
@@ -8216,4 +8217,135 @@ textarea.le-cap {
 }
 .struct-edit-note {
   margin-top: 10px;
+}
+
+/* ===== Mobile polish (consolidated; appended last so it wins ties) =====
+   The same bundle serves the desktop window at narrow widths AND the shared
+   web link on phones — both go through these rules. */
+@media (max-width: 720px) {
+  /* Home header: action buttons form a tidy 2-column grid instead of
+     overflowing off the right edge. */
+  .home-header-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .home-settings-action,
+  .home-catalog-action,
+  .home-primary {
+    width: 100%;
+    padding: 10px 8px;
+  }
+  .home-brand-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+  }
+  .home-tagline {
+    min-height: 0;
+  }
+  /* Momentum stats: one per line — no mid-sentence column wrap. */
+  .home-momentum-item {
+    flex: 1 1 100%;
+  }
+  /* Featured course titles: still display-sized, never wider than the screen. */
+  .home-feature-title {
+    font-size: 24px;
+    overflow-wrap: anywhere;
+  }
+  /* Dev-only bug button: smaller and translucent so it doesn't sit on text. */
+  .devlog-fab {
+    width: 32px;
+    height: 32px;
+    right: 10px;
+    font-size: 14px;
+    opacity: 0.55;
+  }
+  /* Modals become near-full-width sheets with scrollable bodies. */
+  .modal-backdrop {
+    padding: 12px;
+  }
+  .modal {
+    width: 100%;
+    max-height: 88vh;
+    overflow-y: auto;
+    padding: 22px 18px 20px;
+    gap: 16px;
+  }
+  /* Assistant: full-width bottom sheet instead of a floating window. */
+  .assistant-panel {
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: min(78vh, 640px);
+    border-radius: 14px 14px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+  }
+  /* Review session: use the width we have. */
+  .review-session {
+    margin: 12px auto;
+  }
+  /* Knowledge dashboard header wraps instead of squeezing. */
+  .mastery-head {
+    flex-wrap: wrap;
+    gap: 14px 18px;
+  }
+  .mastery-week {
+    margin-left: 0;
+    flex-basis: 100%;
+    height: 32px;
+  }
+  .mastery-review-cta {
+    flex-basis: 100%;
+    text-align: center;
+  }
+  /* Template widgets: columns/buckets shrink gracefully. */
+  .tpl-match-col {
+    min-width: 130px;
+  }
+  .tpl-cat-bucket {
+    min-width: 120px;
+  }
+  .tpl-slider-label {
+    min-width: 64px;
+    font-size: 13px;
+  }
+  /* Space view: long URLs and source refs never push the layout sideways. */
+  .source-ref,
+  .sources-list a,
+  .space-course-title {
+    overflow-wrap: anywhere;
+  }
+  .space-courses-head {
+    flex-wrap: wrap;
+  }
+  .space-preview-modal {
+    width: 100%;
+  }
+}
+
+/* Phone-width refinements. */
+@media (max-width: 480px) {
+  /* Grade buttons: 2x2 grid — four-across is unreadably narrow on phones. */
+  .grade-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  /* Free-recall answer box stacks above its button. */
+  .ai-check {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .review-flashcard {
+    min-height: 180px;
+  }
+  .course-tabs {
+    width: 100%;
+  }
+  .course-tab {
+    flex: 1;
+    text-align: center;
+  }
 }
