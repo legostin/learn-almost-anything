@@ -3790,6 +3790,319 @@ button {
   text-decoration: line-through;
   opacity: 0.55;
 }
+/* Template widgets (parameterized interactives, rendered natively) */
+.widget-template .tpl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.tpl-prompt {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.tpl-quiz,
+.tpl-fillblank,
+.tpl-order {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.tpl-quiz-q {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.tpl-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tpl-option,
+.tpl-chip {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.tpl-option:hover:not(:disabled),
+.tpl-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.tpl-option.correct,
+.tpl-chip.correct,
+.tpl-order-item.correct,
+.tpl-fb-input.correct {
+  border-color: var(--status-ready-fg, #15803d);
+  background: color-mix(in srgb, var(--status-ready-fg, #15803d) 12%, transparent);
+}
+.tpl-option.wrong,
+.tpl-chip.wrong,
+.tpl-order-item.wrong,
+.tpl-fb-input.wrong {
+  border-color: var(--status-failed-fg, #b91c1c);
+  background: color-mix(in srgb, var(--status-failed-fg, #b91c1c) 10%, transparent);
+}
+.tpl-chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.tpl-chip.matched {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: default;
+}
+.tpl-explanation {
+  margin-top: 6px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-muted, rgba(127, 127, 127, 0.05));
+  border-radius: 6px;
+  font-size: 13px;
+}
+.tpl-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tpl-check,
+.tpl-reset {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tpl-check {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.tpl-check:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.tpl-score {
+  font-size: 13px;
+  font-weight: 600;
+}
+/* steps */
+.tpl-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.tpl-step-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.tpl-step-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.tpl-step-code {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.07));
+  overflow-x: auto;
+  font-size: 13px;
+}
+.tpl-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tpl-nav button {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tpl-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* match */
+.tpl-match-cols {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tpl-match-col {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* fillblank */
+.tpl-fb-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.tpl-fb-input {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+  width: 130px;
+  margin: 0 4px;
+}
+.tpl-hint-btn {
+  padding: 2px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.tpl-fb-answer {
+  font-size: 13px;
+  color: var(--status-ready-fg, #15803d);
+}
+/* order */
+.tpl-order-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.tpl-order-text {
+  flex: 1;
+  font-size: 14px;
+}
+.tpl-order-btns {
+  display: flex;
+  gap: 4px;
+}
+.tpl-order-btns button {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+.tpl-order-btns button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+/* slider */
+.tpl-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+.tpl-slider-row input[type="range"] {
+  flex: 1;
+}
+.tpl-slider-label {
+  min-width: 90px;
+}
+.tpl-slider-value {
+  min-width: 50px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.tpl-outputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.04));
+}
+.tpl-output {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+.tpl-output-label {
+  color: var(--text-muted);
+}
+.tpl-output-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tpl-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.tpl-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+/* categorize */
+.tpl-cat-pool {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tpl-cat-buckets {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tpl-cat-bucket {
+  flex: 1;
+  min-width: 140px;
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+.tpl-cat-bucket.droppable {
+  border-color: var(--accent);
+  cursor: pointer;
+}
+.tpl-cat-bucket-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.tpl-cat-bucket-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* flipcards */
+.tpl-flipcard {
+  min-height: 140px;
+}
+.tpl-flipcard .flashcard-face {
+  text-align: left;
+  white-space: normal;
+}
 .test-header {
   display: flex;
   align-items: center;

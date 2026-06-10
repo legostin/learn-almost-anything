@@ -6132,9 +6132,13 @@ type WidgetData =
       type: "interactive";
       title?: string;
       description?: string;
-      html: string;
-      css: string;
-      js: string;
+      // Templated widgets: `template` + `params` (rendered natively).
+      template?: string;
+      params?: any;
+      // Legacy free-form widgets: raw code rendered in a sandboxed iframe.
+      html?: string;
+      css?: string;
+      js?: string;
       height?: number;
       error?: string;
     }
@@ -9832,7 +9836,14 @@ function WidgetRenderer({
     );
   } else if (widget.type === "diagram") inner = <DiagramWidget id={id} widget={widget as any} />;
   else if (widget.type === "video") inner = <VideoWidget id={id} widget={widget as any} />;
-  else if (widget.type === "interactive") inner = <InteractiveWidget id={id} widget={widget as any} />;
+  else if (widget.type === "interactive")
+    // Templated widgets render natively; legacy free-form code keeps the
+    // sandboxed-iframe path.
+    inner = (widget as any).template ? (
+      <TemplateWidget id={id} widget={widget as any} />
+    ) : (
+      <InteractiveWidget id={id} widget={widget as any} />
+    );
   else if (widget.type === "checkpoint") inner = <CheckpointWidget id={id} widget={widget as any} />;
   else if (widget.type === "recall")
     inner = <RecallWidget id={id} widget={widget as any} widgetCtx={widgetCtx} />;
@@ -10808,6 +10819,697 @@ function RecallWidget({
 }
 
 // Formative checkpoint: a predict-then-reveal prompt embedded mid-article.
+// ===== Template widgets: parameterized interactives rendered natively =====
+// (replaces free-form LLM-written HTML; the param contract lives in
+// sidecar/src/lib/widget-templates.mjs)
+
+// Safe expression evaluator for the slider template — same grammar as the
+// sidecar validator: numbers, declared vars, + - * / ^ (right-assoc pow,
+// -x^2 == -(x^2)), parentheses, pi/e, whitelisted Math functions. Returns
+// null on anything else; never throws, never eval()s.
+const TPL_FN1: Record<string, (a: number) => number> = {
+  sin: Math.sin,
+  cos: Math.cos,
+  tan: Math.tan,
+  sqrt: Math.sqrt,
+  abs: Math.abs,
+  log: Math.log,
+  exp: Math.exp,
+  round: Math.round,
+  floor: Math.floor,
+  ceil: Math.ceil,
+};
+const TPL_FN2: Record<string, (a: number, b: number) => number> = {
+  min: Math.min,
+  max: Math.max,
+  pow: Math.pow,
+};
+const TPL_CONSTS: Record<string, number> = { pi: Math.PI, e: Math.E };
+
+function tplEvalExpr(expr: string, scope: Record<string, number>): number | null {
+  type Tok = { t: string; v?: number | string };
+  const tokens: Tok[] = [];
+  let i = 0;
+  while (i < expr.length) {
+    const c = expr[i];
+    if (/\s/.test(c)) i++;
+    else if (/[0-9.]/.test(c)) {
+      let j = i;
+      while (j < expr.length && /[0-9.]/.test(expr[j])) j++;
+      const n = Number(expr.slice(i, j));
+      if (!Number.isFinite(n)) return null;
+      tokens.push({ t: "num", v: n });
+      i = j;
+    } else if (/[a-zA-Z_]/.test(c)) {
+      let j = i;
+      while (j < expr.length && /[a-zA-Z0-9_]/.test(expr[j])) j++;
+      tokens.push({ t: "ident", v: expr.slice(i, j) });
+      i = j;
+    } else if ("+-*/^(),".includes(c)) {
+      tokens.push({ t: c });
+      i++;
+    } else return null;
+  }
+  if (!tokens.length) return null;
+  let pos = 0;
+  let failed = false;
+  const fail = () => {
+    failed = true;
+    return 0;
+  };
+  const eat = (t: string) => (tokens[pos]?.t === t ? tokens[pos++] : null);
+  function level(): number {
+    let v = term();
+    for (;;) {
+      if (eat("+")) v += term();
+      else if (eat("-")) v -= term();
+      else return v;
+    }
+  }
+  function term(): number {
+    let v = unary();
+    for (;;) {
+      if (eat("*")) v *= unary();
+      else if (eat("/")) v /= unary();
+      else return v;
+    }
+  }
+  function unary(): number {
+    if (eat("-")) return -unary();
+    return power();
+  }
+  function power(): number {
+    const base = atom();
+    if (eat("^")) return Math.pow(base, unary());
+    return base;
+  }
+  function atom(): number {
+    const tok = tokens[pos];
+    if (!tok) return fail();
+    if (tok.t === "num") {
+      pos++;
+      return tok.v as number;
+    }
+    if (tok.t === "(") {
+      pos++;
+      const v = level();
+      if (!eat(")")) return fail();
+      return v;
+    }
+    if (tok.t === "ident") {
+      pos++;
+      const name = tok.v as string;
+      if (eat("(")) {
+        const args = [level()];
+        while (eat(",")) args.push(level());
+        if (!eat(")")) return fail();
+        if (TPL_FN1[name] && args.length === 1) return TPL_FN1[name](args[0]);
+        if (TPL_FN2[name] && args.length === 2) return TPL_FN2[name](args[0], args[1]);
+        return fail();
+      }
+      if (Object.prototype.hasOwnProperty.call(scope, name)) return scope[name];
+      if (name in TPL_CONSTS) return TPL_CONSTS[name];
+      return fail();
+    }
+    return fail();
+  }
+  const result = level();
+  if (failed || pos !== tokens.length || Number.isNaN(result)) return null;
+  return result;
+}
+
+function TplMd({ children }: { children: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+    >
+      {children}
+    </ReactMarkdown>
+  );
+}
+
+function TplFrame({
+  id,
+  title,
+  description,
+  children,
+}: {
+  id: string;
+  title?: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  const t = useT();
+  return (
+    <figure className="widget widget-template">
+      <div className="widget-interactive-header">
+        <span>{t("widgetInteractive")}</span>
+        {title && <span className="widget-interactive-title">{title}</span>}
+        <span className="widget-id">#{id}</span>
+      </div>
+      <div className="tpl-body">{children}</div>
+      {description && (
+        <figcaption className="widget-interactive-desc">{description}</figcaption>
+      )}
+    </figure>
+  );
+}
+
+function TplScore({ correct, total }: { correct: number; total: number }) {
+  const t = useT();
+  return (
+    <div className="tpl-score">{t("tplScore", { correct, total })}</div>
+  );
+}
+
+function QuizTemplate({ params }: { params: any }) {
+  const t = useT();
+  const items: { question: string; options: string[]; correct: number; explanation?: string }[] =
+    params.items ?? [];
+  const [picked, setPicked] = useState<(number | null)[]>(() => items.map(() => null));
+  const done = picked.every((p) => p !== null);
+  const correctCount = items.reduce((n, it, i) => (picked[i] === it.correct ? n + 1 : n), 0);
+  return (
+    <>
+      <ol className="tpl-quiz">
+        {items.map((it, i) => (
+          <li key={i} className="tpl-quiz-item">
+            <div className="tpl-quiz-q reader">
+              <TplMd>{it.question}</TplMd>
+            </div>
+            <div className="tpl-options">
+              {it.options.map((opt, j) => {
+                const chosen = picked[i] === j;
+                let cls = "tpl-option";
+                if (picked[i] !== null) {
+                  if (j === it.correct) cls += " correct";
+                  else if (chosen) cls += " wrong";
+                }
+                return (
+                  <button
+                    key={j}
+                    className={cls}
+                    disabled={picked[i] !== null}
+                    onClick={() =>
+                      setPicked((prev) => prev.map((p, k) => (k === i ? j : p)))
+                    }
+                  >
+                    {opt}
+                  </button>
+                );
+              })}
+            </div>
+            {picked[i] !== null && it.explanation && (
+              <div className="tpl-explanation reader">
+                <TplMd>{it.explanation}</TplMd>
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
+      {done && (
+        <div className="tpl-footer">
+          <TplScore correct={correctCount} total={items.length} />
+          <button
+            className="tpl-reset"
+            onClick={() => setPicked(items.map(() => null))}
+          >
+            {t("tplReset")}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function StepsTemplate({ params }: { params: any }) {
+  const t = useT();
+  const steps: { title?: string; text: string; code?: string; codeLang?: string }[] =
+    params.steps ?? [];
+  const [idx, setIdx] = useState(0);
+  const step = steps[Math.min(idx, steps.length - 1)];
+  if (!step) return null;
+  return (
+    <>
+      <div className="tpl-step-head">
+        <span className="tpl-step-count">{t("tplStep", { current: idx + 1, total: steps.length })}</span>
+        {step.title && <span className="tpl-step-title">{step.title}</span>}
+      </div>
+      <div className="tpl-step-text reader">
+        <TplMd>{step.text}</TplMd>
+      </div>
+      {step.code && (
+        <pre className="tpl-step-code">
+          <code className={step.codeLang ? `language-${step.codeLang}` : undefined}>
+            {step.code}
+          </code>
+        </pre>
+      )}
+      <div className="tpl-nav">
+        <button disabled={idx === 0} onClick={() => setIdx((i) => i - 1)}>
+          ← {t("tplPrev")}
+        </button>
+        <button disabled={idx >= steps.length - 1} onClick={() => setIdx((i) => i + 1)}>
+          {t("tplNext")} →
+        </button>
+      </div>
+    </>
+  );
+}
+
+function MatchTemplate({ params }: { params: any }) {
+  const t = useT();
+  const pairs: { left: string; right: string }[] = params.pairs ?? [];
+  const rights = useMemo(() => shuffledCopy(pairs.map((p, i) => ({ text: p.right, idx: i }))), [pairs]);
+  const [selLeft, setSelLeft] = useState<number | null>(null);
+  const [matched, setMatched] = useState<Set<number>>(() => new Set());
+  const [wrong, setWrong] = useState<number | null>(null);
+
+  function pickRight(pairIdx: number) {
+    if (selLeft === null || matched.has(pairIdx)) return;
+    if (pairIdx === selLeft) {
+      setMatched((prev) => new Set(prev).add(pairIdx));
+      setSelLeft(null);
+    } else {
+      setWrong(pairIdx);
+      setTimeout(() => setWrong(null), 500);
+    }
+  }
+
+  const allDone = matched.size === pairs.length;
+  return (
+    <>
+      {params.prompt && <div className="tpl-prompt">{params.prompt}</div>}
+      <div className="tpl-match-cols">
+        <div className="tpl-match-col">
+          {pairs.map((p, i) => (
+            <button
+              key={i}
+              className={`tpl-chip${selLeft === i ? " selected" : ""}${matched.has(i) ? " matched" : ""}`}
+              disabled={matched.has(i)}
+              onClick={() => setSelLeft(i)}
+            >
+              {p.left}
+            </button>
+          ))}
+        </div>
+        <div className="tpl-match-col">
+          {rights.map((r) => (
+            <button
+              key={r.idx}
+              className={`tpl-chip${matched.has(r.idx) ? " matched" : ""}${wrong === r.idx ? " wrong" : ""}`}
+              disabled={matched.has(r.idx)}
+              onClick={() => pickRight(r.idx)}
+            >
+              {r.text}
+            </button>
+          ))}
+        </div>
+      </div>
+      {allDone && (
+        <div className="tpl-footer">
+          <TplScore correct={pairs.length} total={pairs.length} />
+          <button className="tpl-reset" onClick={() => setMatched(new Set())}>
+            {t("tplReset")}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function FillBlankTemplate({ params }: { params: any }) {
+  const t = useT();
+  const items: { text: string; answers: string[]; hint?: string }[] = params.items ?? [];
+  const [values, setValues] = useState<string[]>(() => items.map(() => ""));
+  const [checked, setChecked] = useState(false);
+  const [hintShown, setHintShown] = useState<Set<number>>(() => new Set());
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const isCorrect = (i: number) => items[i].answers.some((a) => norm(a) === norm(values[i]));
+  const correctCount = items.reduce((n, _, i) => (isCorrect(i) ? n + 1 : n), 0);
+  return (
+    <>
+      <ol className="tpl-fillblank">
+        {items.map((it, i) => {
+          const [before, after] = it.text.split("___");
+          return (
+            <li key={i} className="tpl-fb-item">
+              <span className="tpl-fb-text">
+                {before}
+                <input
+                  className={`tpl-fb-input${checked ? (isCorrect(i) ? " correct" : " wrong") : ""}`}
+                  value={values[i]}
+                  disabled={checked}
+                  onChange={(e) =>
+                    setValues((prev) => prev.map((v, k) => (k === i ? e.target.value : v)))
+                  }
+                />
+                {after}
+              </span>
+              {it.hint && !checked && (
+                <button
+                  className="tpl-hint-btn"
+                  onClick={() => setHintShown((prev) => new Set(prev).add(i))}
+                >
+                  {hintShown.has(i) ? it.hint : t("tplShowHint")}
+                </button>
+              )}
+              {checked && !isCorrect(i) && (
+                <span className="tpl-fb-answer">→ {it.answers[0]}</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      <div className="tpl-footer">
+        {!checked ? (
+          <button
+            className="tpl-check"
+            disabled={values.some((v) => !v.trim())}
+            onClick={() => setChecked(true)}
+          >
+            {t("tplCheck")}
+          </button>
+        ) : (
+          <>
+            <TplScore correct={correctCount} total={items.length} />
+            <button
+              className="tpl-reset"
+              onClick={() => {
+                setChecked(false);
+                setValues(items.map(() => ""));
+              }}
+            >
+              {t("tplReset")}
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function OrderTemplate({ params }: { params: any }) {
+  const t = useT();
+  const correct: string[] = params.items ?? [];
+  const initial = useMemo(() => {
+    let s = shuffledCopy(correct);
+    // A shuffle that lands on the correct order teaches nothing — reshuffle once.
+    if (s.join("") === correct.join("")) s = shuffledCopy(correct);
+    return s;
+  }, [correct]);
+  const [items, setItems] = useState<string[]>(initial);
+  const [checked, setChecked] = useState(false);
+  const move = (i: number, d: number) => {
+    setItems((prev) => {
+      const next = [...prev];
+      const j = i + d;
+      if (j < 0 || j >= next.length) return prev;
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  };
+  const correctCount = items.reduce((n, it, i) => (it === correct[i] ? n + 1 : n), 0);
+  return (
+    <>
+      {params.prompt && <div className="tpl-prompt">{params.prompt}</div>}
+      <ol className="tpl-order">
+        {items.map((it, i) => (
+          <li
+            key={it}
+            className={`tpl-order-item${checked ? (it === correct[i] ? " correct" : " wrong") : ""}`}
+          >
+            <span className="tpl-order-text">{it}</span>
+            {!checked && (
+              <span className="tpl-order-btns">
+                <button disabled={i === 0} onClick={() => move(i, -1)} aria-label="up">
+                  ↑
+                </button>
+                <button
+                  disabled={i === items.length - 1}
+                  onClick={() => move(i, 1)}
+                  aria-label="down"
+                >
+                  ↓
+                </button>
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+      <div className="tpl-footer">
+        {!checked ? (
+          <button className="tpl-check" onClick={() => setChecked(true)}>
+            {t("tplCheck")}
+          </button>
+        ) : (
+          <>
+            <TplScore correct={correctCount} total={items.length} />
+            <button
+              className="tpl-reset"
+              onClick={() => {
+                setChecked(false);
+                setItems(shuffledCopy(correct));
+              }}
+            >
+              {t("tplReset")}
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function SliderTemplate({ params }: { params: any }) {
+  const vars: { name: string; label: string; min: number; max: number; step: number; init: number }[] =
+    params.vars ?? [];
+  const outputs: {
+    label: string;
+    expr: string;
+    format?: string;
+    suffix?: string;
+    bar?: { min: number; max: number };
+  }[] = params.outputs ?? [];
+  const [values, setValues] = useState<Record<string, number>>(() =>
+    Object.fromEntries(vars.map((v) => [v.name, v.init]))
+  );
+  const fmt = (n: number, format?: string) => {
+    if (!Number.isFinite(n)) return "—";
+    if (format === "int") return String(Math.round(n));
+    if (format === "fixed1") return n.toFixed(1);
+    if (format === "fixed2") return n.toFixed(2);
+    const abs = Math.abs(n);
+    if (abs !== 0 && (abs >= 100000 || abs < 0.01)) return n.toExponential(2);
+    return String(Math.round(n * 100) / 100);
+  };
+  return (
+    <>
+      {params.note && <div className="tpl-prompt">{params.note}</div>}
+      {vars.map((v) => (
+        <label key={v.name} className="tpl-slider-row">
+          <span className="tpl-slider-label">{v.label}</span>
+          <input
+            type="range"
+            min={v.min}
+            max={v.max}
+            step={v.step}
+            value={values[v.name]}
+            onChange={(e) =>
+              setValues((prev) => ({ ...prev, [v.name]: Number(e.target.value) }))
+            }
+          />
+          <span className="tpl-slider-value">{fmt(values[v.name])}</span>
+        </label>
+      ))}
+      <div className="tpl-outputs">
+        {outputs.map((o, i) => {
+          const val = tplEvalExpr(o.expr, values);
+          const display = val === null ? "—" : fmt(val, o.format);
+          const pct =
+            o.bar && val !== null && Number.isFinite(val)
+              ? Math.max(0, Math.min(100, ((val - o.bar.min) / (o.bar.max - o.bar.min)) * 100))
+              : null;
+          return (
+            <div key={i} className="tpl-output">
+              <span className="tpl-output-label">{o.label}</span>
+              <span className="tpl-output-value">
+                {display}
+                {o.suffix ? ` ${o.suffix}` : ""}
+              </span>
+              {pct !== null && (
+                <span className="tpl-bar">
+                  <span className="tpl-bar-fill" style={{ width: `${pct}%` }} />
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function CategorizeTemplate({ params }: { params: any }) {
+  const t = useT();
+  const buckets: string[] = params.buckets ?? [];
+  const items: { text: string; bucket: number }[] = params.items ?? [];
+  const order = useMemo(() => shuffledCopy(items.map((_, i) => i)), [items]);
+  // assignment[itemIdx] = bucketIdx | null
+  const [assigned, setAssigned] = useState<(number | null)[]>(() => items.map(() => null));
+  const [active, setActive] = useState<number | null>(null);
+  const [checked, setChecked] = useState(false);
+  const pool = order.filter((i) => assigned[i] === null);
+  const correctCount = items.reduce((n, it, i) => (assigned[i] === it.bucket ? n + 1 : n), 0);
+  const assign = (bucketIdx: number) => {
+    if (active === null || checked) return;
+    setAssigned((prev) => prev.map((b, i) => (i === active ? bucketIdx : b)));
+    setActive(null);
+  };
+  return (
+    <>
+      {params.prompt && <div className="tpl-prompt">{params.prompt}</div>}
+      {pool.length > 0 && (
+        <div className="tpl-cat-pool">
+          {pool.map((i) => (
+            <button
+              key={i}
+              className={`tpl-chip${active === i ? " selected" : ""}`}
+              onClick={() => setActive(i)}
+            >
+              {items[i].text}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="tpl-cat-buckets">
+        {buckets.map((b, bi) => (
+          <div
+            key={bi}
+            className={`tpl-cat-bucket${active !== null ? " droppable" : ""}`}
+            onClick={() => assign(bi)}
+          >
+            <div className="tpl-cat-bucket-title">{b}</div>
+            <div className="tpl-cat-bucket-items">
+              {items.map((it, i) =>
+                assigned[i] === bi ? (
+                  <button
+                    key={i}
+                    className={`tpl-chip${checked ? (it.bucket === bi ? " correct" : " wrong") : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!checked)
+                        setAssigned((prev) => prev.map((x, k) => (k === i ? null : x)));
+                    }}
+                  >
+                    {it.text}
+                  </button>
+                ) : null
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="tpl-footer">
+        {!checked ? (
+          <button
+            className="tpl-check"
+            disabled={pool.length > 0}
+            onClick={() => setChecked(true)}
+          >
+            {t("tplCheck")}
+          </button>
+        ) : (
+          <>
+            <TplScore correct={correctCount} total={items.length} />
+            <button
+              className="tpl-reset"
+              onClick={() => {
+                setChecked(false);
+                setAssigned(items.map(() => null));
+              }}
+            >
+              {t("tplReset")}
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function FlipcardsTemplate({ params }: { params: any }) {
+  const t = useT();
+  const cards: { front: string; back: string }[] = params.cards ?? [];
+  const [idx, setIdx] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const card = cards[Math.min(idx, cards.length - 1)];
+  if (!card) return null;
+  const go = (d: number) => {
+    setIdx((i) => Math.min(cards.length - 1, Math.max(0, i + d)));
+    setFlipped(false);
+  };
+  return (
+    <>
+      <button
+        className={`flashcard tpl-flipcard${flipped ? " is-flipped" : ""}`}
+        onClick={() => setFlipped((f) => !f)}
+      >
+        <div className="flashcard-face reader">
+          <TplMd>{flipped ? card.back : card.front}</TplMd>
+        </div>
+        <div className="flashcard-hint">{t("tplFlip")}</div>
+      </button>
+      <div className="tpl-nav">
+        <button disabled={idx === 0} onClick={() => go(-1)}>
+          ← {t("tplPrev")}
+        </button>
+        <span className="tpl-step-count">
+          {idx + 1} / {cards.length}
+        </span>
+        <button disabled={idx >= cards.length - 1} onClick={() => go(1)}>
+          {t("tplNext")} →
+        </button>
+      </div>
+    </>
+  );
+}
+
+const TEMPLATE_COMPONENTS: Record<string, (p: { params: any }) => ReactNode> = {
+  quiz: QuizTemplate,
+  steps: StepsTemplate,
+  match: MatchTemplate,
+  fillblank: FillBlankTemplate,
+  order: OrderTemplate,
+  slider: SliderTemplate,
+  categorize: CategorizeTemplate,
+  flipcards: FlipcardsTemplate,
+};
+
+function TemplateWidget({
+  id,
+  widget,
+}: {
+  id: string;
+  widget: { template?: string; params?: any; title?: string; description?: string };
+}) {
+  const t = useT();
+  const Component = widget.template ? TEMPLATE_COMPONENTS[widget.template] : undefined;
+  if (!Component || !widget.params) {
+    return (
+      <div className="widget widget-unknown">
+        {t("widgetUnknown")}: {widget.template} <span className="widget-id">#{id}</span>
+      </div>
+    );
+  }
+  return (
+    <TplFrame id={id} title={widget.title} description={widget.description}>
+      <Component params={widget.params} />
+    </TplFrame>
+  );
+}
+
 function CheckpointWidget({
   id,
   widget,
