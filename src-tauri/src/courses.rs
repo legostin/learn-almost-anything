@@ -142,6 +142,26 @@ pub fn read_course_md(paths: &AppPaths, course_id: &str) -> Result<String, Cours
     Ok(fs::read_to_string(path)?)
 }
 
+/// Persist the course research pack (markdown grounding shared by all lesson
+/// drafts) to courses/<id>/research.md.
+pub fn write_course_research(
+    paths: &AppPaths,
+    course_id: &str,
+    md: &str,
+) -> Result<(), CourseError> {
+    let dir = paths.course_dir(course_id);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("research.md"), md)?;
+    Ok(())
+}
+
+pub fn read_course_research(paths: &AppPaths, course_id: &str) -> Option<String> {
+    fs::read_to_string(paths.course_dir(course_id).join("research.md"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Append (or replace) a `## {heading}` section at the end of course.md.
 /// Used by the entry diagnostic so buildStructure sees the results inside
 /// <course-md> with no extra plumbing.
@@ -195,6 +215,10 @@ pub struct SidecarTree {
     pub title: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Course research pack compiled by the structure agent (markdown);
+    /// persisted to research.md and injected into every lesson draft.
+    #[serde(default, rename = "researchPack")]
+    pub research_pack: Option<String>,
     pub modules: Vec<SidecarModule>,
 }
 
@@ -1075,23 +1099,25 @@ pub fn read_submodule_content(
     })
 }
 
-/// Collect previously-generated submodule articles in curriculum order,
-/// stopping just before `until_sub_id`. Skips submodules whose article.md
-/// is not on disk yet.
+/// The IMMEDIATELY PREVIOUS generated article before `until_sub_id` (full
+/// text, as a 1-element array for the sidecar's previousArticles contract).
+/// Earlier lessons are intentionally NOT sent — their titles/summaries live in
+/// the structure outline, and the course research pack carries the shared
+/// terminology. Sending every prior article grew draft prompts O(N²).
 pub fn read_previous_articles(
     paths: &AppPaths,
     structure: &StructureFile,
     until_sub_id: &str,
 ) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
+    let mut last: Option<serde_json::Value> = None;
     for m in &structure.modules {
         for s in &m.submodules {
             if s.id == until_sub_id {
-                return out;
+                return last.into_iter().collect();
             }
             let path = submodule_dir(paths, &structure.course_id, &m.id, &s.id).join("article.md");
             if let Ok(article) = fs::read_to_string(&path) {
-                out.push(serde_json::json!({
+                last = Some(serde_json::json!({
                     "moduleTitle": m.title,
                     "submoduleTitle": s.title,
                     "article": article,
@@ -1099,7 +1125,37 @@ pub fn read_previous_articles(
             }
         }
     }
-    out
+    last.into_iter().collect()
+}
+
+/// Compact curriculum outline for lesson prompts: titles everywhere, summaries
+/// only for the module being written. Replaces sending the full StructureFile
+/// (ids, generation_state, prereqs, all summaries) into every draft.
+pub fn structure_outline(structure: &StructureFile, current_module_id: &str) -> serde_json::Value {
+    let modules: Vec<serde_json::Value> = structure
+        .modules
+        .iter()
+        .map(|m| {
+            let current = m.id == current_module_id;
+            let subs: Vec<serde_json::Value> = m
+                .submodules
+                .iter()
+                .map(|s| {
+                    if current && !s.summary.is_empty() {
+                        serde_json::json!({ "title": s.title, "summary": s.summary })
+                    } else {
+                        serde_json::json!({ "title": s.title })
+                    }
+                })
+                .collect();
+            if current && !m.summary.is_empty() {
+                serde_json::json!({ "title": m.title, "summary": m.summary, "submodules": subs })
+            } else {
+                serde_json::json!({ "title": m.title, "submodules": subs })
+            }
+        })
+        .collect();
+    serde_json::json!({ "modules": modules })
 }
 
 /// Find a submodule's id and the id of its parent module within a tree.

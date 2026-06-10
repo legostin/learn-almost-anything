@@ -224,6 +224,18 @@ impl GenerationProfile {
         }
     }
 
+    /// Draft-stage research budget: halved when a course research pack exists —
+    /// the pack carries pre-verified grounding, so the draft only verifies
+    /// lesson-specific specifics. The structure stage keeps the full budget.
+    pub fn draft_research_max_turns(&self, category: Option<&str>, has_pack: bool) -> u32 {
+        let full = self.research_max_turns(category);
+        if has_pack {
+            (full / 2).max(2)
+        } else {
+            full
+        }
+    }
+
     pub fn illustration_mode(&self) -> String {
         nonblank(&self.illustration_mode)
             .map(str::to_string)

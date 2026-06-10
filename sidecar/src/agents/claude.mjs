@@ -355,9 +355,10 @@ function prevArticlesBlock(previousArticles, lang) {
   const formatted = previousArticles
     .map((p) => `### ${p.moduleTitle} / ${p.submoduleTitle}\n${p.article}`)
     .join("\n\n---\n\n");
-  return `Previously written submodules — read them for context and continuity.
-Refer back when natural, do NOT contradict anything in them, do NOT repeat
-their content verbatim. Write in language "${lang}" the same as them.
+  return `The IMMEDIATELY PREVIOUS lesson, in full — match its tone, register,
+and terminology; do NOT contradict it, do NOT repeat its content verbatim.
+Earlier lessons are listed (titles) in the curriculum outline. Write in
+language "${lang}" the same as it.
 
 <previous-articles>
 ${formatted}
@@ -395,6 +396,7 @@ async function draftArticleInternal(
     category,
     genProfile,
     learnerProfile,
+    researchPack,
   },
   onProgress
 ) {
@@ -423,6 +425,22 @@ async function draftArticleInternal(
           .map((f) => `--- ${f.filename} ---\n${f.content}`)
           .join("\n\n")}\n\n`
       : "";
+  const hasPack = typeof researchPack === "string" && researchPack.trim().length > 0;
+  const researchPackBlock = hasPack
+    ? `<research-pack>
+${researchPack.trim()}
+</research-pack>
+This pack was compiled and verified when the course was designed. Treat it as
+pre-verified grounding: take canonical facts, terminology, key sources and the
+misconception warnings from it — do NOT re-research them. Spend your (reduced)
+web budget only on lesson-specific specifics the pack does not cover (exact
+code APIs, image/video URLs, fine-grained numbers).
+
+`
+    : "";
+  const researchBudgetLine = hasPack
+    ? "Research efficiently: 1-2 targeted lookups for lesson-specific specifics (the research pack already covers the fundamentals),"
+    : "Research efficiently: a few targeted lookups (about 3-4 web calls total),";
   const prompt = `You are writing one submodule of a personalized course on
 "${topic}" (language: ${lang}).
 
@@ -439,7 +457,7 @@ Full curriculum (for context — do not repeat other modules):
 ${JSON.stringify(structure, null, 2)}
 </structure>
 
-${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${pedagogyBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
+${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${pedagogyBlock}${researchPackBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
 
@@ -621,7 +639,7 @@ ${
   large image assets from the page later.
 `
 }
-Research efficiently: a few targeted lookups (about 3-4 web calls total),
+${researchBudgetLine}
 then STOP and write. Finishing the article matters more than exhaustive
 research. Write in your own voice — don't quote large blocks; weave findings
 in naturally. Only state a fact if you actually have a source backing it.
@@ -1496,9 +1514,23 @@ Also classify this course into exactly ONE category id from this fixed list
 (pick the single best fit; use "general" only when nothing else clearly fits):
 ${categoryClassifyGuide()}
 
+RESEARCH PACK: after the curriculum, compile a markdown "researchPack" for the
+lesson writers, in language "${lang}", from what you ACTUALLY found while
+researching${spaceStrict ? " (built ONLY from the attached space material)" : ""}:
+## Course-wide
+- canonical definitions & terminology every lesson must use consistently;
+- canonical facts (numbers, dates, names, formulas) lessons will rely on;
+- common misconceptions to avoid (misconception → correction).
+Then one "## <module title>" section per module:
+- 3-6 key sources with URLs you actually consulted or verified exist (NEVER invent URLs);
+- module-specific facts/terminology;
+- 2-4 recommended search queries for the lesson writer.
+Keep the whole pack under ~2500 words — it is injected into every lesson prompt
+as pre-verified grounding.
+
 Output ONLY a JSON object on a single line, no prose, no markdown fence.
 Shape:
-{"category":"<one id from the list above>","title":"...","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"...","prereqs":[]}]}]}`;
+{"category":"<one id from the list above>","title":"...","researchPack":"<markdown>","modules":[{"title":"...","summary":"...","submodules":[{"title":"...","summary":"...","prereqs":[]}]}]}`;
   const text = await runStreamed(prompt, ctx?.progress, {
     web: true,
     modelConfig,
@@ -1537,6 +1569,8 @@ Shape:
     title: normalizeCourseTitle(parsed?.title),
     modules,
     category: normalizeCategory(parsed?.category),
+    researchPack:
+      typeof parsed?.researchPack === "string" ? parsed.researchPack.trim() : "",
   };
 }
 

@@ -566,8 +566,22 @@ fn start_build_structure(
                     .map_err(|e| e.to_string())?;
                 let raw = serde_json::from_value::<courses::SidecarTree>(v)
                     .map_err(|e| format!("sidecar payload: {e}"))?;
+                // Research pack: grounding for every future lesson draft.
+                // Non-fatal — structure install must not depend on it. NOTE:
+                // structure refine/edit does NOT regenerate the pack (staleness
+                // accepted in v1).
+                let research_pack = raw
+                    .research_pack
+                    .clone()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty());
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 courses::install_structure(&conn, &paths, &cid, raw).map_err(|e| e.to_string())?;
+                if let Some(pack) = research_pack {
+                    if let Err(e) = courses::write_course_research(&paths, &cid, &pack) {
+                        eprintln!("[build_structure] write research.md (non-fatal): {e}");
+                    }
+                }
                 Ok::<(), String>(())
             },
         );
@@ -852,7 +866,9 @@ fn spawn_generate_submodule(
         .map(|(name, content)| json!({ "filename": name, "content": content }))
         .collect();
     let previous_articles = courses::read_previous_articles(&paths, &structure, &submodule_id);
-    let structure_value = serde_json::to_value(&structure).map_err(|e| e.to_string())?;
+    // Compact outline (titles + current-module summaries only), not the full
+    // tree: every lesson prompt carries this, so size matters.
+    let structure_value = courses::structure_outline(&structure, &module_id);
 
     let app2 = app.clone();
     let cid = course.id.clone();
@@ -873,7 +889,15 @@ fn spawn_generate_submodule(
         // Flashcards are an active-recall extra: skip on the lean pedagogy tier.
         let skip_flashcards = profile.pedagogy_intensity() == "lean";
         let illustration_off = profile.illustration_mode() == "off";
-        let gen_profile = gen_profile_json(&profile, course.category.as_deref());
+        let mut gen_profile = gen_profile_json(&profile, course.category.as_deref());
+        // Course research pack: pre-verified grounding shared by every lesson.
+        // When present, halve the draft's research budget — the pack already
+        // carries the canonical facts/terminology/sources.
+        let research_pack = courses::read_course_research(&paths, &course.id);
+        if research_pack.is_some() {
+            gen_profile["researchMaxTurns"] = json!(profile
+                .draft_research_max_turns(course.category.as_deref(), true));
+        }
         // Tier reasoning cascade: trim/raise thinking on the dominant draft
         // (writing) and the test/assignment (tests) stages by tier.
         let writing_model = apply_tier_reasoning(writing_model, &profile, "writing");
@@ -902,6 +926,7 @@ fn spawn_generate_submodule(
             "category": course.category,
             "genProfile": gen_profile.clone(),
             "learnerProfile": course.learner_profile.clone(),
+            "researchPack": research_pack,
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
