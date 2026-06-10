@@ -7670,8 +7670,13 @@ function stripArticleWidgetMarkers(md: string): string {
 }
 
 // Strip markdown + widget markers to plain prose suitable for text-to-speech.
+/** Drop internal `<!-- la:... -->` plumbing comments before rendering. */
+function stripInternalMarkers(md: string): string {
+  return (md || "").replace(/<!--\s*la:[a-z-]+\s*-->/g, "");
+}
+
 function articleToSpeechText(md: string): string {
-  return (md || "")
+  return stripInternalMarkers(md || "")
     .replace(/^::widget\{[^}]*\}\s*$/gm, " ")
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]+)`/g, "$1")
@@ -9064,7 +9069,12 @@ function ArticleReader({
   fontPx: number;
   widgetCtx?: WidgetCtx;
 }) {
-  const parts = useMemo(() => splitWidgetMarkers(article), [article]);
+  // Internal HTML-comment markers (e.g. <!-- la:deepdive -->) are plumbing,
+  // not content — react-markdown would render them as literal text.
+  const parts = useMemo(
+    () => splitWidgetMarkers(stripInternalMarkers(article)),
+    [article]
+  );
   const lightboxImages = useMemo(
     () => collectLightboxImages(parts, widgets),
     [parts, widgets]

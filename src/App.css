@@ -6978,6 +6978,13 @@ button.domain-chip {
 .widget-host {
   position: relative;
 }
+/* The floating "✦ Ask" pill sits at the host's top-left; widget headers
+   (template + legacy interactive) start there too — reserve space so the
+   label text isn't covered by the pill. */
+.widget-host .widget-interactive-header {
+  padding-left: 78px;
+  min-height: 24px;
+}
 .widget-ask {
   position: absolute;
   top: 6px;
