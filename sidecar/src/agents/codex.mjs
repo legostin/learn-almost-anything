@@ -552,7 +552,9 @@ ${languageStyleGuide(lang)}`;
   const text = await runStreamed(prompt, schema, ctx?.progress, {
     modelConfig,
     dirs: spaceDirs,
-    idleTimeoutMs: 180_000,
+    // Space-dir inspection can pause the stream for a while; the Rust-side
+    // ceiling for wizard_next_question is 600s.
+    idleTimeoutMs: 300_000,
     totalTimeoutMs: 900_000,
   });
   const parsed = JSON.parse(text);
@@ -857,7 +859,9 @@ ${factCheckBlock(lang)}`;
     modelConfig,
     category,
     stage: "verify",
-    idleTimeoutMs: 120_000,
+    // Science MCP lookups can be slow (rate-limited); fact-check soft-fails
+    // anyway, but don't abort healthy runs early.
+    idleTimeoutMs: 240_000,
     totalTimeoutMs: 540_000,
   });
   const parsed = JSON.parse(text);
@@ -3104,8 +3108,12 @@ as pre-verified grounding.`;
   const text = await runStreamed(prompt, schema, ctx?.progress, {
     modelConfig,
     dirs: spaceDirs,
-    idleTimeoutMs: 180_000,
-    totalTimeoutMs: 900_000,
+    // Structure research can sit silent for minutes inside a single MCP call
+    // (keyless Semantic Scholar backs off at 1 req/5s) or a long reasoning
+    // stretch — 180s idle was aborting healthy runs into the retry loop.
+    // The Rust-side ceiling for build_structure is 4200s.
+    idleTimeoutMs: 420_000,
+    totalTimeoutMs: 3_600_000,
     stage: "structure",
   });
   const parsed = JSON.parse(text);
