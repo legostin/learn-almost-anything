@@ -25,6 +25,11 @@ import {
   researchMcpServersForCategory,
 } from "../lib/reference-mcp.mjs";
 import {
+  templateCatalogBlock,
+  normalizeTemplateWidget,
+  TEMPLATE_NAMES,
+} from "../lib/widget-templates.mjs";
+import {
   categoryClassifyGuide,
   categoryPreferredSourcesBlock,
   categoryPedagogyBlock,
@@ -144,7 +149,7 @@ function podcastNoWidgetGuide(courseFormat) {
   if (normalizeCourseFormat(courseFormat) !== "podcast_series") return "";
   return `PODCAST FORMAT OVERRIDE:
 - Do not insert any ::widget markers.
-- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and interactiveWidgets.
+- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and templateWidgets.
 - If a map, image, chart, or diagram would normally help, describe it verbally or put a source link in "sources"/show notes instead of making a visual widget.`;
 }
 
@@ -1756,21 +1761,22 @@ const draftSchema = {
         required: ["id", "url", "title", "recommended_by", "why"],
       },
     },
-    interactiveWidgets: {
+    templateWidgets: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
         properties: {
           id: { type: "string" },
+          template: { type: "string", enum: TEMPLATE_NAMES },
           title: { type: "string" },
           description: { type: "string" },
-          html: { type: "string" },
-          css: { type: "string" },
-          js: { type: "string" },
-          height: { type: "integer" },
+          // Template params as a JSON-encoded string: a strict oneOf of 8
+          // heterogeneous shapes balloons the schema; normalizeTemplateWidget
+          // is the single source of truth and parses/validates this.
+          paramsJson: { type: "string" },
         },
-        required: ["id", "title", "description", "html", "css", "js", "height"],
+        required: ["id", "template", "title", "description", "paramsJson"],
       },
     },
     sources: {
@@ -1793,7 +1799,7 @@ const draftSchema = {
     "galleryWidgets",
     "diagramWidgets",
     "videoWidgets",
-    "interactiveWidgets",
+    "templateWidgets",
     "sources",
   ],
 };
@@ -1970,21 +1976,7 @@ in "recommended_by" (it may be the official video/channel/playlist page when
 that is the evidence). If the video is not embeddable or you cannot find any
 quality signal, skip it.
 
-INTERACTIVE WIDGETS: small self-contained HTML+CSS+JS that runs in a
-sandboxed iframe (no network, no cookies, no parent access). Use 0-2 per
-submodule, only when interactivity meaningfully aids comprehension —
-e.g. algorithm step-through (sorting, search), fill-in-the-blank with
-check-answer, multiple-choice flashcard, slider that animates a value,
-drag-to-match.
-
-Hard rules — your widget WILL BE REJECTED if it breaks any of these:
-  • Vanilla JS only. No frameworks, no <script src=…>, no imports, no eval,
-    no new Function, no fetch, no XMLHttpRequest.
-  • No localStorage/sessionStorage/cookies, no window.parent / window.top.
-  • Total html + css + js ≤ 8000 characters.
-  • All assets inline. Use DOM, addEventListener, requestAnimationFrame,
-    setTimeout, Math.
-  • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
+${templateCatalogBlock(lang)}
 
 IMAGE AND GALLERY WIDGETS — set "mode" per image item:
   • "search" — a real, specific, existing thing to FIND not invent: a particular
@@ -2051,9 +2043,9 @@ Return widgets in five separate arrays:
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
   why (one sentence in ${lang})}]
-- interactiveWidgets: [{id, title (in ${lang}), description (in ${lang}),
-  html (body content, NO html/head/body tags), css, js, height (integer
-  pixels, 160-640)}]
+- templateWidgets: [{id, template (a catalog name), title (in ${lang}),
+  description (in ${lang}), paramsJson (the template's params object
+  JSON-encoded AS A STRING)}]
 
 If a category is unused, return an empty array [].
 
@@ -2132,7 +2124,7 @@ ${languageStyleGuide(lang)}`;
       parsed.galleryWidgets,
       parsed.diagramWidgets,
       parsed.videoWidgets,
-      parsed.interactiveWidgets
+      parsed.templateWidgets
     ),
     sources: normalizeSources(parsed.sources),
   };
@@ -2143,7 +2135,7 @@ function mergeWidgets(
   galleryWidgets,
   diagramWidgets,
   videoWidgets,
-  interactiveWidgets
+  templateWidgets
 ) {
   const out = {};
   if (Array.isArray(imageWidgets)) {
@@ -2234,21 +2226,13 @@ function mergeWidgets(
       };
     }
   }
-  if (Array.isArray(interactiveWidgets)) {
-    for (const w of interactiveWidgets) {
+  if (Array.isArray(templateWidgets)) {
+    for (const w of templateWidgets) {
       if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
-      out[w.id.trim()] = {
-        type: "interactive",
-        title: typeof w.title === "string" ? w.title.trim() : "",
-        description: typeof w.description === "string" ? w.description.trim() : "",
-        html: typeof w.html === "string" ? w.html : "",
-        css: typeof w.css === "string" ? w.css : "",
-        js: typeof w.js === "string" ? w.js : "",
-        height:
-          typeof w.height === "number"
-            ? Math.max(160, Math.min(640, Math.round(w.height)))
-            : 320,
-      };
+      // paramsJson is parsed + validated by the shared normalizer; an invalid
+      // widget is dropped (its marker is cleaned by stripUnknownWidgetMarkers).
+      const tw = normalizeTemplateWidget({ ...w, params: w.paramsJson });
+      if (tw) out[w.id.trim()] = tw;
     }
   }
   return out;
@@ -2480,7 +2464,12 @@ export async function submoduleAnnotate(params, ctx) {
       } else {
         out[id] = w;
       }
+    } else if (w?.type === "interactive" && w.template) {
+      // Template widgets were schema-validated at draft time — pass through.
+      intChecked++;
+      out[id] = w;
     } else if (w?.type === "interactive") {
+      // Legacy free-form widget: keep the full validate/repair machinery.
       intChecked++;
       const { final, error, repairs } = await validateAndRepairInteractive(
         w,

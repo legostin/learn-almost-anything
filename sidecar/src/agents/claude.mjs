@@ -38,6 +38,10 @@ import {
   socraticBlock,
   factCheckBlock,
 } from "../lib/pedagogy.mjs";
+import {
+  templateCatalogBlock,
+  normalizeTemplateWidget,
+} from "../lib/widget-templates.mjs";
 
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
@@ -99,7 +103,7 @@ function podcastNoWidgetGuide(courseFormat) {
   if (normalizeCourseFormat(courseFormat) !== "podcast_series") return "";
   return `PODCAST FORMAT OVERRIDE:
 - Do not insert any ::widget markers.
-- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and interactiveWidgets.
+- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and templateWidgets.
 - If a map, image, chart, or diagram would normally help, describe it verbally or put a source link in "sources"/show notes instead of making a visual widget.`;
 }
 
@@ -537,7 +541,7 @@ points with a single line, alone, with blank lines above and below:
   ::widget{type="gallery" id="gal-1"}      (2-6 related images shown together)
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
-  ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
+  ::widget{type="interactive" id="int-1"}  (a parameterized interactive exercise — see the template catalog below)
   ::widget{type="checkpoint" id="cp-1"}    (a predict-then-reveal check — see below)
 
 Use 1-6 widgets total when the topic has concrete visual references, counting
@@ -618,35 +622,7 @@ in "recommended_by" (it may be the official video/channel/playlist page when
 that is the evidence). If the video is not embeddable or you cannot find any
 quality signal, skip it.
 
-INTERACTIVE WIDGETS: small self-contained HTML+CSS+JS that runs in a
-sandboxed iframe (no network, no cookies, no parent access). Use 0-2 per
-submodule, only when interactivity meaningfully aids comprehension —
-examples that fit well:
-  • algorithm step-through with Prev/Next buttons (sorting, search)
-  • fill-in-the-blank card with check-answer feedback
-  • multiple-choice flashcard with explanation reveal
-  • slider that animates or recomputes a derived value
-  • drag-to-match pairs
-
-Hard rules — your widget WILL BE REJECTED if it breaks any of these:
-  • Vanilla JS only. No frameworks, no <script src=…>, no imports, no eval,
-    no new Function, no fetch, no XMLHttpRequest.
-  • No reading/writing localStorage/sessionStorage/cookies.
-  • No accessing window.parent / window.top.
-  • Total html + css + js ≤ 8000 characters.
-  • All assets inline (use only DOM, addEventListener, requestAnimationFrame,
-    setTimeout, Math, etc.).
-  • Adapt to dark mode via @media (prefers-color-scheme: dark) in your CSS.
-
-Provide:
-  - "html": body content only (NO <html>/<head>/<body> tags — UI wraps them).
-  - "css": stylesheet rules (will go into a <style> tag).
-  - "js": script code (will go into a <script> tag at end of body).
-  - "title": short label in ${lang}.
-  - "description": one or two sentences in ${lang} explaining what the
-    learner can do with this widget.
-  - "height": integer pixels, clamp 160-640. Pick a reasonable default
-    based on content (compact card ~220, animation canvas ~360).
+${templateCatalogBlock(lang)}
 
 You have live web access — use it:
 - WebSearch — search the web to verify facts, find concrete examples,
@@ -712,7 +688,7 @@ Each widget object:
 - gallery: {"id":"gal-1","type":"gallery","caption":"<short caption in ${lang}>","items":[{"mode":"search|generate","description":"<short UI caption in ${lang}>","prompt":"<internal search target or generation prompt in ${lang}>","alt":"<short alt in ${lang}>","url":"<direct image url or empty>","source":"<page url or empty>"}]}
 - diagram: {"id":"diag-1","type":"diagram","source":"<mermaid source>","caption":"<short caption in ${lang}>"}
 - video: {"id":"vid-1","type":"video","url":"<youtube/vimeo watch url>","title":"<video title>","recommended_by":"<url of the recommendation source>","why":"<one-sentence reason in ${lang}>"}
-- interactive: {"id":"int-1","type":"interactive","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","html":"<body content>","css":"<stylesheet>","js":"<script>","height":320}
+- interactive: {"id":"int-1","type":"interactive","template":"<catalog name>","title":"<short label in ${lang}>","description":"<1-2 sentences in ${lang}>","params":{<template params per the catalog>}}
 - checkpoint: {"id":"cp-1","type":"checkpoint","question":"<a predict / retrieve / self-explain prompt in ${lang}>","answer":"<concise confirming answer + why, in ${lang}>"}
 ${checkpointGuide}
 Each source object: {"title":"<page title>","url":"<url>"}
@@ -815,18 +791,10 @@ function normalizeWidgets(raw) {
         why: typeof w.why === "string" ? w.why.trim() : "",
       };
     } else if (w.type === "interactive") {
-      out[id] = {
-        type: "interactive",
-        title: typeof w.title === "string" ? w.title.trim() : "",
-        description: typeof w.description === "string" ? w.description.trim() : "",
-        html: typeof w.html === "string" ? w.html : "",
-        css: typeof w.css === "string" ? w.css : "",
-        js: typeof w.js === "string" ? w.js : "",
-        height:
-          typeof w.height === "number"
-            ? Math.max(160, Math.min(640, Math.round(w.height)))
-            : 320,
-      };
+      // Template widgets only: invalid/free-form output is dropped (its
+      // article marker is cleaned up by stripUnknownWidgetMarkers).
+      const tw = normalizeTemplateWidget(w);
+      if (tw) out[id] = tw;
     } else if (w.type === "checkpoint") {
       // Formative "predict then reveal" check embedded mid-article.
       const question = typeof w.question === "string" ? w.question.trim() : "";
@@ -1049,7 +1017,14 @@ async function validateWidgets({ article, widgets, modelConfig }, onProgress) {
       } else {
         out[id] = w;
       }
+    } else if (w?.type === "interactive" && w.template) {
+      // Template widgets were schema-validated at draft time — pass through.
+      // No jsdom, no Chrome render, no vision review, no repair loop.
+      intChecked++;
+      out[id] = w;
     } else if (w?.type === "interactive") {
+      // Legacy free-form widget (regenerated old lessons): keep the full
+      // validate/repair machinery for them.
       intChecked++;
       const { final, error, repairs } = await validateAndRepairInteractive(
         w,
