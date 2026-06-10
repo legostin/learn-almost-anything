@@ -2457,6 +2457,53 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
             source: "read-only config".to_string(),
         },
     ];
+    // Domain research servers (category-gated at call time; see
+    // reference-mcp.mjs researchMcpServersForCategory).
+    mcp_servers.push(McpServerStatus {
+        id: "arxiv".to_string(),
+        name: "arXiv".to_string(),
+        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        tools: vec![
+            "arxiv_search".to_string(),
+            "arxiv_get_metadata".to_string(),
+            "arxiv_read_paper".to_string(),
+        ],
+        source: "bundled · science categories + structure".to_string(),
+    });
+    mcp_servers.push(McpServerStatus {
+        id: "openalex".to_string(),
+        name: "OpenAlex".to_string(),
+        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        tools: vec![
+            "search_works".to_string(),
+            "get_work".to_string(),
+            "get_related_works".to_string(),
+            "search_by_topic".to_string(),
+        ],
+        source: "bundled · science categories + structure".to_string(),
+    });
+    mcp_servers.push(McpServerStatus {
+        id: "semanticscholar".to_string(),
+        name: "Semantic Scholar".to_string(),
+        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        tools: vec![
+            "search_papers".to_string(),
+            "get_paper".to_string(),
+            "get_paper_citations".to_string(),
+            "get_paper_references".to_string(),
+        ],
+        source: "bundled · science categories + structure".to_string(),
+    });
+    mcp_servers.push(McpServerStatus {
+        id: "ytt".to_string(),
+        name: "YouTube Transcripts".to_string(),
+        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        tools: vec![
+            "get-transcript".to_string(),
+            "get-transcript-languages".to_string(),
+        ],
+        source: "bundled · video categories (drafts)".to_string(),
+    });
     if brave_configured {
         mcp_servers.push(McpServerStatus {
             id: "brave".to_string(),
