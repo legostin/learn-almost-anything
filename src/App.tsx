@@ -9069,12 +9069,20 @@ function ArticleReader({
   fontPx: number;
   widgetCtx?: WidgetCtx;
 }) {
-  // Internal HTML-comment markers (e.g. <!-- la:deepdive -->) are plumbing,
-  // not content — react-markdown would render them as literal text.
-  const parts = useMemo(
-    () => splitWidgetMarkers(stripInternalMarkers(article)),
-    [article]
-  );
+  const t = useT();
+  // Assistant-appended deep-dive sections live after `<!-- la:deepdive -->`
+  // markers: render them under a labeled "Additions" block instead of letting
+  // the raw comment leak into the text. Other internal markers are stripped.
+  const { mainParts, extraParts } = useMemo(() => {
+    const segments = article.split(/<!--\s*la:deepdive\s*-->/);
+    const main = segments[0] ?? "";
+    const extra = segments.slice(1).join("\n\n").trim();
+    return {
+      mainParts: splitWidgetMarkers(stripInternalMarkers(main)),
+      extraParts: extra ? splitWidgetMarkers(stripInternalMarkers(extra)) : [],
+    };
+  }, [article]);
+  const parts = useMemo(() => [...mainParts, ...extraParts], [mainParts, extraParts]);
   const lightboxImages = useMemo(
     () => collectLightboxImages(parts, widgets),
     [parts, widgets]
@@ -9103,27 +9111,37 @@ function ArticleReader({
     }
   }, [lightboxImages.length, lightboxIndex]);
 
+  const renderPart = (
+    p: { kind: "md"; text: string } | { kind: "widget"; id: string },
+    key: number
+  ) =>
+    p.kind === "md" ? (
+      <ReactMarkdown
+        key={key}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        components={{ pre: CodeBlock }}
+      >
+        {p.text}
+      </ReactMarkdown>
+    ) : (
+      <WidgetRenderer
+        key={key}
+        id={p.id}
+        widget={widgets[p.id]}
+        onOpenImage={openLightboxImage}
+        widgetCtx={widgetCtx}
+      />
+    );
+
   return (
     <article className="reader" style={{ ["--reader-font" as string]: `${fontPx}px` }}>
-      {parts.map((p, i) =>
-        p.kind === "md" ? (
-          <ReactMarkdown
-            key={i}
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-            components={{ pre: CodeBlock }}
-          >
-            {p.text}
-          </ReactMarkdown>
-        ) : (
-          <WidgetRenderer
-            key={i}
-            id={p.id}
-            widget={widgets[p.id]}
-            onOpenImage={openLightboxImage}
-            widgetCtx={widgetCtx}
-          />
-        )
+      {mainParts.map((p, i) => renderPart(p, i))}
+      {extraParts.length > 0 && (
+        <section className="deepdive-block">
+          <div className="deepdive-kicker">✚ {t("deepdiveTitle")}</div>
+          {extraParts.map((p, i) => renderPart(p, mainParts.length + i))}
+        </section>
       )}
       {lightboxIndex !== null && lightboxImages[lightboxIndex] && (
         <ImageLightbox
