@@ -9081,7 +9081,14 @@ function defaultWidget(kind: string): any {
     case "diagram":
       return { type: "diagram", source: "", caption: "" };
     case "interactive":
-      return { type: "interactive", html: "", css: "", js: "", title: "" };
+      // New interactive blocks are template widgets (free-form HTML is legacy).
+      return {
+        type: "interactive",
+        template: "quiz",
+        title: "",
+        description: "",
+        params: { items: [{ question: "", options: ["", ""], correct: 0 }] },
+      };
     case "checkpoint":
       return { type: "checkpoint", question: "", answer: "" };
     case "recall":
@@ -9470,6 +9477,55 @@ function LeWidgetBlock({
             ✦ {t("widgetGenerate")}
           </button>
         </div>
+      </figure>
+    );
+  }
+  if (type === "interactive" && widget?.template) {
+    // Template widget: edit params as JSON with validate-on-apply + live preview.
+    return (
+      <figure className="le-widget">
+        <div className="le-widget-tag">
+          ⚙ {t("blockInteractive")} · {widget.template}
+        </div>
+        <input
+          className="le-cap"
+          placeholder={t("titleLabel")}
+          value={widget?.title || ""}
+          disabled={busy}
+          onChange={(e) => onPatch({ title: e.target.value })}
+        />
+        <div className="le-gen-row">
+          <input
+            placeholder={t("genDescribePlaceholder")}
+            value={genDesc}
+            onChange={(e) => setGenDesc(e.target.value)}
+          />
+          <button
+            disabled={busy || !genDesc.trim()}
+            onClick={() =>
+              runHeavy(async () => {
+                await invoke("fix_widget", { ...args, instruction: genDesc });
+                setGenDesc("");
+              })
+            }
+          >
+            ✦ {t("widgetGenerate")}
+          </button>
+        </div>
+        <button className="ghost le-toggle" onClick={() => setShowCode((v) => !v)}>
+          {showCode ? t("hideCode") : t("tplEditParams")}
+        </button>
+        {showCode && (
+          <TplParamsEditor
+            params={widget?.params}
+            disabled={busy}
+            onApply={(params) => onPatch({ params, error: undefined })}
+          />
+        )}
+        <button className="ghost le-toggle" onClick={() => setShowPreview((v) => !v)}>
+          {showPreview ? t("hidePreview") : t("showPreview")}
+        </button>
+        {showPreview && <TemplateWidget id={wid} widget={widget} />}
       </figure>
     );
   }
@@ -11507,6 +11563,52 @@ function TemplateWidget({
     <TplFrame id={id} title={widget.title} description={widget.description}>
       <Component params={widget.params} />
     </TplFrame>
+  );
+}
+
+// Minimal params editor for template widgets in the LessonEditor: a JSON
+// textarea with validate-on-apply (deep validation lives in the sidecar
+// normalizer; here we only guard against unparseable JSON).
+function TplParamsEditor({
+  params,
+  disabled,
+  onApply,
+}: {
+  params: any;
+  disabled?: boolean;
+  onApply: (params: any) => void;
+}) {
+  const t = useT();
+  const [draft, setDraft] = useState(() => JSON.stringify(params ?? {}, null, 2));
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="tpl-params-editor">
+      <textarea
+        className="le-code"
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setError(null);
+        }}
+      />
+      <button
+        className="ghost le-toggle"
+        disabled={disabled}
+        onClick={() => {
+          try {
+            const parsed = JSON.parse(draft);
+            if (!parsed || typeof parsed !== "object") throw new Error("not an object");
+            onApply(parsed);
+          } catch {
+            setError(t("tplJsonError"));
+          }
+        }}
+      >
+        {t("tplApply")}
+      </button>
+      {error && <span className="le-error">{error}</span>}
+    </div>
   );
 }
 

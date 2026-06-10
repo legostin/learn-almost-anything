@@ -2702,6 +2702,54 @@ Return a corrected, VALID Mermaid diagram (labels in "${lang}") and a short capt
     if (typeof parsed.caption === "string" && parsed.caption.trim()) out.caption = parsed.caption.trim();
     return { widget: out };
   }
+  if (type === "interactive" && w.template) {
+    // Template widget: "fixing" = regenerating params against the catalog.
+    const fixTemplateSchema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        title: { type: "string" },
+        description: { type: "string" },
+        paramsJson: { type: "string" },
+      },
+      required: ["title", "description", "paramsJson"],
+    };
+    const prompt = `You are fixing a parameterized interactive widget in a lesson on "${topic}" (language "${lang}").
+
+${templateCatalogBlock(lang)}
+
+The widget uses template "${w.template}". Current state:
+{"title":${JSON.stringify(w.title || "")},"description":${JSON.stringify(w.description || "")},"params":${JSON.stringify(w.params ?? {})}}
+${w.error ? `Known problem: ${w.error}\n` : ""}${instr ? `Learner's instruction: ${instr}\n` : ""}Lesson context (stay faithful to it):
+<lesson>
+${lessonCtx}
+</lesson>
+Return the corrected widget for the SAME template "${w.template}", obeying its
+param shape and limits exactly. All learner-visible strings in "${lang}".
+paramsJson = the params object JSON-encoded as a string.`;
+    const text = await runStreamed(prompt, fixTemplateSchema, ctx?.progress, { braveApiKey, modelConfig });
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    const tw = parsed
+      ? normalizeTemplateWidget({ ...parsed, template: w.template, params: parsed.paramsJson })
+      : null;
+    if (tw) {
+      return {
+        widget: {
+          template: tw.template,
+          title: tw.title,
+          description: tw.description,
+          params: tw.params,
+          error: null,
+        },
+      };
+    }
+    return { widget: { error: "invalid template params" } };
+  }
   if (type === "interactive") {
     let current = {
       html: w.html || "",

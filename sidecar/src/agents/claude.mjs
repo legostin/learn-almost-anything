@@ -1253,6 +1253,38 @@ Output ONLY a JSON object on a single line, no prose, no fence:
     if (typeof parsed.caption === "string" && parsed.caption.trim()) out.caption = parsed.caption.trim();
     return { widget: out };
   }
+  if (type === "interactive" && w.template) {
+    // Template widget: "fixing" = regenerating params against the catalog.
+    const prompt = `You are fixing a parameterized interactive widget in a lesson on "${topic}" (language "${lang}").
+
+${templateCatalogBlock(lang)}
+
+The widget uses template "${w.template}". Current state:
+{"title":${JSON.stringify(w.title || "")},"description":${JSON.stringify(w.description || "")},"params":${JSON.stringify(w.params ?? {})}}
+${w.error ? `Known problem: ${w.error}\n` : ""}${instr ? `Learner's instruction: ${instr}\n` : ""}Lesson context (stay faithful to it):
+<lesson>
+${lessonCtx}
+</lesson>
+Return the corrected widget for the SAME template "${w.template}", obeying its
+param shape and limits exactly. All learner-visible strings in "${lang}".
+Output ONLY a JSON object on a single line, no prose, no fence:
+{"title":"...","description":"...","params":{...}}`;
+    const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+    const parsed = extractJson(text) || {};
+    const tw = normalizeTemplateWidget({ ...parsed, template: w.template });
+    if (tw) {
+      return {
+        widget: {
+          template: tw.template,
+          title: tw.title,
+          description: tw.description,
+          params: tw.params,
+          error: null,
+        },
+      };
+    }
+    return { widget: { error: "invalid template params" } };
+  }
   if (type === "interactive") {
     let current = {
       html: w.html || "",
