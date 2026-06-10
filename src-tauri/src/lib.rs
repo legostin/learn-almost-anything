@@ -52,15 +52,6 @@ fn generated_course_title(value: &Value) -> Option<String> {
         .map(|s| s.chars().take(80).collect::<String>())
 }
 
-fn fast_model_config(settings: &SettingsState, backend: &str) -> Value {
-    let mut model_config = settings.stage_model(backend, "planning");
-    let reasoning = "low";
-    if let Value::Object(map) = &mut model_config {
-        map.insert("reasoning".to_string(), json!(reasoning));
-    }
-    model_config
-}
-
 #[tauri::command]
 fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -176,7 +167,7 @@ fn start_course_suggestion(
         })
         .collect();
     let sidecar = sidecar_state.inner().clone();
-    let model_config = fast_model_config(settings_state.inner().as_ref(), &backend);
+    let model_config = settings_state.stage_model(&backend, "utility");
     let app2 = app.clone();
     if COURSE_SUGGESTION_RUNNING.swap(true, Ordering::AcqRel) {
         return Ok(());
@@ -438,7 +429,9 @@ async fn wizard_next_question(
             let conn = db.0.lock().map_err(|e| e.to_string())?;
             course_space_context(&paths, &conn, &course)
         };
-        let model_config = settings.stage_model(&course.agent, "planning");
+        // A wizard question is a small adaptive call — utility bucket (cheap
+        // model + low reasoning), not the heavy planning one.
+        let model_config = settings.stage_model(&course.agent, "utility");
         let params = json!({
             "backend": course.agent,
             "topic": course.topic,
@@ -784,6 +777,7 @@ fn spawn_next_queued_submodule(
     gemini_key: Option<String>,
     writing_model: serde_json::Value,
     tests_model: serde_json::Value,
+    verify_model: serde_json::Value,
     gemini_image_model: String,
     catalog_upload_token: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -808,6 +802,7 @@ fn spawn_next_queued_submodule(
         gemini_key,
         writing_model,
         tests_model,
+        verify_model,
         gemini_image_model,
         catalog_upload_token,
         true,
@@ -831,6 +826,7 @@ fn spawn_generate_submodule(
     gemini_key: Option<String>,
     writing_model: serde_json::Value,
     tests_model: serde_json::Value,
+    verify_model: serde_json::Value,
     gemini_image_model: String,
     catalog_upload_token: Option<String>,
     course_serial: bool,
@@ -902,6 +898,7 @@ fn spawn_generate_submodule(
         // (writing) and the test/assignment (tests) stages by tier.
         let writing_model = apply_tier_reasoning(writing_model, &profile, "writing");
         let tests_model = apply_tier_reasoning(tests_model, &profile, "tests");
+        let verify_model = apply_tier_reasoning(verify_model, &profile, "verify");
         let total_started = Instant::now();
         let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
             Ok(conn) => course_space_context(&paths, &conn, &course),
@@ -1135,6 +1132,7 @@ fn spawn_generate_submodule(
                 gemini_key.clone(),
                 writing_model.clone(),
                 tests_model.clone(),
+                verify_model.clone(),
                 gemini_image_model.clone(),
                 catalog_upload_token.clone(),
             ) {
@@ -1429,7 +1427,7 @@ fn spawn_generate_submodule(
                         "category": course.category,
                         "article": current.article,
                         "sources": current.sources,
-                        "modelConfig": tests_model,
+                        "modelConfig": verify_model,
                     });
                     let cb = {
                         let app3 = app2.clone();
@@ -3110,7 +3108,12 @@ async fn grade_card_with_ai(
                 .ok_or_else(|| format!("course not found: {}", card.course_id))?;
             (card, course)
         };
-        let model = settings.stage_model(&course.agent, "tests");
+        let profile = resolve_course_profile(&settings, &course);
+        let model = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "utility"),
+            &profile,
+            "utility",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -3169,7 +3172,12 @@ async fn rewrite_leech_card(
         )
         .map(|c| c.article)
         .unwrap_or_default();
-        let model = settings.stage_model(&course.agent, "tests");
+        let profile = resolve_course_profile(&settings, &course);
+        let model = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "utility"),
+            &profile,
+            "utility",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -3275,7 +3283,12 @@ async fn extract_learner_profile(
                 .ok_or_else(|| format!("course not found: {course_id}"))?
         };
         let course_md = courses::read_course_md(&paths, &course_id).map_err(|e| e.to_string())?;
-        let model = settings.stage_model(&course.agent, "tests");
+        let profile = resolve_course_profile(&settings, &course);
+        let model = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "utility"),
+            &profile,
+            "utility",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -4029,6 +4042,7 @@ fn start_generate_submodule(
     }
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let verify_model = settings_state.stage_model(&course.agent, "verify");
     spawn_generate_submodule(
         &app,
         db_state.inner().clone(),
@@ -4040,6 +4054,7 @@ fn start_generate_submodule(
         settings_state.gemini_api_key(),
         writing_model,
         tests_model,
+        verify_model,
         settings_state.gemini_image_model(),
         settings_state.catalog_upload_token(),
         false,
@@ -4070,6 +4085,7 @@ fn start_first_pending_submodule(
     };
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let verify_model = settings_state.stage_model(&course.agent, "verify");
     let started = spawn_generate_submodule(
         &app,
         db_state.inner().clone(),
@@ -4081,6 +4097,7 @@ fn start_first_pending_submodule(
         settings_state.gemini_api_key(),
         writing_model,
         tests_model,
+        verify_model,
         settings_state.gemini_image_model(),
         settings_state.catalog_upload_token(),
         true,
@@ -4117,6 +4134,7 @@ fn start_full_course_generation(
     };
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let verify_model = settings_state.stage_model(&course.agent, "verify");
     spawn_next_queued_submodule(
         &app,
         db_state.inner().clone(),
@@ -4127,6 +4145,7 @@ fn start_full_course_generation(
         settings_state.gemini_api_key(),
         writing_model,
         tests_model,
+        verify_model,
         settings_state.gemini_image_model(),
         settings_state.catalog_upload_token(),
     )
@@ -4998,7 +5017,12 @@ async fn ask_course_assistant(
         }
         // Both agents do vision on a local image (Claude via base64, Codex via a
         // local_image input item), so keep the course's own agent.
-        let model = settings.stage_model(&course.agent, "writing");
+        let profile = resolve_course_profile(&settings, &course);
+        let model = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "assistant"),
+            &profile,
+            "assistant",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -5130,7 +5154,12 @@ async fn edit_text(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("course not found: {course_id}"))?
         };
-        let model = settings.stage_model(&course.agent, "writing");
+        let profile = resolve_course_profile(&settings, &course);
+        let model = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "assistant"),
+            &profile,
+            "assistant",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -5284,7 +5313,7 @@ async fn search_widget_candidates(
         if query.is_empty() {
             return Ok(Vec::new());
         }
-        let model_config = settings.stage_model(&course.agent, "writing");
+        let model_config = settings.stage_model(&course.agent, "utility");
         let hits = if let Some(key) = settings.brave_api_key() {
             media::brave_image_search(&key, &query, 12).map_err(|e| e.to_string())?
         } else {
@@ -5415,7 +5444,12 @@ async fn fix_widget(
         if wtype != "diagram" && wtype != "interactive" {
             return Err("only diagram and interactive widgets can be auto-fixed".into());
         }
-        let model_config = settings.stage_model(&course.agent, "writing");
+        let profile = resolve_course_profile(&settings, &course);
+        let model_config = apply_tier_reasoning(
+            settings.stage_model(&course.agent, "assistant"),
+            &profile,
+            "assistant",
+        );
         let params = json!({
             "backend": course.agent,
             "language": course.language,

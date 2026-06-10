@@ -360,10 +360,17 @@ type StageDetail = { stage: StageName; label?: string; detail?: string };
 type Bubble = { kind: string; text: string; stage?: string };
 
 type StageModel = { model: string | null; reasoning: string | null };
-type BackendModels = { planning: StageModel; writing: StageModel; tests: StageModel };
+type BackendModels = {
+  planning: StageModel;
+  writing: StageModel;
+  tests: StageModel;
+  assistant: StageModel;
+  utility: StageModel;
+  verify: StageModel;
+};
 type ModelConfig = { claude: BackendModels; codex: BackendModels };
 type ModelBackend = "claude" | "codex";
-type ModelCategory = "planning" | "writing" | "tests";
+type ModelCategory = "planning" | "writing" | "tests" | "assistant" | "utility" | "verify";
 type AgentAvailability = { claude: boolean; codex: boolean };
 type ModelInfoLite = {
   value: string;
@@ -3192,7 +3199,7 @@ function SettingsModal({
       ...models,
       [modelBackend]: {
         ...models[modelBackend],
-        [cat]: { ...models[modelBackend][cat], ...patch },
+        [cat]: { ...(models[modelBackend][cat] ?? { model: null, reasoning: null }), ...patch },
       },
     };
     setModels(next);
@@ -3473,22 +3480,35 @@ function SettingsModal({
                 </button>
               ))}
             </div>
-            {(["planning", "writing", "tests"] as const).map((cat) => {
-              const sm = models[modelBackend][cat];
+            {(
+              ["planning", "writing", "tests", "assistant", "utility", "verify"] as const
+            ).map((cat) => {
+              const sm = models[modelBackend][cat] ?? { model: null, reasoning: null };
               const list = modelList[modelBackend];
               const loading = list === null;
               const levels = effortLevelsFor(sm.model);
               const defaultEntry = (list ?? []).find((m) => m.value === "default");
               const defaultName = defaultEntry?.description?.split("·")[0]?.trim();
-              const defaultLabel = defaultName
-                ? `${t("modelsDefault")} · ${defaultName}`
-                : t("modelsDefault");
+              // Utility's blank model means "auto-pick the cheapest available",
+              // not the agent default.
+              const defaultLabel =
+                cat === "utility"
+                  ? t("modelsAutoCheap")
+                  : defaultName
+                    ? `${t("modelsDefault")} · ${defaultName}`
+                    : t("modelsDefault");
               const catLabel =
                 cat === "planning"
                   ? t("modelsCatPlanning")
                   : cat === "writing"
                     ? t("modelsCatWriting")
-                    : t("modelsCatTests");
+                    : cat === "tests"
+                      ? t("modelsCatTests")
+                      : cat === "assistant"
+                        ? t("modelsCatAssistant")
+                        : cat === "utility"
+                          ? t("modelsCatUtility")
+                          : t("modelsCatVerify");
               return (
                 <div className="model-row" key={cat}>
                   <span className="model-cat">{catLabel}</span>

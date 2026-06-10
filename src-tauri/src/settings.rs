@@ -65,6 +65,18 @@ pub struct BackendModels {
     pub writing: StageModel,
     #[serde(default)]
     pub tests: StageModel,
+    /// Interactive helpers: course assistant, editor rewrites, fix-widget —
+    /// latency matters more than depth.
+    #[serde(default)]
+    pub assistant: StageModel,
+    /// Small fast calls: wizard questions, card grading, profile extraction.
+    /// Empty model => the sidecar auto-picks the cheapest available
+    /// (preferCheap flag).
+    #[serde(default)]
+    pub utility: StageModel,
+    /// Post-ready fact-check pass.
+    #[serde(default)]
+    pub verify: StageModel,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -133,6 +145,9 @@ pub struct TierPreset {
     pub planning_reasoning: Option<&'static str>,
     pub writing_reasoning: Option<&'static str>,
     pub tests_reasoning: Option<&'static str>,
+    pub assistant_reasoning: Option<&'static str>,
+    pub utility_reasoning: Option<&'static str>,
+    pub verify_reasoning: Option<&'static str>,
 }
 
 /// Categories where accuracy matters most — the cheap-tier safety floor forbids
@@ -167,6 +182,9 @@ pub fn tier_preset(tier: &str) -> TierPreset {
             planning_reasoning: Some("low"),
             writing_reasoning: Some("medium"),
             tests_reasoning: Some("low"),
+            assistant_reasoning: Some("low"),
+            utility_reasoning: Some("low"),
+            verify_reasoning: Some("low"),
         },
         "premium" => TierPreset {
             pedagogy_intensity: "max",
@@ -177,6 +195,10 @@ pub fn tier_preset(tier: &str) -> TierPreset {
             planning_reasoning: Some("high"),
             writing_reasoning: Some("high"),
             tests_reasoning: Some("medium"),
+            assistant_reasoning: Some("medium"),
+            // Utility stays cheap on every tier — these are mechanical calls.
+            utility_reasoning: Some("low"),
+            verify_reasoning: Some("medium"),
         },
         // balanced (default) == today's behavior (no reasoning override)
         _ => TierPreset {
@@ -188,6 +210,9 @@ pub fn tier_preset(tier: &str) -> TierPreset {
             planning_reasoning: None,
             writing_reasoning: None,
             tests_reasoning: None,
+            assistant_reasoning: None,
+            utility_reasoning: Some("low"),
+            verify_reasoning: None,
         },
     }
 }
@@ -271,13 +296,17 @@ impl GenerationProfile {
         tier_preset(self.tier()).max_test_questions
     }
 
-    /// Reasoning-effort override for a stage ("planning" | "writing" | "tests"),
-    /// or None to leave the agent default (balanced tier).
+    /// Reasoning-effort override for a stage ("planning" | "writing" | "tests"
+    /// | "assistant" | "utility" | "verify"), or None to leave the agent
+    /// default.
     pub fn stage_reasoning(&self, stage: &str) -> Option<&'static str> {
         let p = tier_preset(self.tier());
         match stage {
             "planning" => p.planning_reasoning,
             "tests" => p.tests_reasoning,
+            "assistant" => p.assistant_reasoning,
+            "utility" => p.utility_reasoning,
+            "verify" => p.verify_reasoning,
             _ => p.writing_reasoning,
         }
     }
@@ -492,9 +521,26 @@ impl SettingsState {
         let stage = match category {
             "planning" => bm.planning,
             "tests" => bm.tests,
+            "assistant" => bm.assistant,
+            "utility" => bm.utility,
+            "verify" => bm.verify,
             _ => bm.writing,
         };
-        stage.to_json()
+        let no_model = stage
+            .model
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true);
+        let mut json = stage.to_json();
+        // Utility calls with no explicit model: let the sidecar auto-pick the
+        // cheapest available model (haiku-* / *-mini), falling back to default.
+        if category == "utility" && no_model {
+            if let serde_json::Value::Object(map) = &mut json {
+                map.insert("preferCheap".to_string(), serde_json::json!(true));
+            }
+        }
+        json
     }
 
     pub fn set_models(&self, models: ModelConfig) -> std::io::Result<()> {

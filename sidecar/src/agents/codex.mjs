@@ -217,6 +217,7 @@ function threadOptions(opts) {
 }
 
 async function runOnce(prompt, outputSchema, opts) {
+  opts = { ...opts, modelConfig: await resolveModelConfig(opts?.modelConfig) };
   const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
   try {
     const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
@@ -231,6 +232,7 @@ async function runOnce(prompt, outputSchema, opts) {
 
 async function runStreamed(prompt, outputSchema, onProgress, opts) {
   if (!onProgress) return await runOnce(prompt, outputSchema, opts);
+  opts = { ...opts, modelConfig: await resolveModelConfig(opts?.modelConfig) };
   const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
   const idleTimeoutMs = opts?.idleTimeoutMs ?? 0;
   const totalTimeoutMs = opts?.totalTimeoutMs ?? 0;
@@ -357,6 +359,29 @@ export async function listModels() {
       },
     ],
   };
+}
+
+// preferCheap: utility-bucket calls with no explicit model auto-pick the
+// cheapest available (mini family). Best-effort — failure falls back to the
+// agent's default model.
+let _cheapModel; // undefined = unresolved, null = none found
+async function resolveCheapModel() {
+  if (_cheapModel !== undefined) return _cheapModel;
+  try {
+    const { models } = await listModels();
+    _cheapModel =
+      models.find((m) => m.value.toLowerCase().includes("mini"))?.value ?? null;
+  } catch {
+    _cheapModel = null;
+  }
+  return _cheapModel;
+}
+
+/** Resolve modelConfig.preferCheap into a concrete cheap model when unset. */
+async function resolveModelConfig(modelConfig) {
+  if (!modelConfig?.preferCheap || modelConfig.model) return modelConfig;
+  const cheap = await resolveCheapModel();
+  return cheap ? { ...modelConfig, model: cheap } : modelConfig;
 }
 
 const GENERATED_IMAGES_DIR = join(homedir(), ".codex", "generated_images");

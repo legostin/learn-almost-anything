@@ -236,18 +236,19 @@ function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig, dirs, cat
 
 async function runStreamed(prompt, onProgress, opts) {
   let text = "";
+  const modelConfig = await resolveModelConfig(opts?.modelConfig);
   // With web/Brave tools the agent may take several turns (search, read,
   // write); buildClaudeOptions picks the turn budget from the enabled tools.
   const options = buildClaudeOptions({
     maxTurns: opts?.maxTurns,
     web: opts?.web,
     braveApiKey: opts?.braveApiKey,
-    modelConfig: opts?.modelConfig,
+    modelConfig,
     dirs: opts?.dirs,
     category: opts?.category,
     stage: opts?.stage,
   });
-  const rec = devlog.startCall({ backend: "claude", prompt, model: opts?.modelConfig?.model });
+  const rec = devlog.startCall({ backend: "claude", prompt, model: modelConfig?.model });
   try {
   for await (const message of query({ prompt, options })) {
     if (message.type === "assistant") {
@@ -345,6 +346,29 @@ export async function listModels() {
     } catch {}
   }
   return { models: _modelsCache };
+}
+
+// preferCheap: utility-bucket calls with no explicit model auto-pick the
+// cheapest available (haiku family). Best-effort — any failure falls back to
+// the agent's default model.
+let _cheapModel; // undefined = unresolved, null = none found
+async function resolveCheapModel() {
+  if (_cheapModel !== undefined) return _cheapModel;
+  try {
+    const { models } = await listModels();
+    _cheapModel =
+      models.find((m) => m.value.toLowerCase().includes("haiku"))?.value ?? null;
+  } catch {
+    _cheapModel = null;
+  }
+  return _cheapModel;
+}
+
+/** Resolve modelConfig.preferCheap into a concrete cheap model when unset. */
+async function resolveModelConfig(modelConfig) {
+  if (!modelConfig?.preferCheap || modelConfig.model) return modelConfig;
+  const cheap = await resolveCheapModel();
+  return cheap ? { ...modelConfig, model: cheap } : modelConfig;
 }
 
 // Claude has no image generation; the dispatcher stays uniform via this stub.
