@@ -6181,6 +6181,7 @@ fn estimate_generation_minutes(
     profile: &GenerationProfile,
     category: Option<&str>,
     pending: u32,
+    has_research_pack: bool,
 ) -> (u32, u32) {
     if pending == 0 {
         return (0, 0);
@@ -6191,9 +6192,11 @@ fn estimate_generation_minutes(
         Some("low") | Some("off") => 55,
         _ => 80,
     };
-    let research: u32 = match profile.research_max_turns(category) {
+    // With a research pack the draft researches on the reduced budget.
+    let research: u32 = match profile.draft_research_max_turns(category, has_research_pack) {
         t if t >= 16 => 50,
         t if t >= 10 => 20,
+        t if t >= 4 => 10,
         _ => 5,
     };
     let mut per: u32 = draft + research + 40 /* review */ + 30 /* annotate */;
@@ -6211,6 +6214,9 @@ fn estimate_generation_minutes(
     if profile.pedagogy_intensity() != "lean" {
         per += 30; // flashcards
     }
+    if profile.should_fact_check(category) {
+        per += 45; // background verify pass (total wall-clock, not readability)
+    }
     let total = (per.saturating_mul(pending)) as f64;
     let low = ((total * 0.7) / 60.0).ceil() as u32;
     let high = ((total * 1.4) / 60.0).ceil() as u32;
@@ -6221,6 +6227,7 @@ fn estimate_generation_minutes(
 fn estimate_course_generation(
     db_state: tauri::State<'_, Arc<Db>>,
     settings_state: tauri::State<'_, Arc<SettingsState>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
     course_id: String,
 ) -> Result<GenEstimate, String> {
     let (course, structure) = {
@@ -6242,7 +6249,9 @@ fn estimate_course_generation(
         }
     }
     let profile = resolve_course_profile(&settings_state, &course);
-    let (low, high) = estimate_generation_minutes(&profile, course.category.as_deref(), pending);
+    let has_pack = courses::read_course_research(&paths_state, &course_id).is_some();
+    let (low, high) =
+        estimate_generation_minutes(&profile, course.category.as_deref(), pending, has_pack);
     Ok(GenEstimate {
         submodules,
         pending,
