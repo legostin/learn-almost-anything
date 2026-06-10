@@ -69,6 +69,7 @@ const methods = {
   translate_markdown: async (params) => pickAgent(params).translateMarkdown(params),
   translate_diagram: async (params) => pickAgent(params).translateDiagram(params),
   translate_interactive: async (params) => pickAgent(params).translateInteractive(params),
+  translate_template_params: async (params, ctx) => pickAgent(params).translateTemplateParams(params, ctx),
   detect_image_text_language: async (params) => pickAgent(params).detectImageTextLanguage(params),
   course_assistant: async (params, ctx) => pickAgent(params).courseAssistant(params, ctx),
   grade_answer: async (params, ctx) => pickAgent(params).gradeAnswer(params, ctx),

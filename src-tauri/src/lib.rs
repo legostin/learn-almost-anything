@@ -4791,6 +4791,35 @@ fn translate_course_content(
                                     }
                                 }
                             }
+                            // Template widgets: translate the human-readable
+                            // params (the sidecar re-validates and falls back
+                            // to the source params on any failure).
+                            Some("interactive")
+                                if w.get("template").and_then(|t| t.as_str()).is_some() =>
+                            {
+                                let template = w
+                                    .get("template")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let params = w.get("params").cloned().unwrap_or(json!({}));
+                                if let Ok(v) = sidecar.call(
+                                    "translate_template_params",
+                                    json!({
+                                        "backend": backend,
+                                        "sourceLang": src_lang,
+                                        "targetLang": target,
+                                        "template": template,
+                                        "params": params,
+                                        "modelConfig": model,
+                                    }),
+                                    Duration::from_secs(600),
+                                ) {
+                                    if let Some(p) = v.get("params").filter(|p| p.is_object()) {
+                                        w["params"] = p.clone();
+                                    }
+                                }
+                            }
                             Some("interactive") => {
                                 let html =
                                     w.get("html").and_then(|v| v.as_str()).unwrap_or("").to_string();

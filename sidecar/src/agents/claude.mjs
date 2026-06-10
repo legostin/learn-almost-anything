@@ -2096,6 +2096,36 @@ Output ONLY a JSON object with the KEPT cards on a single line, no prose, no mar
   return { flashcards: normalizeFlashcards(parsed?.flashcards) };
 }
 
+/**
+ * Translate the human-readable strings inside a template widget's params.
+ * Structure-preserving: the result is re-validated by the shared normalizer
+ * and the SOURCE params are returned on any failure — translation must never
+ * break a widget.
+ */
+export async function translateTemplateParams(
+  { sourceLang, targetLang, template, params, modelConfig },
+  ctx
+) {
+  const prompt = `Translate the human-readable strings inside this learning-widget params JSON
+from language "${sourceLang || "auto"}" into language "${targetLang}".
+Widget template: "${template}".
+Rules:
+- Translate ONLY display text: questions, options, explanations, prompts, labels,
+  step titles/texts, card fronts/backs, list items, bucket names, hints, accepted
+  answers, notes.
+- Do NOT change keys, numbers, booleans, indexes, or array order/length.
+- Keep these fields VERBATIM: name, expr, format, suffix, code, codeLang.
+- In fillblank texts keep the literal gap token "___" intact.
+Output ONLY the same JSON object shape on a single line, no prose, no fence.
+
+${JSON.stringify(params ?? {})}`;
+  ctx?.progress?.({ label: "translating" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  const tw = parsed ? normalizeTemplateWidget({ template, params: parsed }) : null;
+  return { params: tw ? tw.params : params };
+}
+
 // ── Fact-check (post-ready background verification pass) ────────────────────
 
 function normalizeFactCheck(parsed) {

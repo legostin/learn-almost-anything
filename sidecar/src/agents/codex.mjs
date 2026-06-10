@@ -768,6 +768,34 @@ function widgetContextBlock(widget) {
   return `The learner is asking about THIS specific ${type} widget in the lesson (id ${widget.id || "?"}) — focus your answer on it:\n<widget>\n${detail}\n</widget>\n\n`;
 }
 
+/**
+ * Translate the human-readable strings inside a template widget's params.
+ * Re-validated by the shared normalizer; source params returned on failure.
+ */
+export async function translateTemplateParams(
+  { sourceLang, targetLang, template, params, modelConfig },
+  ctx
+) {
+  const prompt = `Translate the human-readable strings inside this learning-widget params JSON
+from language "${sourceLang || "auto"}" into language "${targetLang}".
+Widget template: "${template}".
+Rules:
+- Translate ONLY display text: questions, options, explanations, prompts, labels,
+  step titles/texts, card fronts/backs, list items, bucket names, hints, accepted
+  answers, notes.
+- Do NOT change keys, numbers, booleans, indexes, or array order/length.
+- Keep these fields VERBATIM: name, expr, format, suffix, code, codeLang.
+- In fillblank texts keep the literal gap token "___" intact.
+Return ONLY the same JSON object shape, no prose.
+
+${JSON.stringify(params ?? {})}`;
+  ctx?.progress?.({ label: "translating" });
+  const text = await runStreamed(prompt, undefined, ctx?.progress, { modelConfig });
+  const parsed = extractJsonLoose(text);
+  const tw = parsed ? normalizeTemplateWidget({ template, params: parsed }) : null;
+  return { params: tw ? tw.params : params };
+}
+
 // ── Fact-check (post-ready background verification pass) ────────────────────
 
 const factCheckSchema = {
