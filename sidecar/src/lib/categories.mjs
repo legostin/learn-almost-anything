@@ -11,6 +11,17 @@
 
 /** @typedef {{ title: string, url: string }} Source */
 
+// Short per-category research-tool hints, appended to the preferred-sources
+// block when the category has dedicated MCP tools granted (reference-mcp.mjs
+// researchMcpServersForCategory). Keep these to 1-2 sentences — they run on
+// every draft.
+const SCIENCE_TOOL_HINT =
+  "For scientific claims, prefer the dedicated research tools over open-web search: arXiv tools (arxiv_search / arxiv_read_paper) for primary literature, OpenAlex (search_works / search_by_topic) and Semantic Scholar (search_papers — it is slow, 1-2 lookups max) to confirm citations and find canonical papers.";
+const HEALTH_TOOL_HINT =
+  "Verify medical claims against PubMed-indexed work via the Semantic Scholar / OpenAlex tools (1-2 lookups max — Semantic Scholar is slow); never state dosages, thresholds, or safety claims you could not ground.";
+const VIDEO_TOOL_HINT =
+  "Before recommending a video, pull its transcript with the youtube-transcript tool (get-transcript) and confirm it actually covers the lesson's points — never embed a video you have not transcript-checked.";
+
 /** Ordered taxonomy. `general` is the fallback and intentionally has no sources. */
 export const CATEGORIES = [
   {
@@ -25,6 +36,7 @@ export const CATEGORIES = [
   },
   {
     id: "data_ai",
+    toolHint: SCIENCE_TOOL_HINT,
     label: "Data, ML & AI",
     sources: [
       { title: "arXiv", url: "https://arxiv.org" },
@@ -35,6 +47,7 @@ export const CATEGORIES = [
   },
   {
     id: "science_math",
+    toolHint: SCIENCE_TOOL_HINT,
     label: "Science & Mathematics",
     sources: [
       { title: "Wikipedia", url: "https://en.wikipedia.org" },
@@ -46,6 +59,7 @@ export const CATEGORIES = [
   },
   {
     id: "engineering",
+    toolHint: SCIENCE_TOOL_HINT,
     label: "Engineering & Hardware",
     sources: [
       { title: "Official standards & datasheets", url: "the manufacturer / standards body site" },
@@ -86,6 +100,7 @@ export const CATEGORIES = [
   },
   {
     id: "arts_design",
+    toolHint: VIDEO_TOOL_HINT,
     label: "Arts & Design",
     sources: [
       { title: "Wikipedia", url: "https://en.wikipedia.org" },
@@ -95,6 +110,7 @@ export const CATEGORIES = [
   },
   {
     id: "music",
+    toolHint: VIDEO_TOOL_HINT,
     label: "Music",
     sources: [
       { title: "Wikipedia", url: "https://en.wikipedia.org" },
@@ -104,6 +120,7 @@ export const CATEGORIES = [
   },
   {
     id: "language",
+    toolHint: VIDEO_TOOL_HINT,
     label: "Language Learning",
     sources: [
       { title: "Authoritative dictionaries (native + bilingual)", url: "the dictionary's official site" },
@@ -113,6 +130,7 @@ export const CATEGORIES = [
   },
   {
     id: "health",
+    toolHint: HEALTH_TOOL_HINT,
     label: "Health & Medicine",
     sources: [
       { title: "World Health Organization", url: "https://www.who.int" },
@@ -123,6 +141,7 @@ export const CATEGORIES = [
   },
   {
     id: "lifestyle",
+    toolHint: VIDEO_TOOL_HINT,
     label: "Lifestyle & Practical Skills",
     sources: [
       { title: "Wikipedia / WikiHow for general how-to", url: "https://en.wikipedia.org" },
@@ -159,9 +178,11 @@ export function categoryPreferredSourcesBlock(category, lang) {
   const cat = BY_ID.get(normalizeCategory(category) || "");
   if (!cat || !cat.sources.length) return "";
   const list = cat.sources.map((s) => `- ${s.title}: ${s.url}`).join("\n");
+  const toolHint = cat.toolHint ? `${cat.toolHint}\n` : "";
   return `\n=== RECOMMENDED SOURCES FOR THIS CATEGORY (${cat.label}) ===
 For grounding facts and examples, start from these reputable sources for this kind of subject and favor them over random open-web pages. They are recommendations, not restrictions — you may still use other high-quality sources, and the learner's brief (and any attached space material) always takes priority. Write in language "${(lang || "en").trim()}".
-${list}\n`;
+${list}
+${toolHint}`;
 }
 
 // Each category maps to one of a few teaching ARCHETYPES (kept small on purpose —

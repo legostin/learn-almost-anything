@@ -18,7 +18,12 @@ import {
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
 import * as devlog from "../lib/devlog.mjs";
-import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
+import {
+  context7StdioServer,
+  mediawikiStdioServer,
+  researchMcpServersForCategory,
+  RESEARCH_MCP_ALLOWED_TOOLS,
+} from "../lib/reference-mcp.mjs";
 import {
   categoryClassifyGuide,
   categoryPreferredSourcesBlock,
@@ -170,7 +175,7 @@ const REFERENCE_MCP_ALLOWED_TOOLS = [
 // built-in WebSearch + WebFetch tools — native internet on subscription auth,
 // no key needed. When braveApiKey is provided, the Brave MCP server is added
 // too (its image search complements web search for finding real image URLs).
-function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig, dirs } = {}) {
+function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig, dirs, category, stage } = {}) {
   const readDirs = Array.isArray(dirs) ? dirs.filter(Boolean) : [];
   const hasTools = web || !!braveApiKey || readDirs.length > 0;
   const options = {
@@ -192,6 +197,13 @@ function buildClaudeOptions({ maxTurns, web, braveApiKey, modelConfig, dirs } = 
       mediawiki: { type: "stdio", ...mediawikiStdioServer() },
     };
     allowedTools.push(...REFERENCE_MCP_ALLOWED_TOOLS);
+    // Domain research servers (arXiv/OpenAlex/Semantic Scholar/YouTube
+    // transcripts), gated by category+stage to keep spawn overhead low.
+    const research = researchMcpServersForCategory(category, stage);
+    for (const [name, server] of Object.entries(research)) {
+      options.mcpServers[name] = { type: "stdio", ...server };
+      allowedTools.push(...(RESEARCH_MCP_ALLOWED_TOOLS[name] || []));
+    }
   }
   if (braveApiKey) {
     options.mcpServers = {
@@ -231,6 +243,8 @@ async function runStreamed(prompt, onProgress, opts) {
     braveApiKey: opts?.braveApiKey,
     modelConfig: opts?.modelConfig,
     dirs: opts?.dirs,
+    category: opts?.category,
+    stage: opts?.stage,
   });
   const rec = devlog.startCall({ backend: "claude", prompt, model: opts?.modelConfig?.model });
   try {
@@ -685,6 +699,8 @@ If no widgets, use []. If no sources, use [].`;
     modelConfig,
     dirs: spaceDirs,
     maxTurns: genProfile?.researchMaxTurns,
+    category,
+    stage: "draft",
   });
   const parsed = extractJson(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
@@ -1536,6 +1552,7 @@ Shape:
     modelConfig,
     dirs: spaceDirs,
     maxTurns: genProfile?.researchMaxTurns,
+    stage: "structure",
   });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {

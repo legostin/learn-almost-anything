@@ -19,7 +19,11 @@ import {
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
 import * as devlog from "../lib/devlog.mjs";
-import { context7StdioServer, mediawikiStdioServer } from "../lib/reference-mcp.mjs";
+import {
+  context7StdioServer,
+  mediawikiStdioServer,
+  researchMcpServersForCategory,
+} from "../lib/reference-mcp.mjs";
 import {
   categoryClassifyGuide,
   categoryPreferredSourcesBlock,
@@ -61,6 +65,9 @@ function makeCodex(braveApiKey, opts = {}) {
     config.mcp_servers = {
       context7: context7StdioServer(),
       mediawiki: mediawikiStdioServer(),
+      // Domain research servers (arXiv/OpenAlex/Semantic Scholar/YouTube
+      // transcripts), gated by category+stage; {} when none apply.
+      ...researchMcpServersForCategory(opts.category, opts.stage),
     };
   }
   if (braveApiKey) {
@@ -1994,6 +2001,8 @@ ${languageStyleGuide(lang)}`;
     braveApiKey,
     modelConfig,
     dirs: spaceDirs,
+    category,
+    stage: "draft",
   });
   const parsed = JSON.parse(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
@@ -2916,6 +2925,7 @@ as pre-verified grounding.`;
     dirs: spaceDirs,
     idleTimeoutMs: 180_000,
     totalTimeoutMs: 900_000,
+    stage: "structure",
   });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
