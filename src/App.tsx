@@ -6129,7 +6129,7 @@ type LightboxImage = {
   generated?: boolean;
 };
 
-type Source = { title: string; url: string };
+type Source = { title: string; url: string; dead?: boolean };
 
 type AssignmentType = "image" | "text" | "document" | "archive" | "github";
 type Criticality = "critical" | "major" | "minor";
@@ -10711,11 +10711,14 @@ function SourcesList({ sources }: { sources: Source[] }) {
       <h3 className="sources-title">{t("sourcesTitle")}</h3>
       <ol className="sources-list">
         {sources.map((s, i) => (
-          <li key={i}>
+          <li key={i} className={s.dead ? "source-dead" : undefined}>
             <a href={s.url} target="_blank" rel="noreferrer">
               {s.title || s.url}
             </a>
-            <span className="sources-host">{hostnameOf(s.url)}</span>
+            <span className="sources-host">
+              {hostnameOf(s.url)}
+              {s.dead && ` · ${t("sourceDead")}`}
+            </span>
           </li>
         ))}
       </ol>

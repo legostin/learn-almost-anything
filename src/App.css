@@ -3785,6 +3785,11 @@ button {
   opacity: 0.5;
   cursor: default;
 }
+/* Dead (unreachable) source links */
+.source-dead a {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
 .test-header {
   display: flex;
   align-items: center;

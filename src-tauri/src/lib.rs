@@ -1413,6 +1413,10 @@ fn spawn_generate_submodule(
         {
             eprintln!("[generate_submodule] write assignments (non-fatal): {e}");
         }
+        // Mechanical source check: mark dead URLs so the reader can flag them.
+        if let Err(e) = validate_submodule_sources(&paths, &cid, &mid, &sid) {
+            eprintln!("[generate_submodule] validate sources (non-fatal): {e}");
+        }
         log_timing(&app2, &cid, &sid, "total", total_started);
         // Tell an open reader to reload now that images + test are in.
         emit_enrich_event(&app2, &cid, &sid);
@@ -1421,6 +1425,63 @@ fn spawn_generate_submodule(
         maybe_publish_catalog_update(&db, &paths, &cid, catalog_upload_token);
     });
     Ok(true)
+}
+
+/// Mechanically validate sources.json URLs: HEAD (fallback: 1KB ranged GET —
+/// many sites 403/405 plain HEAD) with a 10s timeout each, capped at 20 URLs.
+/// Dead links get `"dead": true` so the reader can strike them through; a link
+/// that comes back alive on re-validation loses the flag. No LLM involved.
+fn validate_submodule_sources(
+    paths: &AppPaths,
+    course_id: &str,
+    module_id: &str,
+    submodule_id: &str,
+) -> Result<(), String> {
+    let content = courses::read_submodule_content(paths, course_id, module_id, submodule_id)
+        .map_err(|e| e.to_string())?;
+    let mut sources = content.sources.clone();
+    let Some(arr) = sources.as_array_mut() else {
+        return Ok(());
+    };
+    if arr.is_empty() {
+        return Ok(());
+    }
+    let mut changed = false;
+    for entry in arr.iter_mut().take(20) {
+        let Some(url) = entry.get("url").and_then(|u| u.as_str()) else {
+            continue;
+        };
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            continue;
+        }
+        let alive = match ureq::head(url).timeout(Duration::from_secs(10)).call() {
+            Ok(_) => true,
+            Err(ureq::Error::Status(code, _)) if code < 400 => true,
+            _ => matches!(
+                ureq::get(url)
+                    .set("Range", "bytes=0-1023")
+                    .timeout(Duration::from_secs(10))
+                    .call(),
+                Ok(_)
+            ),
+        };
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        if alive {
+            if obj.remove("dead").is_some() {
+                changed = true;
+            }
+        } else if obj.get("dead").and_then(|d| d.as_bool()) != Some(true) {
+            obj.insert("dead".into(), json!(true));
+            changed = true;
+        }
+    }
+    if changed {
+        courses::write_submodule_sources(paths, course_id, module_id, submodule_id, &sources)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Mnemonic medium: embed up to 3 in-lesson recall prompts as `recall` widgets,
