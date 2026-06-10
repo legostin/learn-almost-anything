@@ -3733,12 +3733,18 @@ function SpaceView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [converter, setConverter] = useState<{ available: boolean; via: string } | null>(null);
+  const [converter, setConverter] = useState<{
+    available: boolean;
+    full: boolean;
+    via: string;
+  } | null>(null);
   const [installing, setInstalling] = useState(false);
 
   const checkConverter = useCallback(async () => {
     try {
-      setConverter(await invoke<{ available: boolean; via: string }>("markitdown_status"));
+      setConverter(
+        await invoke<{ available: boolean; full: boolean; via: string }>("markitdown_status")
+      );
     } catch {
       /* ignore */
     }
@@ -3930,9 +3936,11 @@ function SpaceView({
       </div>
       <div className="space-upload-note">{t("spaceUploadNote")}</div>
 
-      {converter && !converter.available && (
+      {converter && (!converter.available || !converter.full) && (
         <div className="converter-banner">
-          <span>{t("converterMissing")}</span>
+          <span>
+            {!converter.available ? t("converterMissing") : t("converterNoExtras")}
+          </span>
           <button onClick={installConverter} disabled={installing}>
             {installing ? t("converterInstalling") : t("converterInstall")}
           </button>

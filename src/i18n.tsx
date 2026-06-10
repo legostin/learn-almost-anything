@@ -318,6 +318,7 @@ const STRINGS = {
     spaceDelete: "Удалить пространство",
     spaceDeleteConfirm: "Удалить пространство и все его источники?",
     converterMissing: "Конвертер документов (MarkItDown) не установлен — PDF и документы не превратятся в текст.",
+    converterNoExtras: "Конвертер установлен без поддержки PDF/DOCX — нужно доустановить модули.",
     converterInstall: "Установить конвертер",
     converterInstalling: "Устанавливаю…",
 
@@ -988,6 +989,7 @@ const STRINGS = {
     spaceDelete: "Delete space",
     spaceDeleteConfirm: "Delete the space and all its sources?",
     converterMissing: "The document converter (MarkItDown) isn't installed — PDFs and documents won't be turned into text.",
+    converterNoExtras: "The converter is installed without PDF/DOCX support — extra modules are needed.",
     converterInstall: "Install converter",
     converterInstalling: "Installing…",
 

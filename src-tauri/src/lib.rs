@@ -5711,6 +5711,10 @@ fn classify_source(ext: &str) -> &'static str {
 /// Convert a document to Markdown. Plain text/markdown is read directly;
 /// everything else (PDF, Office, HTML, spreadsheets…) goes through Microsoft's
 /// MarkItDown — run via `uvx` so it is fetched on demand if not installed.
+/// True once we've already attempted the one-shot markitdown[all] repair this
+/// process — the install downloads ~50MB of converters, never loop it.
+static MARKITDOWN_REPAIR_TRIED: AtomicBool = AtomicBool::new(false);
+
 fn document_to_markdown(input: &std::path::Path) -> Result<String, String> {
     let ext = input
         .extension()
@@ -5720,13 +5724,43 @@ fn document_to_markdown(input: &std::path::Path) -> Result<String, String> {
     if matches!(ext.as_str(), "md" | "markdown" | "txt" | "text") {
         return std::fs::read_to_string(input).map_err(|e| e.to_string());
     }
+    match document_to_markdown_once(input) {
+        Ok(md) => Ok(md),
+        // A bare `markitdown` (installed without extras) crashes on PDF/DOCX
+        // with "pip install markitdown[pdf]". Repair once per process by
+        // force-installing markitdown[all], then retry.
+        Err(e)
+            if (e.contains("markitdown[") || e.contains("MissingDependencyException"))
+                && !MARKITDOWN_REPAIR_TRIED.swap(true, Ordering::AcqRel) =>
+        {
+            eprintln!("[spaces] markitdown is missing converters; reinstalling with [all]");
+            if let Err(ie) = install_markitdown_blocking_force() {
+                eprintln!("[spaces] markitdown repair failed: {ie}");
+                return Err(e);
+            }
+            document_to_markdown_once(input)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn document_to_markdown_once(input: &std::path::Path) -> Result<String, String> {
     let path_env = sidecar::expanded_path();
     let input_arg = input.to_string_lossy().to_string();
-    // Prefer a real markitdown on PATH; else uvx auto-fetches it; else a
-    // pip-installed module reachable via `python3 -m markitdown`.
+    // Prefer a real markitdown on PATH; else uvx fetches it (WITH the [all]
+    // extras — the bare package can't read PDF/DOCX); else a pip-installed
+    // module reachable via `python3 -m markitdown`.
     let attempts: [(&str, Vec<String>); 3] = [
         ("markitdown", vec![input_arg.clone()]),
-        ("uvx", vec!["markitdown".to_string(), input_arg.clone()]),
+        (
+            "uvx",
+            vec![
+                "--from".to_string(),
+                "markitdown[all]".to_string(),
+                "markitdown".to_string(),
+                input_arg.clone(),
+            ],
+        ),
         ("python3", vec!["-m".to_string(), "markitdown".to_string(), input_arg.clone()]),
     ];
     let mut last_err = String::new();
@@ -5752,7 +5786,7 @@ fn document_to_markdown(input: &std::path::Path) -> Result<String, String> {
         }
     }
     Err(format!(
-        "не удалось конвертировать в Markdown ({last_err}). Установите MarkItDown: `uv tool install markitdown` или `pipx install markitdown`."
+        "не удалось конвертировать в Markdown ({last_err}). Установите MarkItDown с конвертерами: `uv tool install 'markitdown[all]'` или `pipx install 'markitdown[all]'`."
     ))
 }
 
@@ -5831,19 +5865,42 @@ fn course_space_context(
 #[derive(serde::Serialize)]
 struct MarkitdownStatus {
     available: bool,
+    /// Whether PDF/DOCX converters (the [all] extras) actually work — a bare
+    /// `markitdown` install converts only plain formats.
+    full: bool,
     via: String,
+}
+
+/// Tiny embedded one-page PDF ("probe ok"): converting it proves the [all]
+/// extras are installed.
+const MARKITDOWN_PROBE_PDF: &[u8] = include_bytes!("../assets/markitdown-probe.pdf");
+
+/// True when the conversion chain can actually read a PDF (not just plain text).
+fn markitdown_full_probe() -> bool {
+    let path = std::env::temp_dir().join(format!("la-md-probe-{}.pdf", std::process::id()));
+    if std::fs::write(&path, MARKITDOWN_PROBE_PDF).is_err() {
+        return false;
+    }
+    let ok = matches!(document_to_markdown_once(&path), Ok(md) if md.contains("probe ok"));
+    let _ = std::fs::remove_file(&path);
+    ok
 }
 
 /// Detect whether document → Markdown conversion can run: a markitdown CLI, uv
 /// (which auto-fetches it via uvx), or a pip-installed markitdown module.
 fn markitdown_probe() -> MarkitdownStatus {
     if sidecar::command_path_if_found("markitdown").is_some() {
-        return MarkitdownStatus { available: true, via: "markitdown".into() };
+        return MarkitdownStatus {
+            available: true,
+            full: markitdown_full_probe(),
+            via: "markitdown".into(),
+        };
     }
     if sidecar::command_path_if_found("uvx").is_some()
         || sidecar::command_path_if_found("uv").is_some()
     {
-        return MarkitdownStatus { available: true, via: "uvx".into() };
+        // uvx fetches markitdown[all] on demand — extras come with it.
+        return MarkitdownStatus { available: true, full: true, via: "uvx".into() };
     }
     if sidecar::command_path_if_found("python3").is_some() {
         let ok = std::process::Command::new(sidecar::command_path("python3"))
@@ -5853,10 +5910,14 @@ fn markitdown_probe() -> MarkitdownStatus {
             .map(|o| o.status.success())
             .unwrap_or(false);
         if ok {
-            return MarkitdownStatus { available: true, via: "python".into() };
+            return MarkitdownStatus {
+                available: true,
+                full: markitdown_full_probe(),
+                via: "python".into(),
+            };
         }
     }
-    MarkitdownStatus { available: false, via: String::new() }
+    MarkitdownStatus { available: false, full: false, via: String::new() }
 }
 
 #[tauri::command]
@@ -5876,15 +5937,35 @@ async fn install_markitdown() -> Result<String, String> {
 
 fn install_markitdown_blocking() -> Result<String, String> {
     let status = markitdown_probe();
-    if status.available {
+    if status.available && status.full {
         return Ok(format!("уже доступен ({})", status.via));
     }
+    // Either missing entirely, or installed WITHOUT the [all] extras (can't
+    // read PDF/DOCX) — (re)install with converters either way.
+    install_markitdown_blocking_force()
+}
+
+/// (Re)install markitdown WITH the [all] extras — the bare package converts
+/// only plain formats and crashes on PDF/DOCX. --force/--upgrade replaces a
+/// bare install in place.
+fn install_markitdown_blocking_force() -> Result<String, String> {
     let path_env = sidecar::expanded_path();
     let (bin, args): (PathBuf, Vec<String>) =
         if let Some(p) = sidecar::command_path_if_found("uv") {
-            (p, vec!["tool".into(), "install".into(), "markitdown".into()])
+            (
+                p,
+                vec![
+                    "tool".into(),
+                    "install".into(),
+                    "--force".into(),
+                    "markitdown[all]".into(),
+                ],
+            )
         } else if let Some(p) = sidecar::command_path_if_found("pipx") {
-            (p, vec!["install".into(), "markitdown".into()])
+            (
+                p,
+                vec!["install".into(), "--force".into(), "markitdown[all]".into()],
+            )
         } else if let Some(p) = sidecar::command_path_if_found("python3") {
             (
                 p,
@@ -5893,7 +5974,8 @@ fn install_markitdown_blocking() -> Result<String, String> {
                     "pip".into(),
                     "install".into(),
                     "--user".into(),
-                    "markitdown".into(),
+                    "--upgrade".into(),
+                    "markitdown[all]".into(),
                 ],
             )
         } else {
