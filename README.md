@@ -1,3 +1,5 @@
+More my utilities on site [legost.in](https://legost.in/en/utilities)
+
 # Learn (Almost) Anything
 
 > A local desktop app that turns a topic into a personalized course, then helps you study it with lessons, images, interactives, tests, homework review, and lecture audio.
