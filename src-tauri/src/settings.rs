@@ -56,6 +56,21 @@ pub struct Settings {
     /// command is shown verbatim in the UI before saving.
     #[serde(default)]
     pub custom_mcp_servers: Vec<CustomMcpServer>,
+    /// Private self-hosted catalog servers (the public catalog is implicit).
+    #[serde(default)]
+    pub catalog_servers: Vec<CatalogServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogServerConfig {
+    /// Slug of the name; upserting by id lets re-adding a server replace it.
+    pub id: String,
+    pub name: String,
+    /// Normalized (trimmed, no trailing slash).
+    pub base_url: String,
+    /// Upload token for publishing. Never exposed to the frontend.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -163,6 +178,10 @@ pub struct GenerationProfile {
     pub skip_tests: Option<bool>,
     #[serde(default)]
     pub skip_assignments: Option<bool>,
+    /// Skip the clarifying-questions interview: generate only the title and go
+    /// straight to plan building.
+    #[serde(default)]
+    pub skip_wizard: Option<bool>,
 }
 
 /// Resolved defaults for one cost tier. The model/reasoning cascade is added
@@ -705,6 +724,42 @@ impl SettingsState {
             }
         }
         self.persist()
+    }
+
+    pub fn catalog_servers(&self) -> Vec<CatalogServerConfig> {
+        self.inner
+            .lock()
+            .map(|s| s.catalog_servers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Insert or replace (by id) a private catalog server.
+    pub fn upsert_catalog_server(&self, server: CatalogServerConfig) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.catalog_servers.retain(|s| s.id != server.id);
+            guard.catalog_servers.push(server);
+        }
+        self.persist()
+    }
+
+    pub fn delete_catalog_server(&self, id: &str) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.catalog_servers.retain(|s| s.id != id);
+        }
+        self.persist()
+    }
+
+    /// Look up a private catalog server by its normalized base URL.
+    pub fn catalog_server_by_url(&self, base_url: &str) -> Option<CatalogServerConfig> {
+        let needle = crate::catalog::normalize_base_url(base_url);
+        self.inner.lock().ok().and_then(|s| {
+            s.catalog_servers
+                .iter()
+                .find(|c| crate::catalog::normalize_base_url(&c.base_url) == needle)
+                .cloned()
+        })
     }
 
     fn persist(&self) -> std::io::Result<()> {

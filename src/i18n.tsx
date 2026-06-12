@@ -311,6 +311,9 @@ const STRINGS = {
     tierPremiumTitle: "Максимум",
     tierPremiumDesc:
       "Глубокое исследование и максимум проработки: больше вопросов, полный набор иллюстраций и сценариев обучения.",
+    createIncludeTestsLabel: "Тесты после уроков",
+    createIncludeAssignmentsLabel: "Домашние задания",
+    createAskQuestionsLabel: "Уточняющие вопросы перед генерацией",
     topicLabel: "Что хотите изучить?",
     topicPlaceholder: "например: хочу с нуля разобраться в академической живописи",
     courseLanguageLabel: "Язык курса",
@@ -650,6 +653,19 @@ const STRINGS = {
     catalogTokenConfigured: "Токен сохранён",
     catalogSettingsNote:
       "Токен авторизации генерируется на id.almost-anything.io и нужен только для публикации курсов. Просмотр и скачивание каталога работают без него.",
+    catalogSourcePublic: "Публичный",
+    privateCatalogsTitle: "Приватные каталоги",
+    privateCatalogsNote:
+      "Подключите каталог курсов вашей компании по URL — просмотр, установка и обновления работают без токена, для публикации нужен токен сервера. Чтобы сменить токен, добавьте каталог повторно с тем же именем.",
+    privateCatalogName: "название",
+    privateCatalogUrl: "https://catalog.company.com",
+    privateCatalogTokenOptional: "токен (необязательно)",
+    privateCatalogAdd: "Добавить",
+    privateCatalogProbing: "Проверяю…",
+    privateCatalogDelete: "Удалить",
+    privateCatalogReadOnly: "только чтение",
+    privateCatalogTokenSet: "токен",
+    catalogPublishNoToken: "Токен для этого каталога не настроен",
     mcpTitle: "MCP",
     mcpEmpty: "Добавленных MCP пока нет.",
     mcpNote:
@@ -1107,6 +1123,9 @@ const STRINGS = {
     tierPremiumTitle: "Premium",
     tierPremiumDesc:
       "Deep research and maximum scaffolding: more questions, full illustrations and learning aids.",
+    createIncludeTestsLabel: "Tests after lessons",
+    createIncludeAssignmentsLabel: "Homework assignments",
+    createAskQuestionsLabel: "Ask clarifying questions first",
     topicLabel: "What do you want to learn?",
     topicPlaceholder: "e.g. I want to learn academic painting from scratch",
     courseLanguageLabel: "Course language",
@@ -1446,6 +1465,19 @@ const STRINGS = {
     catalogTokenConfigured: "Token saved",
     catalogSettingsNote:
       "Generate the authorization token on id.almost-anything.io. It is only needed for publishing courses; catalog browsing and downloads work without it.",
+    catalogSourcePublic: "Public",
+    privateCatalogsTitle: "Private catalogs",
+    privateCatalogsNote:
+      "Connect your company's course catalog by URL — browsing, installs and updates need no token; publishing requires the server's token. To change a token, re-add the catalog with the same name.",
+    privateCatalogName: "name",
+    privateCatalogUrl: "https://catalog.company.com",
+    privateCatalogTokenOptional: "token (optional)",
+    privateCatalogAdd: "Add",
+    privateCatalogProbing: "Probing…",
+    privateCatalogDelete: "Delete",
+    privateCatalogReadOnly: "read-only",
+    privateCatalogTokenSet: "token",
+    catalogPublishNoToken: "No token configured for this catalog",
     mcpTitle: "MCP",
     mcpEmpty: "No added MCP servers yet.",
     mcpNote:

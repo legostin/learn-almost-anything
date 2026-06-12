@@ -85,7 +85,10 @@ pub struct CatalogCourseSummary {
     pub tags: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    // Defaulted for robustness against minimal private-server implementations.
+    #[serde(default)]
     pub view_url: String,
+    #[serde(default)]
     pub download_url: String,
 }
 
@@ -193,6 +196,7 @@ pub fn install_package(
     conn: &rusqlite::Connection,
     paths: &AppPaths,
     package: CatalogCoursePackage,
+    catalog_server_url: Option<&str>,
 ) -> Result<String, String> {
     if package.schema_version != SCHEMA_VERSION {
         return Err(format!(
@@ -236,13 +240,29 @@ pub fn install_package(
         if local_generated >= package.submodules.len()
             && existing_course.updated_at >= package.course.updated_at
         {
-            db::set_course_catalog_sync(conn, &existing_course.id, &origin_id, package_version, now)
-                .map_err(|e| e.to_string())?;
+            db::set_course_catalog_sync(
+                conn,
+                &existing_course.id,
+                &origin_id,
+                package_version,
+                now,
+                catalog_server_url,
+            )
+            .map_err(|e| e.to_string())?;
             return Ok(existing_course.id.clone());
         }
     }
 
-    write_package_to_course(conn, paths, &package, &course_id, &origin_id, package_version, now)?;
+    write_package_to_course(
+        conn,
+        paths,
+        &package,
+        &course_id,
+        &origin_id,
+        package_version,
+        now,
+        catalog_server_url,
+    )?;
     Ok(course_id)
 }
 
@@ -267,7 +287,17 @@ pub fn update_installed_course(
     if course.catalog_version >= package_version {
         return Ok(course.id);
     }
-    write_package_to_course(conn, paths, &package, course_id, &origin_id, package_version, now)?;
+    // Updates keep the course bound to the server it was installed from.
+    write_package_to_course(
+        conn,
+        paths,
+        &package,
+        course_id,
+        &origin_id,
+        package_version,
+        now,
+        course.catalog_server_url.as_deref(),
+    )?;
     Ok(course_id.to_string())
 }
 
@@ -302,6 +332,7 @@ pub fn check_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_package_to_course(
     conn: &rusqlite::Connection,
     paths: &AppPaths,
@@ -310,6 +341,7 @@ fn write_package_to_course(
     origin_id: &str,
     package_version: i64,
     now: i64,
+    catalog_server_url: Option<&str>,
 ) -> Result<(), String> {
     let title = package_title(package);
     db::upsert_imported_course(
@@ -330,6 +362,7 @@ fn write_package_to_course(
         origin_id,
         package_version,
         now,
+        catalog_server_url,
     )
     .map_err(|e| e.to_string())?;
 
@@ -430,7 +463,7 @@ pub fn list_remote(
     base_url: &str,
     query: Option<&str>,
 ) -> Result<Vec<CatalogCourseSummary>, String> {
-    let mut url = format!("{}/api/catalog", trim_base_url(base_url));
+    let mut url = format!("{}/api/catalog", normalize_base_url(base_url));
     if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
         url.push_str("?q=");
         url.push_str(&urlencoding::encode(q));
@@ -447,10 +480,14 @@ pub fn list_remote(
 pub fn download_remote(base_url: &str, catalog_id: &str) -> Result<CatalogCoursePackage, String> {
     let url = format!(
         "{}/api/courses/{}/download",
-        trim_base_url(base_url),
+        normalize_base_url(base_url),
         urlencoding::encode(catalog_id)
     );
-    let response = ureq::get(&url).call().map_err(ureq_error)?;
+    // Packages can be tens of MB, but a hung private server must still fail.
+    let response = ureq::get(&url)
+        .timeout(Duration::from_secs(60))
+        .call()
+        .map_err(ureq_error)?;
     response.into_json().map_err(|e| e.to_string())
 }
 
@@ -464,7 +501,7 @@ pub fn publish_remote(
     }
     let url = format!(
         "{}/api/courses/{}",
-        trim_base_url(base_url),
+        normalize_base_url(base_url),
         urlencoding::encode(&package.course.id)
     );
     let body = serde_json::to_string(package).map_err(|e| e.to_string())?;
@@ -624,7 +661,9 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn trim_base_url(url: &str) -> String {
+/// Canonical form of a catalog base URL (trimmed, no trailing slash) — the
+/// shared normalizer for storing, comparing and requesting.
+pub fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 

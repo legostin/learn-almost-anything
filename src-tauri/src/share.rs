@@ -256,17 +256,30 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             app.state(),
             from_arg(a, "models", json!({}))?,
         )?),
-        "list_catalog_courses" => to_val(crate::list_catalog_courses(s("query"))?),
-        "publish_course_to_catalog" => to_val(crate::publish_course_to_catalog(
-            app.state(),
-            app.state(),
-            app.state(),
-            req("courseId")?,
+        "list_catalog_courses" => to_val(tauri::async_runtime::block_on(
+            crate::list_catalog_courses(
+                app.state(),
+                s("query"),
+                s("serverId").or_else(|| s("server_id")),
+            ),
         )?),
-        "download_catalog_course" => to_val(crate::download_catalog_course(
-            app.state(),
-            app.state(),
-            req("catalogId")?,
+        "publish_course_to_catalog" => to_val(tauri::async_runtime::block_on(
+            crate::publish_course_to_catalog(
+                app.state(),
+                app.state(),
+                app.state(),
+                req("courseId")?,
+                s("serverId").or_else(|| s("server_id")),
+            ),
+        )?),
+        "download_catalog_course" => to_val(tauri::async_runtime::block_on(
+            crate::download_catalog_course(
+                app.state(),
+                app.state(),
+                app.state(),
+                req("catalogId")?,
+                s("serverId").or_else(|| s("server_id")),
+            ),
         )?),
         "get_catalog_update" => to_val(tauri::async_runtime::block_on(crate::get_catalog_update(
             app.state(),

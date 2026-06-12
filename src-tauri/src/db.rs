@@ -56,6 +56,9 @@ pub struct Course {
     pub roadmap_skill: Option<String>,
     /// User-attached custom MCP server ids (JSON array) used during generation.
     pub mcp_servers: Option<serde_json::Value>,
+    /// Catalog server this course was imported from / publishes to.
+    /// None = the public default catalog.
+    pub catalog_server_url: Option<String>,
 }
 
 pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
@@ -69,7 +72,7 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
     }
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category, generation_profile, learner_profile, roadmap_id, roadmap_skill, mcp_servers";
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category, generation_profile, learner_profile, roadmap_id, roadmap_skill, mcp_servers, catalog_server_url";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -100,6 +103,7 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         mcp_servers: r
             .get::<_, Option<String>>(20)?
             .and_then(|s| serde_json::from_str(&s).ok()),
+        catalog_server_url: r.get(21)?,
     })
 }
 
@@ -230,11 +234,12 @@ pub fn upsert_imported_course(
     catalog_origin_id: &str,
     catalog_version: i64,
     catalog_synced_at: i64,
+    catalog_server_url: Option<&str>,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO courses \
-         (id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+         (id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, catalog_server_url) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(id) DO UPDATE SET \
            topic = excluded.topic, \
            title = excluded.title, \
@@ -245,7 +250,8 @@ pub fn upsert_imported_course(
            updated_at = excluded.updated_at, \
            catalog_origin_id = excluded.catalog_origin_id, \
            catalog_version = excluded.catalog_version, \
-           catalog_synced_at = excluded.catalog_synced_at",
+           catalog_synced_at = excluded.catalog_synced_at, \
+           catalog_server_url = excluded.catalog_server_url",
         rusqlite::params![
             id,
             topic,
@@ -258,7 +264,8 @@ pub fn upsert_imported_course(
             updated_at,
             catalog_origin_id,
             catalog_version,
-            catalog_synced_at
+            catalog_synced_at,
+            catalog_server_url
         ],
     )?;
     Ok(())
@@ -402,12 +409,14 @@ pub fn set_course_catalog_sync(
     catalog_origin_id: &str,
     catalog_version: i64,
     now: i64,
+    catalog_server_url: Option<&str>,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE courses \
-         SET catalog_origin_id = ?2, catalog_version = ?3, catalog_synced_at = ?4 \
+         SET catalog_origin_id = ?2, catalog_version = ?3, catalog_synced_at = ?4, \
+             catalog_server_url = ?5 \
          WHERE id = ?1",
-        rusqlite::params![id, catalog_origin_id, catalog_version, now],
+        rusqlite::params![id, catalog_origin_id, catalog_version, now, catalog_server_url],
     )?;
     Ok(())
 }

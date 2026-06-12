@@ -59,7 +59,10 @@ fn render_course_md(course: &db::Course, answers: &[QnA]) -> String {
     if let Some(title) = course.title.as_deref().filter(|s| !s.trim().is_empty()) {
         out.push_str(&format!("title: {}\n", title.trim()));
     }
-    out.push_str(&format!("topic: {}\n", course.topic));
+    // The topic can be multiline (textarea); collapse whitespace so it stays a
+    // single valid frontmatter line. The full text follows in Learning request.
+    let topic_line = course.topic.split_whitespace().collect::<Vec<_>>().join(" ");
+    out.push_str(&format!("topic: {topic_line}\n"));
     out.push_str(&format!("language: {}\n", course.language));
     out.push_str(&format!("course_format: {}\n", course.course_format));
     out.push_str(&format!("created_at: {}\n", course.created_at));

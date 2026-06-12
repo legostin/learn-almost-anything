@@ -121,6 +121,7 @@ type Course = {
   category?: string | null;
   roadmap_id?: string | null;
   roadmap_skill?: string | null;
+  catalog_server_url?: string | null;
 };
 
 // Localized labels for the agent-assigned subject category. Keep the id set in
@@ -474,10 +475,17 @@ type McpServerStatus = {
   tools: string[];
   source: string;
 };
+type CatalogServerStatus = {
+  id: string;
+  name: string;
+  base_url: string;
+  has_token: boolean;
+};
 type SettingsStatus = {
   brave_configured: boolean;
   gemini_configured: boolean;
   catalog_upload_token_configured?: boolean;
+  catalog_servers?: CatalogServerStatus[];
   mcp_servers?: McpServerStatus[];
   tts_engine: string;
   tts_voice: string;
@@ -3492,6 +3500,105 @@ function CustomMcpSection({
   );
 }
 
+// Private self-hosted catalog servers: list + add (URL probed by the backend
+// before saving) + delete. Tokens never round-trip — re-add to change one.
+function CatalogServersSection({
+  servers,
+  onStatus,
+}: {
+  servers: CatalogServerStatus[];
+  onStatus: (s: SettingsStatus) => void;
+}) {
+  const t = useT();
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function add() {
+    if (!name.trim() || !baseUrl.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const s = await invoke<SettingsStatus>("add_catalog_server", {
+        name: name.trim(),
+        baseUrl: baseUrl.trim(),
+        token: token.trim() || null,
+      });
+      onStatus(s);
+      setName("");
+      setBaseUrl("");
+      setToken("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    try {
+      const s = await invoke<SettingsStatus>("delete_catalog_server", { id });
+      onStatus(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <div className="catalog-servers">
+      {servers.length > 0 && (
+        <div className="mcp-list">
+          {servers.map((s) => (
+            <div className="mcp-row" key={s.id}>
+              <div className="mcp-main">
+                <div className="mcp-name">{s.name}</div>
+                <div className="mcp-meta">
+                  {s.base_url} ·{" "}
+                  {s.has_token ? `✓ ${t("privateCatalogTokenSet")}` : t("privateCatalogReadOnly")}
+                </div>
+              </div>
+              <button className="danger-link" onClick={() => remove(s.id)}>
+                {t("privateCatalogDelete")}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="brave-row">
+        <input
+          className="custom-answer"
+          value={name}
+          placeholder={t("privateCatalogName")}
+          onChange={(e) => setName(e.target.value)}
+          disabled={busy}
+        />
+        <input
+          className="custom-answer"
+          value={baseUrl}
+          placeholder={t("privateCatalogUrl")}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          disabled={busy}
+        />
+        <input
+          type="password"
+          className="custom-answer"
+          value={token}
+          placeholder={t("privateCatalogTokenOptional")}
+          onChange={(e) => setToken(e.target.value)}
+          disabled={busy}
+        />
+        <button onClick={add} disabled={!name.trim() || !baseUrl.trim() || busy}>
+          {busy ? t("privateCatalogProbing") : t("privateCatalogAdd")}
+        </button>
+      </div>
+      {error && <div className="setting-note error-note">{error}</div>}
+      <div className="setting-note">{t("privateCatalogsNote")}</div>
+    </div>
+  );
+}
+
 function SettingsModal({
   onClose,
   onDebugLoggingChange,
@@ -3522,6 +3629,7 @@ function SettingsModal({
   const [geminiImageModel, setGeminiImageModel] = useState("gemini-2.5-flash-image");
   const [geminiTtsModel, setGeminiTtsModel] = useState("gemini-2.5-flash-preview-tts");
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
+  const [catalogServers, setCatalogServers] = useState<CatalogServerStatus[]>([]);
   const [imageModelList, setImageModelList] = useState<{ id: string; label: string }[]>([]);
   const [ttsModelList, setTtsModelList] = useState<{ id: string; label: string }[]>([]);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -3552,6 +3660,7 @@ function SettingsModal({
     setBraveConfigured(s.brave_configured);
     setGeminiConfigured(s.gemini_configured);
     setCatalogTokenConfigured(Boolean(s.catalog_upload_token_configured));
+    setCatalogServers(s.catalog_servers ?? []);
     setMcpServers(s.mcp_servers ?? []);
     setTtsEngine(s.tts_engine === "gemini" ? "gemini" : "system");
     if (s.tts_voice) setTtsVoice(s.tts_voice);
@@ -3919,6 +4028,11 @@ function SettingsModal({
             <div className="setting-note success-note">✓ {t("catalogTokenConfigured")}</div>
           )}
           <div className="setting-note">{t("catalogSettingsNote")}</div>
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("privateCatalogsTitle")}</div>
+          <CatalogServersSection servers={catalogServers} onStatus={applySettingsStatus} />
         </div>
 
         <div className="setting-group">
@@ -5967,6 +6081,11 @@ function CreateCourse({
   );
   const isRoadmap = courseFormat === "roadmap";
   const [tier, setTier] = useState<GenerationTier>(DEFAULT_GENERATION_TIER);
+  // Explicit overrides for the tier presets: tests and homework on/off.
+  const [withTests, setWithTests] = useState(true);
+  const [withAssignments, setWithAssignments] = useState(true);
+  // Off => skip the clarifying-questions interview (title only, straight to plan).
+  const [askQuestions, setAskQuestions] = useState(true);
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
@@ -6014,8 +6133,17 @@ function CreateCourse({
       roadmapSkill: roadmapSkill ?? null,
     });
     // Record the chosen cost/quality tier on the course (drives stage gating
-    // and the sidecar depth/pedagogy knobs during generation).
-    await invoke("set_course_profile", { courseId: id, profile: { tier } }).catch(() => {});
+    // and the sidecar depth/pedagogy knobs during generation). skip_* are sent
+    // explicitly so the checkboxes override the tier preset either way.
+    await invoke("set_course_profile", {
+      courseId: id,
+      profile: {
+        tier,
+        skip_tests: !withTests,
+        skip_assignments: !withAssignments,
+        skip_wizard: !askQuestions,
+      },
+    }).catch(() => {});
     if (selectedMcp.length > 0) {
       await invoke("set_course_mcp", { courseId: id, serverIds: selectedMcp }).catch(() => {});
     }
@@ -6028,10 +6156,30 @@ function CreateCourse({
       {roadmapId && <div className="field-note">{t("courseLinkedToRoadmap")}</div>}
       <label>
         {t("topicLabel")}
-        <input
+        <textarea
           autoFocus
+          rows={2}
           value={topic}
-          onChange={(e) => setTopic(e.target.value)}
+          ref={(el) => {
+            // Auto-grow: also on mount, since initialTopic can prefill the field.
+            if (el) {
+              el.style.height = "auto";
+              el.style.height = `${el.scrollHeight}px`;
+            }
+          }}
+          onChange={(e) => {
+            setTopic(e.target.value);
+            const el = e.currentTarget;
+            el.style.height = "auto";
+            el.style.height = `${el.scrollHeight}px`;
+          }}
+          onKeyDown={(e) => {
+            // Enter inserts a newline; Cmd/Ctrl+Enter submits the form.
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              e.currentTarget.form?.requestSubmit();
+            }
+          }}
           placeholder={isRoadmap ? t("roadmapTopicPlaceholder") : t("topicPlaceholder")}
         />
       </label>
@@ -6061,11 +6209,17 @@ function CreateCourse({
         <span className="field-note">{t("courseFormatNote")}</span>
       </label>
       {!isRoadmap && (
+        <>
         <label>
           {t("tierLabel")}
           <FieldSelect
             value={tier}
-            onChange={(v) => setTier(v as GenerationTier)}
+            onChange={(v) => {
+              const next = v as GenerationTier;
+              setTier(next);
+              // Re-seed the checkbox from the tier preset (quick skips homework).
+              setWithAssignments(next !== "quick");
+            }}
             options={GENERATION_TIERS.map((item) => ({
               value: item.value,
               title: t(item.titleKey),
@@ -6074,6 +6228,33 @@ function CreateCourse({
           />
           <span className="field-note">{t("tierNote")}</span>
         </label>
+        <div className="create-toggles">
+          <label className="create-toggle">
+            <input
+              type="checkbox"
+              checked={withTests}
+              onChange={(e) => setWithTests(e.target.checked)}
+            />
+            {t("createIncludeTestsLabel")}
+          </label>
+          <label className="create-toggle">
+            <input
+              type="checkbox"
+              checked={withAssignments}
+              onChange={(e) => setWithAssignments(e.target.checked)}
+            />
+            {t("createIncludeAssignmentsLabel")}
+          </label>
+          <label className="create-toggle">
+            <input
+              type="checkbox"
+              checked={askQuestions}
+              onChange={(e) => setAskQuestions(e.target.checked)}
+            />
+            {t("createAskQuestionsLabel")}
+          </label>
+        </div>
+        </>
       )}
       <label>
         {t("courseLanguageLabel")}
@@ -6209,9 +6390,18 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  // Private catalog servers from settings; null id = the public catalog.
+  const [servers, setServers] = useState<CatalogServerStatus[]>([]);
+  const [sourceId, setSourceId] = useState<string | null>(null);
   const loadSeq = useRef(0);
 
-  const load = useCallback(async (nextQuery: string) => {
+  useEffect(() => {
+    invoke<SettingsStatus>("get_settings_status")
+      .then((s) => setServers(s.catalog_servers ?? []))
+      .catch(() => {});
+  }, []);
+
+  const load = useCallback(async (nextQuery: string, serverId: string | null) => {
     const seq = loadSeq.current + 1;
     loadSeq.current = seq;
     setLoading(true);
@@ -6219,6 +6409,7 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
     try {
       const list = await invoke<CatalogCourse[]>("list_catalog_courses", {
         query: nextQuery.trim() || null,
+        serverId,
       });
       if (seq !== loadSeq.current) return;
       setItems(list);
@@ -6232,10 +6423,10 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      load(query);
+      load(query, sourceId);
     }, 180);
     return () => window.clearTimeout(handle);
-  }, [load, query]);
+  }, [load, query, sourceId]);
 
   async function download(item: CatalogCourse) {
     setDownloading(item.id);
@@ -6243,6 +6434,7 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
     try {
       const courseId = await invoke<string>("download_catalog_course", {
         catalogId: item.id,
+        serverId: sourceId,
       });
       await onImported(courseId);
     } catch (e) {
@@ -6258,10 +6450,29 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
           <h2>{t("catalogTitle")}</h2>
           <p>{t("catalogSubtitle")}</p>
         </div>
-        <button className="ghost" onClick={() => load(query)} disabled={loading}>
+        <button className="ghost" onClick={() => load(query, sourceId)} disabled={loading}>
           {loading ? t("catalogLoading") : t("catalogRefresh")}
         </button>
       </div>
+      {servers.length > 0 && (
+        <div className="catalog-sources">
+          <button
+            className={`course-tab${sourceId === null ? " active" : ""}`}
+            onClick={() => setSourceId(null)}
+          >
+            {t("catalogSourcePublic")}
+          </button>
+          {servers.map((s) => (
+            <button
+              key={s.id}
+              className={`course-tab${sourceId === s.id ? " active" : ""}`}
+              onClick={() => setSourceId(s.id)}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      )}
       <label className="catalog-search">
         <span>{t("catalogSearchLabel")}</span>
         <input
@@ -6297,9 +6508,11 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
               )}
             </div>
             <div className="catalog-card-actions">
-              <a href={item.view_url} target="_blank" rel="noreferrer">
-                {t("catalogViewWeb")}
-              </a>
+              {item.view_url && (
+                <a href={item.view_url} target="_blank" rel="noreferrer">
+                  {t("catalogViewWeb")}
+                </a>
+              )}
               <button
                 onClick={() => download(item)}
                 disabled={downloading === item.id}
@@ -6349,6 +6562,18 @@ function CourseView({
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
+  // Private catalogs: publish-target picker + origin label for imported courses.
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [catalogServers, setCatalogServers] = useState<CatalogServerStatus[]>([]);
+  const [publicTokenConfigured, setPublicTokenConfigured] = useState(false);
+  useEffect(() => {
+    invoke<SettingsStatus>("get_settings_status")
+      .then((s) => {
+        setCatalogServers(s.catalog_servers ?? []);
+        setPublicTokenConfigured(!!s.catalog_upload_token_configured);
+      })
+      .catch(() => {});
+  }, []);
   const [updateStatus, setUpdateStatus] = useState<CatalogUpdateStatus | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updatingCatalog, setUpdatingCatalog] = useState(false);
@@ -6419,14 +6644,16 @@ function CourseView({
 
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
 
-  async function publishCourse() {
+  async function publishCourse(serverId: string | null = null) {
     if (!course || publishing) return;
     setPublishing(true);
+    setPublishOpen(false);
     setPublishError(null);
     setPublishUrl(null);
     try {
       const result = await invoke<{ id: string; url: string; version?: number }>("publish_course_to_catalog", {
         courseId: course.id,
+        serverId,
       });
       setPublishUrl(result.url);
       await onChanged();
@@ -6471,6 +6698,21 @@ function CourseView({
     }
   }
 
+  // Human label for the catalog a course is bound to: the configured server's
+  // name, else the URL host (the server may have been deleted from settings).
+  const boundServerLabel = (() => {
+    const url = course.catalog_server_url;
+    if (!url) return null;
+    const norm = url.replace(/\/+$/, "");
+    const match = catalogServers.find((s) => s.base_url.replace(/\/+$/, "") === norm);
+    if (match) return match.name;
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  })();
+
   return (
     <div className="course-view">
       <CourseHeaderTitle course={course} />
@@ -6489,6 +6731,7 @@ function CourseView({
           {!!course.catalog_origin_id && course.catalog_origin_id !== course.id && (
             <span className="translated-badge" title={t("importedBadgeHint")}>
               📥 {t("importedBadge")}
+              {boundServerLabel ? ` · ${boundServerLabel}` : ""}
             </span>
           )}
         </div>
@@ -6524,11 +6767,53 @@ function CourseView({
             )}
           </div>
           {course.status === "ready" &&
-            !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id) && (
-            <button className="meta-action" onClick={publishCourse} disabled={publishing}>
-              {publishing ? t("catalogPublishing") : t("catalogPublish")}
-            </button>
-          )}
+            !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id) &&
+            (catalogServers.length === 0 ? (
+              <button
+                className="meta-action"
+                onClick={() => publishCourse()}
+                disabled={publishing}
+              >
+                {publishing ? t("catalogPublishing") : t("catalogPublish")}
+              </button>
+            ) : (
+              <div className="translate-wrap">
+                <button
+                  className="meta-action"
+                  onClick={() => setPublishOpen((v) => !v)}
+                  disabled={publishing}
+                >
+                  {publishing ? t("catalogPublishing") : t("catalogPublish")}
+                </button>
+                {publishOpen && (
+                  <div className="translate-menu">
+                    <button
+                      onClick={() => publishCourse(null)}
+                      disabled={publishing || !publicTokenConfigured}
+                      title={publicTokenConfigured ? undefined : t("catalogPublishNoToken")}
+                    >
+                      {t("catalogSourcePublic")}
+                      {!course.catalog_server_url ? " ✓" : ""}
+                    </button>
+                    {catalogServers.map((s) => {
+                      const current =
+                        !!course.catalog_server_url && boundServerLabel === s.name;
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() => publishCourse(s.id)}
+                          disabled={publishing || !s.has_token}
+                          title={s.has_token ? undefined : t("catalogPublishNoToken")}
+                        >
+                          {s.name}
+                          {current ? " ✓" : ""}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
           <button className="meta-action" onClick={() => setProfileOpen(true)}>
             {t("profileTitle")}
           </button>
@@ -6906,8 +7191,12 @@ function Wizard({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
+  // null while the course profile loads; true => skip the interview entirely
+  // (title only, straight to plan). On fetch failure default to the interview.
+  const [skipWizard, setSkipWizard] = useState<boolean | null>(null);
   const startedRef = useRef(false);
   const finalizedRef = useRef(false);
+  const skipStartedRef = useRef(false);
   // Single lessons run a shortened interview: 1-3 questions instead of 3-10.
   const minQuestions =
     course.course_format === "single_lesson" ? 1 : WIZARD_MIN_QUESTIONS;
@@ -6945,6 +7234,43 @@ function Wizard({
     [course.id, minQuestions]
   );
 
+  // The per-course profile decides whether to run the interview at all.
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{ skip_wizard?: boolean | null }>("get_course_profile", { courseId: course.id })
+      .then((p) => {
+        if (!cancelled) setSkipWizard(!!p?.skip_wizard);
+      })
+      .catch(() => {
+        if (!cancelled) setSkipWizard(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [course.id]);
+
+  // Skip mode: generate just the title (the first wizard step carries it; the
+  // question is discarded), then finalize with zero answers — the course moves
+  // to "structuring" and CourseView auto-starts plan/lesson generation.
+  const runSkip = useCallback(async () => {
+    setError(null);
+    try {
+      if (!course.title) {
+        await invoke("wizard_next_question", { courseId: course.id, answered: [] });
+      }
+      await invoke("save_wizard_answers", { courseId: course.id, answers: [] });
+      await onSaved();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [course.id, course.title, onSaved]);
+
+  useEffect(() => {
+    if (skipWizard !== true || skipStartedRef.current) return;
+    skipStartedRef.current = true;
+    runSkip();
+  }, [skipWizard, runSkip]);
+
   // Load the persisted dialog (if any) before deciding whether to auto-start.
   useEffect(() => {
     let cancelled = false;
@@ -6971,13 +7297,13 @@ function Wizard({
   // next one if a prior call was abandoned in flight (`pending`); otherwise the
   // persisted `current`/`done` already drives the UI.
   useEffect(() => {
-    if (!hydrated || startedRef.current) return;
+    if (!hydrated || skipWizard !== false || startedRef.current) return;
     startedRef.current = true;
     if (done || current) return;
     if (pending || answered.length === 0) {
       askNext(answered);
     }
-  }, [hydrated, done, current, pending, answered, askNext]);
+  }, [hydrated, skipWizard, done, current, pending, answered, askNext]);
 
   async function submitAnswer(answer: string) {
     if (!current) return;
@@ -7018,6 +7344,23 @@ function Wizard({
     // buildCourse is a stable closure over course/onSaved; guarded by finalizedRef.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, loading, done, answered, finishing, error]);
+
+  // Skip mode wins over every interview branch — after a restart mid-skip the
+  // persisted dialog can hold a live question that must not be shown.
+  if (skipWizard === null) {
+    return <WizardLoader />;
+  }
+  if (skipWizard) {
+    if (error) {
+      return (
+        <div className="wizard error">
+          <p>{t("errorPrefix", { error })}</p>
+          <button onClick={runSkip}>{t("retry")}</button>
+        </div>
+      );
+    }
+    return <WizardLoader />;
+  }
 
   if (!hydrated || loading) {
     return <WizardLoader />;

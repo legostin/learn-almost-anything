@@ -1155,6 +1155,7 @@ button {
   letter-spacing: 0.04em;
 }
 .create-course input,
+.create-course textarea,
 .create-course select {
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -1167,7 +1168,13 @@ button {
   text-transform: none;
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
+.create-course textarea {
+  resize: none;
+  overflow: hidden; /* height follows content via JS auto-grow */
+  line-height: 1.45;
+}
 .create-course input:focus,
+.create-course textarea:focus,
 .create-course select:focus {
   outline: none;
   border-color: var(--accent);
@@ -1175,6 +1182,31 @@ button {
 }
 .create-course select {
   min-width: 0;
+}
+/* Tests/homework checkboxes under the tier selector. */
+.create-course .create-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-top: -8px;
+}
+.create-course label.create-toggle {
+  flex-direction: row;
+  align-items: center;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text);
+  cursor: pointer;
+}
+.create-course .create-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
 .field-note {
   color: var(--text-subtle);
@@ -3651,6 +3683,13 @@ button {
   display: flex;
   gap: 6px;
   margin: 14px 0;
+}
+/* Catalog source switcher (public / private servers) — reuses .course-tab chips. */
+.catalog-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 14px;
 }
 .course-tab {
   padding: 7px 16px;

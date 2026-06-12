@@ -1479,7 +1479,7 @@ fn spawn_next_queued_submodule(
     tests_model: serde_json::Value,
     verify_model: serde_json::Value,
     gemini_image_model: String,
-    catalog_upload_token: Option<String>,
+    catalog_publish_target: Option<(String, String)>,
 ) -> Result<Option<String>, String> {
     let next = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1504,7 +1504,7 @@ fn spawn_next_queued_submodule(
         tests_model,
         verify_model,
         gemini_image_model,
-        catalog_upload_token,
+        catalog_publish_target,
         true,
         true,
     )?;
@@ -1528,7 +1528,8 @@ fn spawn_generate_submodule(
     tests_model: serde_json::Value,
     verify_model: serde_json::Value,
     gemini_image_model: String,
-    catalog_upload_token: Option<String>,
+    // (base_url, token) for auto-republish after enrichment; None = skip.
+    catalog_publish_target: Option<(String, String)>,
     course_serial: bool,
     continue_queued: bool,
 ) -> Result<bool, String> {
@@ -1842,7 +1843,7 @@ fn spawn_generate_submodule(
                 tests_model.clone(),
                 verify_model.clone(),
                 gemini_image_model.clone(),
-                catalog_upload_token.clone(),
+                catalog_publish_target.clone(),
             ) {
                 Ok(next) => next,
                 Err(e) => {
@@ -2226,7 +2227,7 @@ fn spawn_generate_submodule(
         emit_enrich_event(&app2, &cid, &sid);
         // Assignments are independent — signal the reader to load them.
         emit_assignments_event(&app2, &cid, &sid);
-        maybe_publish_catalog_update(&db, &paths, &cid, catalog_upload_token);
+        maybe_publish_catalog_update(&db, &paths, &cid, catalog_publish_target);
     });
     Ok(true)
 }
@@ -2383,9 +2384,12 @@ fn maybe_publish_catalog_update(
     db: &Arc<Db>,
     paths: &Arc<AppPaths>,
     course_id: &str,
-    token: Option<String>,
+    publish_target: Option<(String, String)>,
 ) {
-    let Some(token) = token.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+    let Some((base_url, token)) = publish_target
+        .map(|(url, t)| (url, t.trim().to_string()))
+        .filter(|(_, t)| !t.is_empty())
+    else {
         return;
     };
     let package = {
@@ -2409,7 +2413,7 @@ fn maybe_publish_catalog_update(
             }
         }
     };
-    match catalog::publish_remote(catalog::DEFAULT_CATALOG_URL, &token, &package) {
+    match catalog::publish_remote(&base_url, &token, &package) {
         Ok(result) => {
             if let Ok(conn) = db.0.lock() {
                 if let Ok(now) = now_unix_secs() {
@@ -2419,6 +2423,7 @@ fn maybe_publish_catalog_update(
                         &result.id,
                         result.version.max(package.course.catalog_version),
                         now,
+                        private_server_url(&base_url),
                     );
                 }
             }
@@ -3119,6 +3124,7 @@ struct SettingsStatus {
     brave_configured: bool,
     gemini_configured: bool,
     catalog_upload_token_configured: bool,
+    catalog_servers: Vec<CatalogServerStatus>,
     mcp_servers: Vec<McpServerStatus>,
     tts_engine: String,
     tts_voice: String,
@@ -3128,6 +3134,16 @@ struct SettingsStatus {
     image_generation: bool,
     claude_enabled: bool,
     codex_enabled: bool,
+}
+
+/// Private catalog server as exposed to the UI — the token itself never
+/// leaves the backend, only whether one is configured.
+#[derive(serde::Serialize)]
+struct CatalogServerStatus {
+    id: String,
+    name: String,
+    base_url: String,
+    has_token: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -3237,10 +3253,26 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
             source: "custom".to_string(),
         });
     }
+    let catalog_servers = state
+        .catalog_servers()
+        .into_iter()
+        .map(|s| CatalogServerStatus {
+            id: s.id,
+            name: s.name,
+            base_url: s.base_url,
+            has_token: s
+                .token
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .is_some(),
+        })
+        .collect();
     SettingsStatus {
         brave_configured,
         gemini_configured: state.gemini_api_key().is_some(),
         catalog_upload_token_configured: state.catalog_upload_token().is_some(),
+        catalog_servers,
         mcp_servers,
         tts_engine: state.tts_engine(),
         tts_voice: state.tts_voice(),
@@ -3649,62 +3681,231 @@ fn set_share_domains(
     })
 }
 
+/// Resolve a catalog server id to (base_url, upload_token). None/"" = the
+/// public default catalog with the global upload token.
+fn resolve_catalog_server(
+    settings: &SettingsState,
+    server_id: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    match server_id.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok((
+            catalog::DEFAULT_CATALOG_URL.to_string(),
+            settings.catalog_upload_token(),
+        )),
+        Some(id) => {
+            let server = settings
+                .catalog_servers()
+                .into_iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("unknown catalog server: {id}"))?;
+            let token = server
+                .token
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            Ok((catalog::normalize_base_url(&server.base_url), token))
+        }
+    }
+}
+
+/// The base URL stored on a course, or None for the public catalog — the
+/// inverse of what `set_course_catalog_sync`/`install_package` persist.
+fn private_server_url(base_url: &str) -> Option<&str> {
+    (base_url != catalog::DEFAULT_CATALOG_URL).then_some(base_url)
+}
+
+/// (base_url, token) pair for auto-republish, or None when no token is
+/// configured for the course's catalog.
+fn course_publish_target_pair(
+    settings: &SettingsState,
+    course: &db::Course,
+) -> Option<(String, String)> {
+    let (base_url, token) = course_publish_target(settings, course);
+    token.map(|t| (base_url, t))
+}
+
+/// Publish target for a course: the server it is bound to, else the public
+/// catalog. A bound server that was deleted from settings resolves to
+/// (stored_url, None): reads keep working, publish fails with a clear
+/// token error.
+fn course_publish_target(
+    settings: &SettingsState,
+    course: &db::Course,
+) -> (String, Option<String>) {
+    match course
+        .catalog_server_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        None => (
+            catalog::DEFAULT_CATALOG_URL.to_string(),
+            settings.catalog_upload_token(),
+        ),
+        Some(url) => {
+            let token = settings
+                .catalog_server_by_url(url)
+                .and_then(|s| s.token)
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            (catalog::normalize_base_url(url), token)
+        }
+    }
+}
+
+/// Register a private catalog server. The URL is probed (catalog listing)
+/// before saving so typos surface immediately; re-adding the same name
+/// replaces the entry (that is also how the token is changed).
 #[tauri::command]
-fn list_catalog_courses(
-    query: Option<String>,
-) -> Result<Vec<catalog::CatalogCourseSummary>, String> {
-    catalog::list_remote(catalog::DEFAULT_CATALOG_URL, query.as_deref())
+async fn add_catalog_server(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    name: String,
+    base_url: String,
+    token: Option<String>,
+) -> Result<SettingsStatus, String> {
+    let name = name.trim().to_string();
+    let base_url = catalog::normalize_base_url(&base_url);
+    if name.is_empty() || base_url.is_empty() {
+        return Err("name and URL are required".to_string());
+    }
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err("URL must start with http:// or https://".to_string());
+    }
+    if base_url == catalog::DEFAULT_CATALOG_URL {
+        return Err("this is the public catalog — it is always available".to_string());
+    }
+    let id = slugify_mcp_id(&name);
+    if settings_state
+        .catalog_servers()
+        .iter()
+        .any(|s| s.id != id && catalog::normalize_base_url(&s.base_url) == base_url)
+    {
+        return Err("a catalog with this URL is already added".to_string());
+    }
+    let probe_url = base_url.clone();
+    tauri::async_runtime::spawn_blocking(move || catalog::list_remote(&probe_url, None))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("catalog is not reachable: {e}"))?;
+    let token = token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    settings_state
+        .upsert_catalog_server(settings::CatalogServerConfig {
+            id,
+            name,
+            base_url,
+            token,
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
 }
 
 #[tauri::command]
-fn publish_course_to_catalog(
+fn delete_catalog_server(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    id: String,
+) -> Result<SettingsStatus, String> {
+    settings_state
+        .delete_catalog_server(&id)
+        .map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
+}
+
+// Async + spawn_blocking like get_catalog_update: a slow/unreachable catalog
+// must not freeze the UI for the duration of the 8s timeout.
+#[tauri::command]
+async fn list_catalog_courses(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    query: Option<String>,
+    server_id: Option<String>,
+) -> Result<Vec<catalog::CatalogCourseSummary>, String> {
+    let (base_url, _) = resolve_catalog_server(&settings_state, server_id.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog::list_remote(&base_url, query.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn publish_course_to_catalog(
     db_state: tauri::State<'_, Arc<Db>>,
     paths: tauri::State<'_, Arc<AppPaths>>,
     settings: tauri::State<'_, Arc<SettingsState>>,
     course_id: String,
+    server_id: Option<String>,
 ) -> Result<catalog::CatalogPublishResult, String> {
-    let package = {
-        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-        // Only the original author may publish: an imported course (origin id set
-        // to someone else's) stays local, so the learner's own additions to it are
-        // never shared.
-        let course = db::get_course(&conn, &course_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("course not found: {course_id}"))?;
-        if let Some(origin) = course.catalog_origin_id.as_deref() {
-            if origin != course.id {
-                return Err("imported courses cannot be published".to_string());
+    let db = db_state.inner().clone();
+    let paths = paths.inner().clone();
+    let settings = settings.inner().clone();
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<catalog::CatalogPublishResult, String> {
+            let (package, course) = {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                // Only the original author may publish: an imported course (origin id set
+                // to someone else's) stays local, so the learner's own additions to it are
+                // never shared.
+                let course = db::get_course(&conn, &course_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("course not found: {course_id}"))?;
+                if let Some(origin) = course.catalog_origin_id.as_deref() {
+                    if origin != course.id {
+                        return Err("imported courses cannot be published".to_string());
+                    }
+                }
+                (catalog::build_package(&conn, &paths, &course_id)?, course)
+            };
+            // Explicit target wins; otherwise the server the course is bound to.
+            let (base_url, token) =
+                match server_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(_) => resolve_catalog_server(&settings, server_id.as_deref())?,
+                    None => course_publish_target(&settings, &course),
+                };
+            let token = token.ok_or_else(|| {
+                "catalog upload token is not configured for this catalog".to_string()
+            })?;
+            let result = catalog::publish_remote(&base_url, &token, &package)?;
+            {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                db::set_course_catalog_sync(
+                    &conn,
+                    &course_id,
+                    &result.id,
+                    result.version.max(package.course.catalog_version),
+                    now_unix_secs()?,
+                    private_server_url(&base_url),
+                )
+                .map_err(|e| e.to_string())?;
             }
-        }
-        catalog::build_package(&conn, &paths, &course_id)?
-    };
-    let token = settings
-        .catalog_upload_token()
-        .ok_or_else(|| "catalog upload token is not configured".to_string())?;
-    let result = catalog::publish_remote(catalog::DEFAULT_CATALOG_URL, &token, &package)?;
-    {
-        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-        db::set_course_catalog_sync(
-            &conn,
-            &course_id,
-            &result.id,
-            result.version.max(package.course.catalog_version),
-            now_unix_secs()?,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(result)
+            Ok(result)
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn download_catalog_course(
+async fn download_catalog_course(
     db_state: tauri::State<'_, Arc<Db>>,
     paths: tauri::State<'_, Arc<AppPaths>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
     catalog_id: String,
+    server_id: Option<String>,
 ) -> Result<String, String> {
-    let package = catalog::download_remote(catalog::DEFAULT_CATALOG_URL, &catalog_id)?;
-    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    catalog::install_package(&conn, &paths, package)
+    let db = db_state.inner().clone();
+    let paths = paths.inner().clone();
+    let (base_url, _) = resolve_catalog_server(&settings_state, server_id.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let package = catalog::download_remote(&base_url, &catalog_id)?;
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        catalog::install_package(&conn, &paths, package, private_server_url(&base_url))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // Async + spawn_blocking: this hits the remote catalog over the network, and a
@@ -3717,11 +3918,21 @@ async fn get_catalog_update(
 ) -> Result<catalog::CatalogUpdateStatus, String> {
     let db = db_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<catalog::CatalogUpdateStatus, String> {
-        let remote = catalog::list_remote(catalog::DEFAULT_CATALOG_URL, None)?;
+        // The course is bound to the server it was installed from / published to;
+        // resolved from the course row (not settings) so a server deleted from
+        // settings still answers update checks.
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let base_url = course
+            .catalog_server_url
+            .clone()
+            .unwrap_or_else(|| catalog::DEFAULT_CATALOG_URL.to_string());
+        let remote = catalog::list_remote(&base_url, None)?;
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let course = db::get_course(&conn, &course_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("course not found: {course_id}"))?;
         Ok(catalog::check_update(&conn, &course, &remote))
     })
     .await
@@ -3734,16 +3945,22 @@ fn update_catalog_course(
     paths: tauri::State<'_, Arc<AppPaths>>,
     course_id: String,
 ) -> Result<String, String> {
-    let catalog_id = {
+    let (catalog_id, base_url) = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
         let course = db::get_course(&conn, &course_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("course not found: {course_id}"))?;
-        course
-            .catalog_origin_id
-            .unwrap_or_else(|| course.id.clone())
+        (
+            course
+                .catalog_origin_id
+                .clone()
+                .unwrap_or_else(|| course.id.clone()),
+            course
+                .catalog_server_url
+                .unwrap_or_else(|| catalog::DEFAULT_CATALOG_URL.to_string()),
+        )
     };
-    let package = catalog::download_remote(catalog::DEFAULT_CATALOG_URL, &catalog_id)?;
+    let package = catalog::download_remote(&base_url, &catalog_id)?;
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
     catalog::update_installed_course(&conn, &paths, &course_id, package)
 }
@@ -5069,6 +5286,7 @@ fn start_generate_submodule(
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let verify_model = settings_state.stage_model(&course.agent, "verify");
+    let publish_target = course_publish_target_pair(&settings_state, &course);
     spawn_generate_submodule(
         &app,
         db_state.inner().clone(),
@@ -5082,7 +5300,7 @@ fn start_generate_submodule(
         tests_model,
         verify_model,
         settings_state.gemini_image_model(),
-        settings_state.catalog_upload_token(),
+        publish_target,
         false,
         true,
     )
@@ -5112,6 +5330,7 @@ fn start_first_pending_submodule(
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let verify_model = settings_state.stage_model(&course.agent, "verify");
+    let publish_target = course_publish_target_pair(&settings_state, &course);
     let started = spawn_generate_submodule(
         &app,
         db_state.inner().clone(),
@@ -5125,7 +5344,7 @@ fn start_first_pending_submodule(
         tests_model,
         verify_model,
         settings_state.gemini_image_model(),
-        settings_state.catalog_upload_token(),
+        publish_target,
         true,
         true,
     )?;
@@ -5161,6 +5380,7 @@ fn start_full_course_generation(
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let verify_model = settings_state.stage_model(&course.agent, "verify");
+    let publish_target = course_publish_target_pair(&settings_state, &course);
     spawn_next_queued_submodule(
         &app,
         db_state.inner().clone(),
@@ -5173,7 +5393,7 @@ fn start_full_course_generation(
         tests_model,
         verify_model,
         settings_state.gemini_image_model(),
-        settings_state.catalog_upload_token(),
+        publish_target,
     )
 }
 
@@ -5200,13 +5420,16 @@ fn start_lesson_generation(
             return Err(format!("not a single-lesson course: {course_id}"));
         }
         let structure = if course.status == "structuring" {
+            // Topic fallback can be multiline (textarea); collapse to one line.
             let title = course
                 .title
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .unwrap_or(&course.topic)
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    course.topic.split_whitespace().collect::<Vec<_>>().join(" ")
+                });
             let raw = courses::SidecarTree {
                 title: None,
                 category: None,
@@ -5237,6 +5460,7 @@ fn start_lesson_generation(
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let verify_model = settings_state.stage_model(&course.agent, "verify");
+    let publish_target = course_publish_target_pair(&settings_state, &course);
     spawn_next_queued_submodule(
         &app,
         db_state.inner().clone(),
@@ -5249,7 +5473,7 @@ fn start_lesson_generation(
         tests_model,
         verify_model,
         settings_state.gemini_image_model(),
-        settings_state.catalog_upload_token(),
+        publish_target,
     )?;
     let module = structure
         .modules
@@ -7997,6 +8221,8 @@ pub fn run() {
             set_brave_key,
             set_gemini_key,
             set_catalog_upload_token,
+            add_catalog_server,
+            delete_catalog_server,
             set_tts_engine,
             set_tts_voice,
             set_gemini_image_model,
