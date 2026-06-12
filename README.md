@@ -1,156 +1,149 @@
-More my utilities on site [legost.in](https://legost.in/en/utilities)
-
 # Learn (Almost) Anything
 
-> A local desktop app that turns a topic into a personalized course, then helps you study it with lessons, images, interactives, tests, homework review, and lecture audio.
+> Type a topic. Get a real course — with lessons, diagrams, tests, homework and spaced review — built by the AI subscription you already pay for, stored on your own machine.
 
 [![Release](https://img.shields.io/github/v/release/legostin/learn-almost-anything?include_prereleases&label=release)](https://github.com/legostin/learn-almost-anything/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/legostin/learn-almost-anything/release.yml?label=build)](https://github.com/legostin/learn-almost-anything/actions/workflows/release.yml)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://github.com/legostin/learn-almost-anything/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-7c3aed)](#agents-and-billing)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-7c3aed)](#your-subscription-is-the-engine)
 
 <p align="center"><img src="screens/2.png" alt="A generated lesson with sourced images and a multilingual course sidebar" width="900"></p>
 
-## What It Does
+## Why this exists
 
-Learn (Almost) Anything is not a hosted course platform. It is a local app that uses agent CLIs already installed on your machine:
+Everyone "learns with ChatGPT" now — and a week later all that's left is a chat transcript you'll never reopen. Chats answer questions; they don't teach. Real learning needs structure, practice, feedback and repetition.
 
-- **Claude Code** through your Claude Pro / Max account.
-- **Codex CLI** through your ChatGPT / Codex account.
+Learn (Almost) Anything turns "I want to understand X" into an actual course: an agent interviews you, researches the topic, designs a curriculum, writes illustrated lessons, quizzes you, grades your homework, and schedules flashcard reviews so the material sticks. Everything lives on your disk. There's no platform, no subscription of ours, no server with your data — the engine is the Claude Code or Codex CLI you already have.
 
-You choose a topic, language, format, and agent. The app asks clarifying questions, drafts a course plan, generates lesson material, and keeps the resulting course on your machine.
+It's the difference between asking a smart friend questions all evening and having that friend sit down and *teach you properly*.
 
-## Course Generation
+## What it looks like
 
-- **Formats:** full academic course, compact mini-course, or podcast-style series.
-- **Languages:** course language is separate from app UI language. One library can contain English, Russian, Chinese, or other-language courses side by side, with language filters on the dashboard.
-- **Lessons:** articles, diagrams, sourced images, galleries, and sandboxed interactive widgets.
-- **Study flow:** comprehension tests, practical assignments, iterative agent review, and retry-until-passed progress.
-- **Audio:** built-in OS TTS is free; optional Gemini TTS can produce higher-quality lecture audio.
-- **Catalog:** browse public `.laacourse` packages, install them locally, publish your own courses with an upload token, and pull catalog updates later.
-- **Sharing:** open a local course to someone else through ngrok when you explicitly start sharing.
+<!-- TODO: скриншот — главный экран с библиотекой курсов на разных языках -->
+<p align="center"><img src="screens/placeholder-home.png" alt="Home library with courses in several languages" width="900"></p>
 
-The app writes the selected course language into prompts for wizard questions, plans, lesson text, tests, assignments, and review. Mixed-language libraries are expected, not an edge case.
+You pick a topic, language, format and agent. The course can be a full academic course, a compact mini-module, a podcast-style series, a single lesson — or a roadmap that maps the whole journey first.
 
-### How Generation Works
+<!-- TODO: скриншот — форма создания курса с чекбоксами и выбором формата -->
+<p align="center"><img src="screens/placeholder-create.png" alt="Course creation: format, quality tier, tests/homework toggles" width="900"></p>
 
-You pick one agent (Claude or Codex) when creating the course; every LLM step then runs through it via a local Node sidecar. The pipeline is:
+## The full learning loop
 
-1. **Wizard** — the agent asks a few clarifying questions; your answers become the course brief.
-2. **Plan** — the agent researches the topic (web / Context7 / MediaWiki, plus any Space material), designs the module/submodule curriculum, and classifies the course into a subject category (which adds a few reputable preferred sources for the writing stage).
-3. **Per-submodule generation** (sequential, with retries) — three stages per lesson: draft (article + widgets) → editor/fact-check review → widget validation. Then each lesson is enriched with illustrations (a per-block choice between a real image and an inline code snippet), a comprehension test, and practical homework.
+Most AI tools stop at "here's some text". This one closes the loop:
+
+- **Lessons that look like lessons** — articles with real sourced images, Mermaid diagrams, galleries and sandboxed interactive widgets. Every draft goes through an editor/fact-check pass before you see it.
+- **Comprehension tests** — question pools that check understanding, not verbatim recall, and interleave concepts from earlier modules.
+- **Real homework** — essays, diagrams, file uploads, GitHub repos, and autograded coding tasks that actually run your code. The agent reviews submissions and makes you retry until it passes.
+- **Spaced repetition** — flashcards are extracted from each lesson and scheduled for review, so the course keeps working on you after you've read it.
+- **Lecture audio** — free OS voices out of the box, optional premium Gemini TTS, cached on disk.
+
+<!-- TODO: скриншот — тест или проверка домашки с фидбеком агента -->
+<p align="center"><img src="screens/placeholder-homework.png" alt="Homework review with agent feedback" width="900"></p>
+
+Don't want the full treatment? Checkboxes at creation turn tests and homework off, and you can skip the clarifying interview entirely — title, plan, go.
+
+## Roadmaps: see the whole journey
+
+For big goals ("become a data engineer", "learn academic painting from zero") a single course is the wrong shape. A roadmap lays out stages and skills, runs a quick diagnostic to find out what you already know, and spawns a lesson or a full course from any skill — each one aware of where it sits in the bigger picture.
+
+<!-- TODO: скриншот — роудмап с этапами и навыками -->
+<p align="center"><img src="screens/placeholder-roadmap.png" alt="A learning roadmap with stages and skills" width="900"></p>
+
+## Your materials, your sources
+
+Drop documents, links and folders into a **Space** and courses created there ground themselves in *your* material — strictly (only your sources) or openly (your sources first, the web second). Attach custom MCP servers to a course and the agent can research through any tool you trust.
+
+## Private catalogs for teams
+
+This is the part companies asked for. Spin up your own catalog server **inside your infrastructure** — one Docker command, hidden from the public internet:
+
+```bash
+docker run -d -p 8080:8080 \
+  -e PUBLIC_ORIGIN=http://catalog.internal.example.com:8080 \
+  -e CATALOG_UPLOAD_TOKEN=your-secret \
+  -v laa-catalog-data:/data \
+  legostin/laa-catalog:latest
+```
+
+Everyone on the team adds the URL in Settings and gets a shared internal course library: onboarding tracks, domain knowledge, tooling guides. Authors publish with the team token; everyone else browses, installs and pulls updates with no token at all. Courses remember which catalog they came from, so update checks keep working even across reconfigurations. The public catalog stays available alongside.
+
+<!-- TODO: скриншот — браузер каталога с переключателем «Публичный / корпоративный» -->
+<p align="center"><img src="screens/placeholder-catalog.png" alt="Catalog browser with public/private source switcher" width="900"></p>
+
+And of course: publish your best courses to the [public catalog](https://catalog.almost-anything.io), install other people's courses, translate any course into another language — structure, lessons, tests, homework, diagram labels and even baked-in image text included.
+
+## Your subscription is the engine
+
+The app is free and runs no paid backend. Every LLM call goes through an agent CLI **already installed and authenticated on your machine**:
+
+| You have | It powers | Install |
+|---|---|---|
+| Claude Pro / Max | Claude Code CLI | `npm i -g @anthropic-ai/claude-code` → `claude login` |
+| ChatGPT / Codex plan | Codex CLI | `npm i -g @openai/codex` → `codex login` |
+
+Install both and pick per course. Optional extras, each off by default: Brave Search API (web/image grounding), Gemini API (generated illustrations, premium TTS). A quality/cost tier per course (quick / balanced / premium) controls research depth, reasoning effort and how much material gets generated — so a quick mini-course stays cheap and a premium deep-dive goes all in.
+
+Provider pricing changes; check [Claude Code plans](https://support.claude.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan), [Codex pricing](https://chatgpt.com/codex/pricing/), [Gemini API](https://ai.google.dev/gemini-api/docs/pricing), [Brave Search API](https://brave.com/search/api/).
+
+## Get started
+
+1. **Download** the latest build from [Releases](https://github.com/legostin/learn-almost-anything/releases) — macOS `.dmg` (Apple Silicon / Intel, signed and notarized) or Windows `.msi`/`.exe` (unsigned for now, SmartScreen may warn).
+2. **Make sure Node.js 20+ is installed** — the local sidecar runs the agent SDKs through it.
+3. **Have at least one agent CLI** logged in (table above), then launch the app and create your first course.
+
+The UI ships in English and Russian; course content can be generated in any language you pick — a single library happily mixes English, Russian and Chinese courses.
+
+Installed builds self-update: the app checks GitHub Releases, downloads a signed updater bundle, verifies and installs it.
+
+## How it works under the hood
+
+<details>
+<summary>The generation pipeline (click to expand)</summary>
+
+You pick one agent (Claude or Codex) when creating the course; every LLM step then runs through it via a local Node sidecar:
+
+1. **Interview** — a few adaptive clarifying questions become the course brief (skippable).
+2. **Plan** — the agent researches (web / Context7 / MediaWiki / arXiv / OpenAlex / your Space), designs the module tree and classifies the subject category.
+3. **Per-lesson generation** — draft (article + widgets) → editor & fact-check review → widget validation; then illustrations (real image vs code snippet, per block), a test, homework and flashcards in parallel. Accuracy-critical categories get an extra background fact-check pass.
 
 ```mermaid
 flowchart TD
-  U["Topic, language, format, agent, space"] --> CC["create_course (status: wizard)"]
-  CC --> AGENT{"Chosen agent<br/>(every LLM call)"}
-  AGENT -->|claude| SC[["Node sidecar"]]
-  AGENT -->|codex| SC
-
-  SC --> WQ["wizard_questions"]
-  WQ --> ANS["User answers → course brief"]
-  ANS --> BS["build_structure"]
-
-  subgraph PLAN["Planning"]
-    BS --> R1["Research: web / Context7 / MediaWiki + Space material"]
-    R1 --> R2["Curriculum: modules → submodules"]
-    R2 --> R3["Classify course category"]
-    R3 --> R4["install_structure → structure.json + category"]
-  end
-
-  R4 --> LOOP{"For each submodule<br/>(sequential, with retries)"}
-
-  subgraph GEN["Submodule generation"]
-    LOOP --> D1["Stage 1 — submodule_draft:<br/>article + draft widgets + category sources"]
-    D1 --> D2["Stage 2 — submodule_review:<br/>editor + fact-check"]
-    D2 --> D3["Stage 3 — submodule_annotate:<br/>validate Mermaid, repair interactive"]
-    D3 --> ILL["plan_illustrations — per block:<br/>image vs inline code snippet"]
-    ILL --> IMG["search / generate images (+ vision check)"]
-    D3 --> TST["generate_test"]
-    D3 --> HW["generate_assignments"]
-  end
-
-  IMG --> RDY["Lesson ready"]
+  U["Topic, language, format, agent, space"] --> CC["create_course"]
+  CC --> SC[["Node sidecar (Claude Code / Codex)"]]
+  SC --> WQ["Interview → course brief"]
+  WQ --> BS["Plan: research → curriculum → category"]
+  BS --> LOOP{"For each lesson"}
+  LOOP --> D1["Draft: article + widgets"]
+  D1 --> D2["Editor + fact-check review"]
+  D2 --> D3["Widget validation"]
+  D3 --> ILL["Illustrations"]
+  D3 --> TST["Test"]
+  D3 --> HW["Homework"]
+  D3 --> FC["Flashcards"]
+  ILL --> RDY["Lesson ready"]
   TST --> RDY
   HW --> RDY
+  FC --> RDY
   RDY --> LOOP
   LOOP -->|all done| FIN(["Course ready"])
-
-  D1 -. "error / timeout → retry, else switch agent" .-> D1
 ```
 
-Translating a course re-runs translation over the structure, articles, tests, homework, widget captions, Mermaid diagram labels, and interactive widget text, and regenerates AI images whose baked-in text was in the source language.
+</details>
 
-## Agents And Billing
+**Stack:** Tauri 2 (desktop shell) · React 19 + TypeScript + Vite · Node sidecar calling `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk` · SQLite + files for local storage · Playwright + system Chrome for visual widget checks · bundled MCP servers for controlled research tools.
 
-The app itself is free and does not run a paid backend for generation. Costs and limits come from the external accounts you connect.
+## Local data and privacy
 
-| Feature | What pays for it | Notes |
-|---|---|---|
-| Course planning, lesson writing, tests, homework review | Claude Code or Codex CLI | Uses your local authenticated CLI. Provider usage limits still apply. |
-| Claude Code | Claude Pro / Max, or Claude API credits if you opt into API usage | Claude Code usage shares limits with Claude. If `ANTHROPIC_API_KEY` or API-credit flow is active, usage can be billed separately at API rates. |
-| Codex CLI | ChatGPT / Codex plan credits and limits, or OpenAI API key usage | Codex has plan limits and token/credit accounting. Extra credits or API-key usage can incur separate charges. |
-| Web and image search via Brave | Your Brave Search API plan/quota | Optional. Used for grounding and image/source discovery when configured. |
-| Custom generated illustrations | Gemini API | Optional. Image-generation models may require paid Gemini API usage. |
-| Premium lecture audio | Gemini API | Optional. Audio is generated in chunks and cached on disk so the same chunk is not paid for repeatedly. |
-| Built-in lecture audio | Operating system TTS | Free, local OS voice quality. |
-| Catalog browsing/downloading | None from the app | Publishing needs only a catalog upload token. |
+- Courses, progress and media live in the local app data directory. No Learn server hosts your content.
+- Agent providers receive only the prompts and course context needed for generation; optional Gemini/Brave integrations receive only the requests for features you enabled.
+- Catalog publishing and ngrok sharing happen only when you explicitly trigger them.
 
-Pricing changes often. Check the current provider pages before relying on a budget:
+## Latest releases
 
-- [Claude Code with Pro / Max](https://support.claude.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan)
-- [Codex pricing](https://chatgpt.com/codex/pricing/)
-- [Codex rate card](https://help.openai.com/en/articles/20001106-codex-rate-card)
-- [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)
-- [Brave Search API](https://brave.com/search/api/)
-
-For predictable spend, start with mini-courses, use the built-in OS TTS, leave Gemini disabled, and watch `/status` or the provider dashboards for the selected agent.
-
-## Install
-
-Download the latest build from [Releases](https://github.com/legostin/learn-almost-anything/releases).
-
-- **macOS:** choose `..._aarch64.dmg` for Apple Silicon or `..._x64.dmg` for Intel. Builds are signed with Developer ID and notarized by Apple.
-- **Windows:** choose the x64 `.msi` or `.exe`. Windows builds are currently unsigned, so SmartScreen may warn.
-
-The UI starts in English. Russian UI is available in Settings. Course content can be generated in the course language you select.
-
-## Requirements
-
-1. **Node.js 20+** — the sidecar runs the agent SDKs through Node.
-2. **At least one local agent CLI:**
-
-   | Agent | Typical account | Install |
-   |---|---|---|
-   | Claude Code CLI | Claude Pro / Max | `npm i -g @anthropic-ai/claude-code` then `claude login` |
-   | Codex CLI | ChatGPT / Codex plan | `npm i -g @openai/codex` then `codex login` |
-
-You can install both and choose the backend per course. The desktop app uses the CLI executable already installed on your machine instead of bundling a private copy. After installing or moving a CLI, restart the app so PATH detection refreshes.
-
-## Updates
-
-Starting with `v0.1.2`, installed desktop builds can check GitHub Releases from Settings, download a signed updater bundle, install it, and restart. Update signing uses a Tauri updater key stored in GitHub Actions secrets, and the app verifies the update before installing it.
-
-## Latest Release
-
-`v0.1.7` prefers Claude for implicit course suggestions when both Claude and Codex are installed, so a macOS-blocked Codex CLI is not launched unless Codex is explicitly selected.
-
-`v0.1.4` stops production agent checks from launching `claude --version` or `codex --version`, so macOS Gatekeeper prompts do not appear just from opening the app or Settings. The selected CLI is launched only when generation needs it.
-
-`v0.1.3` fixed production agent discovery and stopped bundling native agent CLI binaries into the app.
-
-`v0.1.2` added signed in-app updates.
-
-`v0.1.1` added the public catalog, course format selection, richer lesson visuals, and macOS signing/notarization fixes.
-
-## Local Data And Privacy
-
-- Course data is stored locally in the app data directory.
-- The app does not host your generated lessons on a Learn server.
-- Agent providers receive the prompts and course context needed for generation.
-- Optional Gemini and Brave integrations receive only the requests needed for the feature you enabled.
-- Public catalog publishing and ngrok sharing happen only when you explicitly start those actions.
+- **v0.3.0** — private self-hosted catalogs (Docker image + multi-server support in the app), tests/homework toggles and a skippable interview at course creation, multiline topic input.
+- **v0.2.0** — single lessons, roadmaps, runnable autograded code assignments, custom MCP servers.
+- **v0.1.x** — public catalog, course formats, signed in-app updates, richer lesson visuals.
 
 ## Develop
 
@@ -164,41 +157,14 @@ pnpm --dir sidecar install
 pnpm tauri dev
 ```
 
-Requires Rust stable, pnpm, and Node 20+.
+Requires Rust stable, pnpm, and Node 20+. `pnpm tauri build` produces bundles under `src-tauri/target/release/bundle/`; for local browser/share testing keep the frontend build current with `pnpm build:watch`.
 
-For local browser/share testing, keep the frontend build current:
-
-```bash
-pnpm build:watch
-```
-
-## Build Locally
-
-```bash
-pnpm tauri build
-```
-
-Artifacts are written under `src-tauri/target/release/bundle/`. Before bundling, `scripts/copy-sidecar.mjs` stages the Node sidecar into `src-tauri/sidecar/` and prunes bundled native agent CLI binaries so production builds use the user's installed CLIs.
-
-For Developer ID macOS builds, provide the Apple signing and notarization environment expected by `.github/workflows/release.yml`.
-
-## Catalog Service
-
-The public catalog backend is deployed separately from the private
-`legostin/learn-almost-anything-catalog` repository. The app talks to
-`https://catalog.almost-anything.io`; browsing and downloads are public,
-publishing requires the configured catalog upload token.
-
-## Architecture
-
-- **Tauri 2** — desktop shell, windows, IPC, updater.
-- **React 19 + TypeScript + Vite** — frontend.
-- **Node sidecar** — calls `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk`.
-- **SQLite + files** — local course index and generated content.
-- **Playwright-core + system Chrome** — visual checks for interactive widgets.
-- **MCP servers** — bundled reference/search helpers for controlled agent tools.
-- **Catalog server** — small Node service for public course packages.
+The catalog server lives in a separate repository and ships as the `legostin/laa-catalog` Docker image; the app talks to `https://catalog.almost-anything.io` by default and to any private servers you add.
 
 ## License
 
 Not set. Source is open for reading and personal use; use at your own risk.
+
+---
+
+More utilities by the author: [legost.in](https://legost.in/en/utilities)
