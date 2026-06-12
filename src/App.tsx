@@ -18,6 +18,16 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import hljs from "highlight.js";
+import { basicSetup } from "codemirror";
+import { EditorView, keymap } from "@codemirror/view";
+import { indentWithTab } from "@codemirror/commands";
+import { autocompletion, completeAnyWord } from "@codemirror/autocomplete";
+import { python } from "@codemirror/lang-python";
+import { javascript } from "@codemirror/lang-javascript";
+import { cpp } from "@codemirror/lang-cpp";
+import { go } from "@codemirror/lang-go";
+import { rust } from "@codemirror/lang-rust";
+import { java } from "@codemirror/lang-java";
 import { mermaidGrammar } from "./mermaid-grammar";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github.css";
@@ -40,7 +50,7 @@ import appMark from "./assets/app-mark.png";
 import "./App.css";
 
 type Agent = "claude" | "codex";
-type CourseFormat = "academic_course" | "mini_module" | "podcast_series";
+type CourseFormat = "academic_course" | "mini_module" | "podcast_series" | "single_lesson";
 
 const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
 
@@ -60,16 +70,23 @@ const COURSE_FORMATS = [
     titleKey: "courseFormatPodcastTitle",
     descKey: "courseFormatPodcastDesc",
   },
+  {
+    value: "single_lesson",
+    titleKey: "courseFormatLessonTitle",
+    descKey: "courseFormatLessonDesc",
+  },
 ] as const satisfies ReadonlyArray<{
   value: CourseFormat;
   titleKey:
     | "courseFormatAcademicTitle"
     | "courseFormatMiniTitle"
-    | "courseFormatPodcastTitle";
+    | "courseFormatPodcastTitle"
+    | "courseFormatLessonTitle";
   descKey:
     | "courseFormatAcademicDesc"
     | "courseFormatMiniDesc"
-    | "courseFormatPodcastDesc";
+    | "courseFormatPodcastDesc"
+    | "courseFormatLessonDesc";
 }>;
 
 // Generation cost/quality tier chosen at course creation; mirrors the Rust
@@ -102,6 +119,8 @@ type Course = {
   space_id?: string | null;
   translated_from?: string | null;
   category?: string | null;
+  roadmap_id?: string | null;
+  roadmap_skill?: string | null;
 };
 
 // Localized labels for the agent-assigned subject category. Keep the id set in
@@ -222,7 +241,12 @@ type ChatMessage = {
   modules: ModuleNode[];
 };
 
-type JobKind = "build_structure" | "generate_submodule" | "translate";
+type JobKind =
+  | "build_structure"
+  | "generate_submodule"
+  | "translate"
+  | "build_roadmap"
+  | "refine_roadmap";
 
 type JobState =
   | { kind: JobKind; status: "running" }
@@ -263,10 +287,19 @@ type CourseSuggestionState =
 
 type View =
   | { kind: "empty" }
-  | { kind: "creating"; spaceId?: string }
+  | {
+      kind: "creating";
+      spaceId?: string;
+      roadmapId?: string;
+      roadmapSkill?: string;
+      initialTopic?: string;
+      initialFormat?: "roadmap";
+    }
   | { kind: "catalog" }
   | { kind: "spaces" }
   | { kind: "space"; id: string }
+  | { kind: "roadmaps" }
+  | { kind: "roadmap"; id: string }
   | { kind: "course"; id: string }
   | { kind: "review"; courseId?: string }
   | { kind: "submodule"; courseId: string; moduleId: string; submoduleId: string };
@@ -322,6 +355,61 @@ type Space = {
   updated_at: number;
   strict: boolean;
   source_count: number;
+};
+
+type RoadmapSource = {
+  title: string;
+  url: string;
+  kind: "docs" | "article" | "video" | "course" | "book";
+};
+type RoadmapSkill = { id: string; title: string; desc?: string };
+type RoadmapNode = {
+  id: string;
+  title: string;
+  summary: string;
+  sources: RoadmapSource[];
+  skills: RoadmapSkill[];
+};
+type RoadmapStage = { id: string; title: string; summary: string; nodes: RoadmapNode[] };
+type RoadmapContent = { stages: RoadmapStage[] };
+type Roadmap = {
+  id: string;
+  topic: string;
+  title: string | null;
+  language: string;
+  status: "wizard" | "generating" | "ready" | "failed";
+  agent: Agent;
+  content: RoadmapContent | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  /// Skill progress, present for ready roadmaps (computed by list_roadmaps).
+  done_skills?: number;
+  total_skills?: number;
+};
+type RoadmapQuizQuestion = {
+  skillId: string;
+  text: string;
+  options: string[];
+  correct: number;
+  explanation?: string;
+};
+type RoadmapChatMsg = {
+  id: string;
+  ts: number;
+  role: "user" | "agent";
+  text: string;
+  content?: RoadmapContent | null;
+  accepted?: boolean;
+};
+type RoadmapSkillStatus = {
+  state: "open" | "in_progress" | "done";
+  manual: boolean;
+  course_id?: string;
+  course_status?: string;
+  percent: number;
+  total: number;
+  verified: number;
 };
 
 type SpaceSource = {
@@ -397,6 +485,8 @@ type SettingsStatus = {
   gemini_tts_model: string;
   debug_logging?: boolean;
   image_generation?: boolean;
+  claude_enabled?: boolean;
+  codex_enabled?: boolean;
 };
 type Tagline = { ru: string; en: string };
 
@@ -825,6 +915,7 @@ function App() {
   const t = useT();
   const [uiLang] = useLang();
   const [courses, setCourses] = useState<Course[]>([]);
+  const [roadmaps, setRoadmaps] = useState<Roadmap[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [reviewDueTotal, setReviewDueTotal] = useState(0);
   const [jobs, setJobs] = useState<Map<string, JobState>>(new Map());
@@ -934,6 +1025,17 @@ function App() {
     setCourses(list);
   }, []);
 
+  const refreshRoadmaps = useCallback(async () => {
+    try {
+      setRoadmaps(await invoke<Roadmap[]>("list_roadmaps"));
+    } catch {
+      /* roadmaps are non-critical for the rest of the app */
+    }
+  }, []);
+  useEffect(() => {
+    refreshRoadmaps();
+  }, [refreshRoadmaps]);
+
   const refreshReviewDue = useCallback(async () => {
     try {
       const counts = await invoke<Record<string, number>>("due_card_counts", {
@@ -1041,6 +1143,8 @@ function App() {
       // plan view ("Generate full course"), not automatically here.
       // course.status may have flipped (e.g. build_structure → 'ready')
       await refresh();
+      // Roadmap status lives in its own state — refresh it on its terminal event.
+      if (kind === "build_roadmap") await refreshRoadmaps();
       // Terminal event for submodule generation — clear stage tracking
       // and record (or clear) the error for that sub.
       if (kind === "generate_submodule") {
@@ -1314,33 +1418,52 @@ function App() {
         >
           {t("newCourse")}
         </button>
-        <div className="sidebar-links">
+        <nav className="sidebar-links">
           {reviewDueTotal > 0 && (
             <button
               className={`sidebar-link ${view.kind === "review" ? "active" : ""}`}
               onClick={() => setView({ kind: "review" })}
             >
-              {t("reviewNav")} <span className="review-due-badge">{reviewDueTotal}</span>
+              <span>{t("reviewNav")}</span>
+              <span className="review-due-badge">{reviewDueTotal}</span>
             </button>
           )}
           <button
             className={`sidebar-link ${view.kind === "spaces" || view.kind === "space" ? "active" : ""}`}
             onClick={() => setView({ kind: "spaces" })}
           >
-            {t("spacesNav")}
+            <span>{t("spacesNav")}</span>
+            <span className="sidebar-link-arrow" aria-hidden="true">
+              ›
+            </span>
+          </button>
+          <button
+            className={`sidebar-link ${view.kind === "roadmaps" || view.kind === "roadmap" ? "active" : ""}`}
+            onClick={() => setView({ kind: "roadmaps" })}
+          >
+            <span>{t("roadmapsNav")}</span>
+            <span className="sidebar-link-arrow" aria-hidden="true">
+              ›
+            </span>
           </button>
           <button
             className={`sidebar-link ${view.kind === "catalog" ? "active" : ""}`}
             onClick={() => setView({ kind: "catalog" })}
           >
-            {t("catalogOpen")}
+            <span>{t("catalogOpen")}</span>
+            <span className="sidebar-link-arrow" aria-hidden="true">
+              ›
+            </span>
           </button>
-        </div>
+        </nav>
         {activeSpaceId && (
           <div className="sidebar-space-scope">
-            <span className="sidebar-space-name">
-              {spaceNames[activeSpaceId] ?? t("spacesTitle")}
-            </span>
+            <div className="sidebar-space-scope-text">
+              <span className="sidebar-space-kicker">{t("sidebarSpaceScope")}</span>
+              <span className="sidebar-space-name">
+                {spaceNames[activeSpaceId] ?? t("spacesTitle")}
+              </span>
+            </div>
             <button
               className="sidebar-space-clear"
               onClick={() => setView({ kind: "empty" })}
@@ -1374,6 +1497,10 @@ function App() {
             ))}
           </div>
         )}
+        <div className="sidebar-list-head">
+          <span>{t("homeCoursesTitle")}</span>
+          <span className="sidebar-list-count">{sidebarCourses.length}</span>
+        </div>
         <ul className="course-list">
           {sidebarCourses.map((c) => {
             const hasRunning =
@@ -1417,6 +1544,8 @@ function App() {
         {(view.kind === "catalog" ||
           view.kind === "spaces" ||
           view.kind === "space" ||
+          view.kind === "roadmaps" ||
+          view.kind === "roadmap" ||
           view.kind === "course" ||
           view.kind === "submodule") && (
           <nav className="crumbs">
@@ -1438,6 +1567,18 @@ function App() {
                   </button>
                 ) : (
                   <span className="crumb current">{t("spacesTitle")}</span>
+                )}
+              </>
+            )}
+            {(view.kind === "roadmaps" || view.kind === "roadmap") && (
+              <>
+                <span className="crumb-sep">›</span>
+                {view.kind === "roadmap" ? (
+                  <button className="crumb" onClick={() => setView({ kind: "roadmaps" })}>
+                    {t("roadmapsTitle")}
+                  </button>
+                ) : (
+                  <span className="crumb current">{t("roadmapsTitle")}</span>
                 )}
               </>
             )}
@@ -1482,6 +1623,10 @@ function App() {
             onOpenCatalog={() => setView({ kind: "catalog" })}
             onOpenSpaces={() => setView({ kind: "spaces" })}
             onOpenSpace={(id) => setView({ kind: "space", id })}
+            roadmaps={roadmaps}
+            onOpenRoadmaps={() => setView({ kind: "roadmaps" })}
+            onOpenRoadmap={(id) => setView({ kind: "roadmap", id })}
+            onNewRoadmap={() => setView({ kind: "creating", initialFormat: "roadmap" })}
             onOpenSettings={() => setSettingsOpen(true)}
             onHomeTitleTap={startCourseSuggestion}
             onStudySuggestion={studySuggestedCourse}
@@ -1495,9 +1640,17 @@ function App() {
           <CreateCourse
             agentAvail={agentAvail}
             spaceId={view.spaceId}
+            roadmapId={view.roadmapId}
+            roadmapSkill={view.roadmapSkill}
+            initialTopic={view.initialTopic}
+            initialFormat={view.initialFormat}
             onCreated={async (id) => {
               await refresh();
               openCourse(id);
+            }}
+            onCreatedRoadmap={async (id) => {
+              await refreshRoadmaps();
+              setView({ kind: "roadmap", id });
             }}
             onCancel={() => setView({ kind: "empty" })}
           />
@@ -1522,6 +1675,36 @@ function App() {
         )}
         {view.kind === "spaces" && (
           <SpacesView onOpenSpace={(id) => setView({ kind: "space", id })} />
+        )}
+        {view.kind === "roadmaps" && (
+          <RoadmapsView
+            roadmaps={roadmaps}
+            onOpenRoadmap={(id) => setView({ kind: "roadmap", id })}
+            onCreateNew={() => setView({ kind: "creating", initialFormat: "roadmap" })}
+          />
+        )}
+        {view.kind === "roadmap" && (
+          <RoadmapView
+            roadmapId={view.id}
+            jobs={jobs}
+            transcript={transcripts.get(view.id) ?? null}
+            courses={courses}
+            onOpenCourse={openCourse}
+            onChanged={async () => {
+              // Order matters: a lesson spawned from a skill must be in the
+              // courses list BEFORE RoadmapView navigates to it.
+              await refresh();
+              await refreshRoadmaps();
+            }}
+            onCreateCourseForSkill={(roadmapId, roadmapSkill, initialTopic) =>
+              setView({ kind: "creating", roadmapId, roadmapSkill, initialTopic })
+            }
+            onDeleted={async () => {
+              setView({ kind: "roadmaps" });
+              await refreshRoadmaps();
+              await refresh();
+            }}
+          />
         )}
         {view.kind === "space" && (
           <SpaceView
@@ -2141,6 +2324,10 @@ function CourseDashboard({
   onOpenCatalog,
   onOpenSpaces,
   onOpenSpace,
+  roadmaps,
+  onOpenRoadmaps,
+  onOpenRoadmap,
+  onNewRoadmap,
   onOpenSettings,
   onHomeTitleTap,
   onStudySuggestion,
@@ -2163,6 +2350,10 @@ function CourseDashboard({
   onOpenCatalog: () => void;
   onOpenSpaces: () => void;
   onOpenSpace: (id: string) => void;
+  roadmaps: Roadmap[];
+  onOpenRoadmaps: () => void;
+  onOpenRoadmap: (id: string) => void;
+  onNewRoadmap: () => void;
   onOpenSettings: () => void;
   onHomeTitleTap: () => void;
   onStudySuggestion: () => void;
@@ -2292,7 +2483,12 @@ function CourseDashboard({
       action = () => onOpenCourse(course.id);
       needsAction = true;
     } else if (course.status === "structuring") {
-      if (structureJob?.status === "running") {
+      if (course.course_format === "single_lesson") {
+        // Lessons have no plan-building step: opening the course auto-starts
+        // generation (CourseView effect), so never expose a build-plan action.
+        actionLabel = t("courseActionOpen");
+        statusText = t("courseStatusWorking");
+      } else if (structureJob?.status === "running") {
         actionLabel = t("courseActionWorking");
         actionDisabled = true;
         statusText = t("courseStatusWorking");
@@ -2349,8 +2545,15 @@ function CourseDashboard({
       needsAction,
     };
   });
-  const attention = summaries.filter((s) => s.needsAction);
-  const summariesById = new Map(summaries.map((summary) => [summary.course.id, summary]));
+  // Single lessons live in their own home section, never in featured/index.
+  const lessonSummaries = summaries.filter(
+    (s) => s.course.course_format === "single_lesson"
+  );
+  const courseSummaries = summaries.filter(
+    (s) => s.course.course_format !== "single_lesson"
+  );
+  const attention = courseSummaries.filter((s) => s.needsAction);
+  const summariesById = new Map(courseSummaries.map((summary) => [summary.course.id, summary]));
   const featured: typeof summaries = [];
   const addFeatured = (summary: (typeof summaries)[number] | undefined) => {
     if (!summary || featured.some((item) => item.course.id === summary.course.id)) return;
@@ -2358,10 +2561,12 @@ function CourseDashboard({
   };
   attention.forEach(addFeatured);
   recentCourseIds.forEach((courseId) => addFeatured(summariesById.get(courseId)));
-  summaries.filter((summary) => summary.progress?.nextReady).forEach(addFeatured);
-  summaries.forEach(addFeatured);
+  courseSummaries.filter((summary) => summary.progress?.nextReady).forEach(addFeatured);
+  courseSummaries.forEach(addFeatured);
   const featuredIds = new Set(featured.map((summary) => summary.course.id));
-  const courseListSummaries = summaries.filter((summary) => !featuredIds.has(summary.course.id));
+  const courseListSummaries = courseSummaries.filter(
+    (summary) => !featuredIds.has(summary.course.id)
+  );
   const brand = t("brand");
   const almost = "(Almost)";
   const almostIndex = brand.indexOf(almost);
@@ -2484,28 +2689,69 @@ function CourseDashboard({
         </div>
       )}
 
-      <section className="home-spaces">
-        <div className="home-spaces-head">
-          <span className="home-section-kicker">{t("spacesTitle")}</span>
-          <button className="home-link-action" onClick={onOpenSpaces}>
-            {t("spacesManage")}
-          </button>
-        </div>
-        <div className="home-spaces-row">
-          {spaces.slice(0, 6).map((s) => (
-            <button key={s.id} className="home-space-card" onClick={() => onOpenSpace(s.id)}>
-              <span className="home-space-name">{s.name}</span>
-              <span className="home-space-meta">
-                {t("spaceSourceCount", { count: s.source_count })}
-              </span>
+      <div className="home-bands">
+        <section className="home-spaces">
+          <div className="home-spaces-head">
+            <span className="home-section-kicker">{t("spacesTitle")}</span>
+            <button className="home-link-action" onClick={onOpenSpaces}>
+              {t("spacesManage")}
             </button>
-          ))}
-          <button className="home-space-card home-space-new" onClick={onOpenSpaces}>
-            <span className="home-space-name">+ {t("spaceCreate")}</span>
-            <span className="home-space-meta">{t("spacesShortHint")}</span>
-          </button>
-        </div>
-      </section>
+          </div>
+          <div className="home-spaces-row">
+            {spaces.slice(0, 4).map((s) => (
+              <button key={s.id} className="home-space-card" onClick={() => onOpenSpace(s.id)}>
+                <span className="home-space-name">{s.name}</span>
+                <span className="home-space-meta">
+                  {t("spaceSourceCount", { count: s.source_count })}
+                </span>
+              </button>
+            ))}
+            <button className="home-space-card home-space-new" onClick={onOpenSpaces}>
+              <span className="home-space-name">+ {t("spaceCreate")}</span>
+              <span className="home-space-meta">{t("spacesShortHint")}</span>
+            </button>
+          </div>
+        </section>
+
+        <section className="home-spaces home-roadmaps">
+          <div className="home-spaces-head">
+            <span className="home-section-kicker">{t("roadmapsTitle")}</span>
+            <button className="home-link-action" onClick={onOpenRoadmaps}>
+              {t("roadmapsManage")}
+            </button>
+          </div>
+          <div className="home-spaces-row">
+            {roadmaps.slice(0, 4).map((r) => (
+              <button key={r.id} className="home-space-card" onClick={() => onOpenRoadmap(r.id)}>
+                <span className="home-space-name">{r.title ?? r.topic}</span>
+                {r.status === "ready" && typeof r.total_skills === "number" ? (
+                  <>
+                    <span className="home-space-meta">
+                      {t("roadmapProgress", {
+                        done: String(r.done_skills ?? 0),
+                        total: String(r.total_skills),
+                      })}
+                    </span>
+                    <span className="home-card-progress" aria-hidden="true">
+                      <span
+                        style={{
+                          width: `${r.total_skills ? Math.round(((r.done_skills ?? 0) / r.total_skills) * 100) : 0}%`,
+                        }}
+                      />
+                    </span>
+                  </>
+                ) : (
+                  <span className="home-space-meta">{roadmapStatusLabel(r.status, t)}</span>
+                )}
+              </button>
+            ))}
+            <button className="home-space-card home-space-new" onClick={onNewRoadmap}>
+              <span className="home-space-name">+ {t("roadmapCreate")}</span>
+              <span className="home-space-meta">{t("roadmapShortHint")}</span>
+            </button>
+          </div>
+        </section>
+      </div>
 
       {courses.length === 0 ? (
         <div className="home-empty">
@@ -2513,7 +2759,7 @@ function CourseDashboard({
           <p>{t("homeEmptyBody")}</p>
           <button onClick={onNewCourse}>{t("newCourse")}</button>
         </div>
-      ) : (
+      ) : courseSummaries.length === 0 ? null : (
         <div className="home-paper-grid">
           <section className="home-featured">
             <div className="home-section-kicker">{t("homeFocusTitle")}</div>
@@ -2561,6 +2807,31 @@ function CourseDashboard({
             )}
           </section>
         </div>
+      )}
+
+      {lessonSummaries.length > 0 && (
+        <section className="home-lessons">
+          <div className="home-section-kicker">{t("homeLessonsTitle")}</div>
+          <div className="home-lessons-list">
+            {lessonSummaries.map((summary) => (
+              <article className="home-feature-card" key={summary.course.id}>
+                <button
+                  className="home-feature-title"
+                  onClick={summary.action}
+                  disabled={summary.actionDisabled}
+                >
+                  {courseTitle(summary.course, t("courseTitlePending"))}
+                </button>
+                <p className="home-card-progress-line">
+                  {courseCardProgressLine(summary, uiLang, t)}
+                </p>
+                <div className="home-hairline-progress" aria-hidden="true">
+                  <span style={{ width: `${summary.verifiedPercent}%` }} />
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
       )}
 
       <HomeSystemStatus
@@ -2921,6 +3192,306 @@ function AppUpdateSettingsPanel() {
   );
 }
 
+type McpCandidate = {
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  envKeys: string[];
+  sourceUrl: string;
+};
+
+// User-registered third-party MCP servers: discovery by topic (web research),
+// probe-before-save (spawn + tools/list), manual add, toggle, delete.
+// Saving a server IS the code-execution approval — the exact command is shown.
+function CustomMcpSection({
+  servers,
+  onStatus,
+}: {
+  servers: McpServerStatus[];
+  onStatus: (s: SettingsStatus) => void;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [topic, setTopic] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [candidates, setCandidates] = useState<McpCandidate[] | null>(null);
+  const [envInputs, setEnvInputs] = useState<Record<string, Record<string, string>>>({});
+  const [adding, setAdding] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualName, setManualName] = useState("");
+  const [manualCmd, setManualCmd] = useState("");
+  const [manualEnv, setManualEnv] = useState("");
+
+  async function discover() {
+    if (!topic.trim() || searching) return;
+    setSearching(true);
+    setError(null);
+    setCandidates(null);
+    try {
+      const res = await invoke<{ candidates: McpCandidate[] }>("discover_course_mcp", {
+        topic: topic.trim(),
+        language: uiLang,
+        agent: null,
+      });
+      setCandidates(res.candidates ?? []);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function probeAndAdd(
+    key: string,
+    name: string,
+    command: string,
+    args: string[],
+    env: [string, string][],
+    sourceUrl: string
+  ) {
+    setAdding(key);
+    setError(null);
+    try {
+      const probe = await invoke<{ ok: boolean; tools: { name: string }[] }>(
+        "probe_mcp_server",
+        { command, args, env }
+      );
+      const status = await invoke<SettingsStatus>("add_custom_mcp", {
+        name,
+        command,
+        args,
+        env,
+        tools: (probe.tools ?? []).map((tl) => tl.name),
+        sourceUrl: sourceUrl || null,
+      });
+      onStatus(status);
+      setCandidates((prev) => prev?.filter((c) => c.name !== name) ?? null);
+      setManualOpen(false);
+      setManualName("");
+      setManualCmd("");
+      setManualEnv("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAdding(null);
+    }
+  }
+
+  function parseEnvLines(text: string): [string, string][] {
+    return text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.includes("="))
+      .map((l) => {
+        const i = l.indexOf("=");
+        return [l.slice(0, i).trim(), l.slice(i + 1).trim()] as [string, string];
+      });
+  }
+
+  async function addManual() {
+    const parts = manualCmd.trim().split(/\s+/);
+    if (!manualName.trim() || parts.length === 0 || !parts[0]) return;
+    await probeAndAdd(
+      "manual",
+      manualName.trim(),
+      parts[0],
+      parts.slice(1),
+      parseEnvLines(manualEnv),
+      ""
+    );
+  }
+
+  async function toggle(id: string, enabled: boolean) {
+    try {
+      onStatus(await invoke<SettingsStatus>("set_custom_mcp_enabled", { id, enabled }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function remove(id: string) {
+    try {
+      onStatus(await invoke<SettingsStatus>("delete_custom_mcp", { id }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <div className="custom-mcp">
+      <div className="custom-mcp-head">{t("customMcpTitle")}</div>
+      {servers.length > 0 && (
+        <div className="mcp-list">
+          {servers.map((s) => (
+            <div className="mcp-row" key={s.id}>
+              <div className="mcp-main">
+                <div className="mcp-name">{s.name}</div>
+                <div className="mcp-meta">
+                  {s.enabled_for.length > 0 ? t("customMcpEnabled") : t("customMcpDisabled")} ·
+                  custom
+                </div>
+              </div>
+              <div className="mcp-tools">
+                {s.tools.slice(0, 6).map((tool) => (
+                  <span className="mcp-tool" key={tool}>
+                    {tool}
+                  </span>
+                ))}
+              </div>
+              <div className="custom-mcp-actions">
+                <button onClick={() => toggle(s.id, s.enabled_for.length === 0)}>
+                  {s.enabled_for.length > 0 ? t("customMcpTurnOff") : t("customMcpTurnOn")}
+                </button>
+                <button className="danger-link" onClick={() => remove(s.id)}>
+                  {t("customMcpDelete")}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="custom-mcp-discover">
+        <input
+          value={topic}
+          placeholder={t("customMcpSearchPlaceholder")}
+          onChange={(e) => setTopic(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              discover();
+            }
+          }}
+          disabled={searching}
+        />
+        <button type="button" onClick={discover} disabled={searching || !topic.trim()}>
+          {searching ? (
+            <>
+              <span className="spinner" /> {t("customMcpSearching")}
+            </>
+          ) : (
+            t("customMcpSearch")
+          )}
+        </button>
+      </div>
+
+      {candidates !== null && candidates.length === 0 && (
+        <div className="setting-note">{t("customMcpNoneFound")}</div>
+      )}
+      {candidates !== null && candidates.length > 0 && (
+        <div className="custom-mcp-candidates">
+          {candidates.map((c, i) => {
+            const key = `cand-${i}`;
+            const envMap = envInputs[key] ?? {};
+            const envReady = c.envKeys.every((k) => (envMap[k] ?? "").trim());
+            return (
+              <div className="custom-mcp-candidate" key={key}>
+                <div className="mcp-name">{c.name}</div>
+                {c.description && <div className="custom-mcp-desc">{c.description}</div>}
+                <code className="custom-mcp-cmd">
+                  {c.command} {c.args.join(" ")}
+                </code>
+                <a
+                  className="custom-mcp-src"
+                  href={c.sourceUrl}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openUrl(c.sourceUrl).catch(() => window.open(c.sourceUrl, "_blank"));
+                  }}
+                >
+                  {c.sourceUrl}
+                </a>
+                {c.envKeys.map((k) => (
+                  <input
+                    key={k}
+                    className="custom-mcp-env"
+                    placeholder={k}
+                    value={envMap[k] ?? ""}
+                    onChange={(e) =>
+                      setEnvInputs((prev) => ({
+                        ...prev,
+                        [key]: { ...prev[key], [k]: e.target.value },
+                      }))
+                    }
+                  />
+                ))}
+                <button
+                  type="button"
+                  disabled={adding !== null || !envReady}
+                  onClick={() =>
+                    probeAndAdd(
+                      key,
+                      c.name,
+                      c.command,
+                      c.args,
+                      c.envKeys.map((k) => [k, envMap[k] ?? ""] as [string, string]),
+                      c.sourceUrl
+                    )
+                  }
+                >
+                  {adding === key ? (
+                    <>
+                      <span className="spinner" /> {t("customMcpProbing")}
+                    </>
+                  ) : (
+                    t("customMcpProbeAdd")
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <button
+        type="button"
+        className="custom-mcp-manual-toggle"
+        onClick={() => setManualOpen((v) => !v)}
+      >
+        {manualOpen ? t("customMcpManualClose") : t("customMcpManual")}
+      </button>
+      {manualOpen && (
+        <div className="custom-mcp-manual">
+          <input
+            value={manualName}
+            placeholder={t("customMcpManualName")}
+            onChange={(e) => setManualName(e.target.value)}
+          />
+          <input
+            value={manualCmd}
+            placeholder="npx -y my-mcp-server"
+            onChange={(e) => setManualCmd(e.target.value)}
+          />
+          <textarea
+            value={manualEnv}
+            placeholder={t("customMcpManualEnv")}
+            onChange={(e) => setManualEnv(e.target.value)}
+            rows={2}
+          />
+          <button
+            type="button"
+            disabled={adding !== null || !manualName.trim() || !manualCmd.trim()}
+            onClick={addManual}
+          >
+            {adding === "manual" ? (
+              <>
+                <span className="spinner" /> {t("customMcpProbing")}
+              </>
+            ) : (
+              t("customMcpProbeAdd")
+            )}
+          </button>
+        </div>
+      )}
+
+      {error && <div className="setting-note error-note">{error}</div>}
+      <div className="setting-note">{t("customMcpNote")}</div>
+    </div>
+  );
+}
+
 function SettingsModal({
   onClose,
   onDebugLoggingChange,
@@ -2934,6 +3505,9 @@ function SettingsModal({
   const [savingDebug, setSavingDebug] = useState(false);
   const [imageGeneration, setImageGeneration] = useState(true);
   const [savingImageGen, setSavingImageGen] = useState(false);
+  const [claudeEnabled, setClaudeEnabled] = useState(true);
+  const [codexEnabled, setCodexEnabled] = useState(true);
+  const [savingAgents, setSavingAgents] = useState(false);
   const [braveKey, setBraveKey] = useState("");
   const [braveConfigured, setBraveConfigured] = useState(false);
   const [savingBrave, setSavingBrave] = useState(false);
@@ -2985,6 +3559,20 @@ function SettingsModal({
     if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
     setDebugLogging(Boolean(s.debug_logging));
     setImageGeneration(s.image_generation !== false);
+    setClaudeEnabled(s.claude_enabled !== false);
+    setCodexEnabled(s.codex_enabled !== false);
+  }
+
+  async function saveAgentEnabled(agent: Agent, enabled: boolean) {
+    setSavingAgents(true);
+    try {
+      const s = await invoke<SettingsStatus>("set_agent_enabled", { agent, enabled });
+      applySettingsStatus(s);
+    } catch {
+      /* ignore */
+    } finally {
+      setSavingAgents(false);
+    }
   }
 
   async function saveImageGeneration(enabled: boolean) {
@@ -3335,30 +3923,36 @@ function SettingsModal({
 
         <div className="setting-group">
           <div className="setting-label">{t("mcpTitle")}</div>
-          {mcpServers.length > 0 ? (
+          {mcpServers.filter((s) => s.source !== "custom").length > 0 ? (
             <div className="mcp-list">
-              {mcpServers.map((server) => (
-                <div className="mcp-row" key={server.id}>
-                  <div className="mcp-main">
-                    <div className="mcp-name">{server.name}</div>
-                    <div className="mcp-meta">
-                      {server.enabled_for.join(" + ")} · {server.source}
+              {mcpServers
+                .filter((s) => s.source !== "custom")
+                .map((server) => (
+                  <div className="mcp-row" key={server.id}>
+                    <div className="mcp-main">
+                      <div className="mcp-name">{server.name}</div>
+                      <div className="mcp-meta">
+                        {server.enabled_for.join(" + ")} · {server.source}
+                      </div>
+                    </div>
+                    <div className="mcp-tools">
+                      {server.tools.map((tool) => (
+                        <span className="mcp-tool" key={tool}>
+                          {tool}
+                        </span>
+                      ))}
                     </div>
                   </div>
-                  <div className="mcp-tools">
-                    {server.tools.map((tool) => (
-                      <span className="mcp-tool" key={tool}>
-                        {tool}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                ))}
             </div>
           ) : (
             <div className="setting-note">{t("mcpEmpty")}</div>
           )}
           <div className="setting-note">{t("mcpNote")}</div>
+          <CustomMcpSection
+            servers={mcpServers.filter((s) => s.source === "custom")}
+            onStatus={applySettingsStatus}
+          />
         </div>
 
         <div className="setting-group">
@@ -3470,6 +4064,32 @@ function SettingsModal({
                 </select>
               </div>
             </>
+          )}
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("agentsTitle")}</div>
+          <label className="setting-toggle">
+            <input
+              type="checkbox"
+              checked={claudeEnabled}
+              disabled={savingAgents}
+              onChange={(e) => saveAgentEnabled("claude", e.target.checked)}
+            />
+            <span className="setting-label">Claude</span>
+          </label>
+          <label className="setting-toggle">
+            <input
+              type="checkbox"
+              checked={codexEnabled}
+              disabled={savingAgents}
+              onChange={(e) => saveAgentEnabled("codex", e.target.checked)}
+            />
+            <span className="setting-label">Codex</span>
+          </label>
+          <div className="setting-note">{t("agentsNote")}</div>
+          {!claudeEnabled && !codexEnabled && (
+            <div className="setting-note warn-note">⚠ {t("agentsAllOffWarn")}</div>
           )}
         </div>
 
@@ -3712,6 +4332,1012 @@ function SpacesView({ onOpenSpace }: { onOpenSpace: (id: string) => void }) {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ── Roadmaps ─────────────────────────────────────────────────────────────────
+
+function roadmapStatusLabel(status: Roadmap["status"], t: ReturnType<typeof useT>): string {
+  switch (status) {
+    case "wizard":
+      return t("roadmapStatusWizard");
+    case "generating":
+      return t("roadmapStatusGenerating");
+    case "failed":
+      return t("roadmapStatusFailed");
+    default:
+      return t("roadmapStatusReady");
+  }
+}
+
+const ROADMAP_SOURCE_ICON: Record<string, string> = {
+  docs: "📘",
+  article: "📰",
+  video: "🎬",
+  course: "🎓",
+  book: "📚",
+};
+
+function RoadmapsView({
+  roadmaps,
+  onOpenRoadmap,
+  onCreateNew,
+}: {
+  roadmaps: Roadmap[];
+  onOpenRoadmap: (id: string) => void;
+  onCreateNew: () => void;
+}) {
+  const t = useT();
+
+  return (
+    <div className="spaces-view roadmaps-view">
+      <h2>{t("roadmapsTitle")}</h2>
+      <p className="spaces-intro">{t("roadmapsIntro")}</p>
+
+      <div className="roadmap-create-cta">
+        <button onClick={onCreateNew}>+ {t("roadmapCreate")}</button>
+      </div>
+
+      {roadmaps.length === 0 ? (
+        <div className="placeholder">{t("roadmapsEmpty")}</div>
+      ) : (
+        <ul className="space-list roadmap-list">
+          {roadmaps.map((r) => (
+            <li key={r.id} onClick={() => onOpenRoadmap(r.id)}>
+              <div className="space-name">{r.title ?? r.topic}</div>
+              {r.title && r.title !== r.topic && <div className="space-desc">{r.topic}</div>}
+              <div className="space-meta">
+                <span className={`roadmap-status-chip ${r.status}`}>
+                  {roadmapStatusLabel(r.status, t)}
+                </span>
+                {r.status === "ready" && typeof r.total_skills === "number" && (
+                  <span className="roadmap-list-progress">
+                    {t("roadmapProgress", {
+                      done: String(r.done_skills ?? 0),
+                      total: String(r.total_skills),
+                    })}
+                  </span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Lightweight sibling of Wizard for roadmaps: same UI pieces (WizardQuestion,
+// WizardLoader), its own short-interview invokes (1-3 questions), dialog
+// persisted in the roadmaps.wizard column.
+function RoadmapWizard({
+  roadmap,
+  onSaved,
+}: {
+  roadmap: Roadmap;
+  onSaved: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [answered, setAnswered] = useState<QnA[]>([]);
+  const [current, setCurrent] = useState<Question | null>(null);
+  const [done, setDone] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const startedRef = useRef(false);
+  const finalizedRef = useRef(false);
+  const minQuestions = 1;
+
+  const askNext = useCallback(
+    async (history: QnA[], reRequested = false) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const step = await invoke<WizardStep>("roadmap_wizard_next_question", {
+          roadmapId: roadmap.id,
+          answered: history,
+        });
+        if (step.question) {
+          setAnswered(history);
+          setCurrent(step.question);
+          setDone(false);
+          setPending(false);
+        } else if (history.length < minQuestions && !reRequested) {
+          await askNext(history, true);
+        } else {
+          setAnswered(history);
+          setCurrent(null);
+          setDone(true);
+          setPending(false);
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [roadmap.id]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await invoke<WizardDialog>("get_roadmap_wizard_dialog", {
+          roadmapId: roadmap.id,
+        });
+        if (cancelled) return;
+        setAnswered(d?.answered ?? []);
+        setCurrent(d?.current ?? null);
+        setDone(!!d?.done);
+        setPending(!!d?.pending);
+      } catch {
+        /* fresh interview */
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [roadmap.id]);
+
+  useEffect(() => {
+    if (!hydrated || startedRef.current) return;
+    startedRef.current = true;
+    if (done || current) return;
+    if (pending || answered.length === 0) {
+      askNext(answered);
+    }
+  }, [hydrated, done, current, pending, answered, askNext]);
+
+  async function submitAnswer(answer: string) {
+    if (!current) return;
+    const history = [...answered, { question: current.text, answer }];
+    setAnswered(history);
+    setCurrent(null);
+    await askNext(history);
+  }
+
+  async function buildRoadmap(history: QnA[]) {
+    setFinishing(true);
+    setError(null);
+    try {
+      await invoke("save_roadmap_wizard_answers", { roadmapId: roadmap.id, answers: history });
+      await onSaved();
+    } catch (e) {
+      setError(String(e));
+      setFinishing(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!hydrated || loading || !done) return;
+    if (answered.length < minQuestions) return;
+    if (finalizedRef.current || finishing || error) return;
+    finalizedRef.current = true;
+    buildRoadmap(answered);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, loading, done, answered, finishing, error]);
+
+  if (!hydrated || loading) {
+    return <WizardLoader />;
+  }
+  if (error && !current && !done) {
+    return (
+      <div className="wizard error">
+        <p>{t("errorPrefix", { error })}</p>
+        <button onClick={() => askNext(answered)}>{t("retry")}</button>
+      </div>
+    );
+  }
+  if (done || !current) {
+    if (answered.length < minQuestions) {
+      return (
+        <div className="wizard">
+          <p>{t("wizardNeedMore", { min: minQuestions })}</p>
+          <button onClick={() => askNext(answered)}>{t("wizardSubmit")}</button>
+          {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
+        </div>
+      );
+    }
+    if (error) {
+      return (
+        <div className="wizard error">
+          <p>{t("errorPrefix", { error })}</p>
+          <button onClick={() => buildRoadmap(answered)}>{t("retry")}</button>
+        </div>
+      );
+    }
+    return <WizardLoader />;
+  }
+  return (
+    <WizardQuestion
+      key={answered.length}
+      question={current}
+      index={answered.length}
+      canFinishEarly={answered.length >= minQuestions}
+      finishing={finishing}
+      onSubmit={submitAnswer}
+      onFinishEarly={() => buildRoadmap(answered)}
+      error={error}
+    />
+  );
+}
+
+function RoadmapView({
+  roadmapId,
+  jobs,
+  transcript,
+  courses,
+  onOpenCourse,
+  onChanged,
+  onCreateCourseForSkill,
+  onDeleted,
+}: {
+  roadmapId: string;
+  jobs: Map<string, JobState>;
+  transcript: Bubble[] | null;
+  courses: Course[];
+  onOpenCourse: (id: string) => void;
+  onChanged: () => void | Promise<void>;
+  onCreateCourseForSkill: (roadmapId: string, skillId: string, topic: string) => void;
+  onDeleted: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [roadmap, setRoadmap] = useState<Roadmap | null>(null);
+  const [skills, setSkills] = useState<Record<string, RoadmapSkillStatus>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [creatingLesson, setCreatingLesson] = useState<string | null>(null);
+  const [refineOpen, setRefineOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [openNode, setOpenNode] = useState<{ id: string; tick: number } | null>(null);
+  const [highlightSkill, setHighlightSkill] = useState<string | null>(null);
+  const collapsedInitRef = useRef<string | null>(null);
+  const nodeRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const job = jobs.get(jobKey(roadmapId, "build_roadmap"));
+  const jobStatus = job?.status;
+  const refineJobStatus = jobs.get(jobKey(roadmapId, "refine_roadmap"))?.status;
+
+  const reload = useCallback(async () => {
+    try {
+      const res = await invoke<{ roadmap: Roadmap; skills: Record<string, RoadmapSkillStatus> }>(
+        "get_roadmap",
+        { roadmapId }
+      );
+      setRoadmap(res.roadmap);
+      setSkills(res.skills ?? {});
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [roadmapId]);
+
+  // Reload on mount, when the build job lands, and when courses change (a
+  // lesson finished elsewhere → its skill auto-closes on return).
+  useEffect(() => {
+    reload();
+  }, [reload, jobStatus, courses]);
+
+  const stageIsDone = useCallback(
+    (stage: RoadmapStage) => {
+      const ids = stage.nodes.flatMap((n) => n.skills.map((sk) => sk.id));
+      return ids.length > 0 && ids.every((id) => skills[id]?.state === "done");
+    },
+    [skills]
+  );
+
+  // Collapse fully-completed stages once per roadmap load; if every stage is
+  // done, keep the last one expanded so the view is never empty.
+  useEffect(() => {
+    if (!roadmap?.content || roadmap.status !== "ready") return;
+    if (collapsedInitRef.current === roadmap.id) return;
+    collapsedInitRef.current = roadmap.id;
+    const stages = roadmap.content.stages;
+    const allDone = stages.every(stageIsDone);
+    const next: Record<string, boolean> = {};
+    stages.forEach((st, i) => {
+      next[st.id] = stageIsDone(st) && !(allDone && i === stages.length - 1);
+    });
+    setCollapsed(next);
+  }, [roadmap, stageIsDone]);
+
+  // «Учиться дальше»: jump to the first not-yet-done skill — open its course
+  // if one is linked, otherwise scroll to the node and highlight the skill.
+  function continueLearning() {
+    if (!roadmap?.content) return;
+    for (const st of roadmap.content.stages) {
+      for (const n of st.nodes) {
+        for (const sk of n.skills) {
+          if (skills[sk.id]?.state === "done") continue;
+          const linked = skills[sk.id]?.course_id;
+          if (linked) {
+            onOpenCourse(linked);
+            return;
+          }
+          setCollapsed((prev) => ({ ...prev, [st.id]: false }));
+          setOpenNode({ id: n.id, tick: Date.now() });
+          setHighlightSkill(sk.id);
+          setTimeout(() => {
+            nodeRefs.current
+              .get(n.id)
+              ?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }, 60);
+          setTimeout(() => setHighlightSkill(null), 2600);
+          return;
+        }
+      }
+    }
+  }
+
+  // Diagnostic quiz closed some skills → persist the marks, then refresh.
+  async function closeSkills(skillIds: string[]) {
+    try {
+      for (const id of skillIds) {
+        await invoke("set_skill_done", { roadmapId, skillId: id, done: true });
+      }
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function linkCourse(skill: RoadmapSkill, courseId: string) {
+    try {
+      await invoke("link_course_to_skill", {
+        courseId,
+        roadmapId,
+        roadmapSkill: skill.id,
+      });
+      await onChanged();
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function unlinkCourse(courseId: string) {
+    try {
+      await invoke("link_course_to_skill", {
+        courseId,
+        roadmapId: null,
+        roadmapSkill: null,
+      });
+      await onChanged();
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function retryBuild() {
+    setRoadmap((r) => (r ? { ...r, status: "generating", error: null } : r));
+    try {
+      await invoke("start_build_roadmap", { roadmapId });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function toggleSkill(skillId: string, done: boolean) {
+    try {
+      await invoke("set_skill_done", { roadmapId, skillId, done });
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function makeLesson(node: RoadmapNode, skill: RoadmapSkill) {
+    if (!roadmap || creatingLesson) return;
+    setCreatingLesson(skill.id);
+    try {
+      const topic = `${roadmap.title ?? roadmap.topic} — ${node.title}: ${skill.title}`;
+      const id = await invoke<string>("create_course", {
+        topic,
+        language: roadmap.language,
+        courseFormat: "single_lesson",
+        agent: roadmap.agent,
+        spaceId: null,
+        strict: null,
+        roadmapId: roadmap.id,
+        roadmapSkill: skill.id,
+      });
+      await invoke("set_course_profile", { courseId: id, profile: { tier: "quick" } }).catch(
+        () => {}
+      );
+      await onChanged();
+      onOpenCourse(id);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCreatingLesson(null);
+    }
+  }
+
+  if (!roadmap) {
+    return error ? (
+      <div className="placeholder">{t("errorPrefix", { error })}</div>
+    ) : (
+      <div className="placeholder">{t("loadingStructure")}</div>
+    );
+  }
+
+  const allSkills = (roadmap.content?.stages ?? []).flatMap((st) =>
+    st.nodes.flatMap((n) => n.skills)
+  );
+  const doneCount = allSkills.filter((sk) => skills[sk.id]?.state === "done").length;
+
+  return (
+    <div className="roadmap-view">
+      <div className="roadmap-head">
+        <h2>{roadmap.title ?? roadmap.topic}</h2>
+        {roadmap.title && roadmap.title !== roadmap.topic && (
+          <p className="spaces-intro">{roadmap.topic}</p>
+        )}
+      </div>
+
+      {roadmap.status === "wizard" && (
+        <RoadmapWizard key={roadmap.id} roadmap={roadmap} onSaved={reload} />
+      )}
+
+      {roadmap.status === "generating" && (
+        <div className="roadmap-generating">
+          <div className="wizard-loader-head">
+            <span className="wizard-loader-orb" />
+            <span className="wizard-loader-label">{t("roadmapBuilding")}</span>
+          </div>
+          <AgentTranscript transcript={transcript} />
+          {job?.status === "error" && (
+            <div className="wizard error">
+              <p>{t("errorPrefix", { error: job.error ?? "unknown" })}</p>
+              <button onClick={retryBuild}>{t("retry")}</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {roadmap.status === "failed" && (
+        <div className="wizard error">
+          <p>{t("errorPrefix", { error: roadmap.error ?? "unknown" })}</p>
+          <button onClick={retryBuild}>{t("retry")}</button>
+        </div>
+      )}
+
+      {roadmap.status === "ready" && roadmap.content && (
+        <>
+          <div className="roadmap-progressbar-row">
+            <div className="roadmap-progressbar" aria-hidden="true">
+              <span
+                style={{
+                  width: `${allSkills.length ? Math.round((doneCount / allSkills.length) * 100) : 0}%`,
+                }}
+              />
+            </div>
+            <span className="roadmap-progress-label">
+              {t("roadmapProgress", { done: doneCount, total: allSkills.length })}
+            </span>
+            {doneCount < allSkills.length && (
+              <button className="roadmap-cta" onClick={continueLearning}>
+                {t("roadmapContinue")} →
+              </button>
+            )}
+            <button
+              className="roadmap-refine-toggle"
+              onClick={() => setRefineOpen((v) => !v)}
+              aria-expanded={refineOpen}
+            >
+              {refineOpen ? t("roadmapRefineClose") : t("roadmapRefine")}
+            </button>
+          </div>
+
+          {refineOpen && (
+            <RoadmapRefineChat
+              roadmapId={roadmapId}
+              refineJobStatus={refineJobStatus}
+              onAccepted={async () => {
+                setRefineOpen(false);
+                await reload();
+                await onChanged();
+              }}
+            />
+          )}
+
+          <div className="roadmap-stages">
+            {roadmap.content.stages.map((stage, si) => {
+              const done = stageIsDone(stage);
+              const isCollapsed = done && (collapsed[stage.id] ?? false);
+              const stageIds = stage.nodes.flatMap((n) => n.skills.map((sk) => sk.id));
+              const stageDoneCount = stageIds.filter(
+                (id) => skills[id]?.state === "done"
+              ).length;
+              return (
+                <section
+                  className={`roadmap-stage${done ? " done" : ""}${isCollapsed ? " collapsed" : ""}`}
+                  key={stage.id}
+                >
+                  <div
+                    className="roadmap-stage-head"
+                    onClick={
+                      done
+                        ? () =>
+                            setCollapsed((prev) => ({
+                              ...prev,
+                              [stage.id]: !(prev[stage.id] ?? false),
+                            }))
+                        : undefined
+                    }
+                    role={done ? "button" : undefined}
+                  >
+                    <span className="roadmap-stage-kicker">
+                      {t("roadmapStageN", { n: si + 1 })}
+                      <span className="roadmap-stage-count">
+                        {" "}
+                        · {done ? `✓ ${t("roadmapStageDone")}` : `${stageDoneCount}/${stageIds.length}`}
+                      </span>
+                    </span>
+                    <h3>{stage.title}</h3>
+                    {!isCollapsed && stage.summary && (
+                      <p className="roadmap-stage-summary">{stage.summary}</p>
+                    )}
+                  </div>
+                  {!isCollapsed && (
+                    <div className="roadmap-nodes">
+                      {stage.nodes.map((node) => (
+                        <RoadmapNodeCard
+                          key={node.id}
+                          roadmapId={roadmapId}
+                          node={node}
+                          skills={skills}
+                          creatingLesson={creatingLesson}
+                          forceOpenTick={openNode?.id === node.id ? openNode.tick : 0}
+                          highlightSkill={highlightSkill}
+                          linkableCourses={courses.filter((c) => !c.roadmap_id)}
+                          cardRef={(el) => {
+                            if (el) nodeRefs.current.set(node.id, el);
+                            else nodeRefs.current.delete(node.id);
+                          }}
+                          onMakeLesson={(skill) => makeLesson(node, skill)}
+                          onMakeCourse={(skill) =>
+                            onCreateCourseForSkill(
+                              roadmap.id,
+                              skill.id,
+                              `${roadmap.title ?? roadmap.topic} — ${node.title}: ${skill.title}`
+                            )
+                          }
+                          onToggleSkill={toggleSkill}
+                          onOpenCourse={onOpenCourse}
+                          onLinkCourse={linkCourse}
+                          onUnlinkCourse={unlinkCourse}
+                          onCloseSkills={closeSkills}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {error && roadmap && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+
+      <div className="course-danger-zone">
+        <button className="danger-link" onClick={() => setConfirmDelete(true)}>
+          {t("roadmapDelete")}
+        </button>
+      </div>
+      {confirmDelete && (
+        <div className="wizard error roadmap-delete-confirm">
+          <p>{t("roadmapDeleteConfirm")}</p>
+          <div className="actions">
+            <button
+              onClick={async () => {
+                try {
+                  await invoke("delete_roadmap", { roadmapId });
+                  await onDeleted();
+                } catch (e) {
+                  setError(String(e));
+                  setConfirmDelete(false);
+                }
+              }}
+            >
+              {t("roadmapDelete")}
+            </button>
+            <button className="ghost" onClick={() => setConfirmDelete(false)}>
+              {t("cancel")}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RoadmapNodeCard({
+  node,
+  roadmapId,
+  skills,
+  creatingLesson,
+  forceOpenTick,
+  highlightSkill,
+  linkableCourses,
+  cardRef,
+  onMakeLesson,
+  onMakeCourse,
+  onToggleSkill,
+  onOpenCourse,
+  onLinkCourse,
+  onUnlinkCourse,
+  onCloseSkills,
+}: {
+  node: RoadmapNode;
+  roadmapId: string;
+  skills: Record<string, RoadmapSkillStatus>;
+  creatingLesson: string | null;
+  forceOpenTick: number;
+  highlightSkill: string | null;
+  linkableCourses: Course[];
+  cardRef: (el: HTMLElement | null) => void;
+  onMakeLesson: (skill: RoadmapSkill) => void;
+  onMakeCourse: (skill: RoadmapSkill) => void;
+  onToggleSkill: (skillId: string, done: boolean) => void;
+  onOpenCourse: (id: string) => void;
+  onLinkCourse: (skill: RoadmapSkill, courseId: string) => void;
+  onUnlinkCourse: (courseId: string) => void;
+  onCloseSkills: (skillIds: string[]) => void | Promise<void>;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [linkPickerSkill, setLinkPickerSkill] = useState<string | null>(null);
+  const [quiz, setQuiz] = useState<RoadmapQuizQuestion[] | null>(null);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizAnswers, setQuizAnswers] = useState<(number | null)[]>([]);
+  const [quizClosed, setQuizClosed] = useState<number | null>(null);
+  const quizAppliedRef = useRef(false);
+  const doneCount = node.skills.filter((sk) => skills[sk.id]?.state === "done").length;
+  const nodeDone = node.skills.length > 0 && doneCount === node.skills.length;
+  const hasOpenSkills = node.skills.some((sk) => skills[sk.id]?.state !== "done");
+
+  // «Учиться дальше» can ask this card to open itself.
+  useEffect(() => {
+    if (forceOpenTick > 0) setOpen(true);
+  }, [forceOpenTick]);
+
+  async function startQuiz() {
+    if (quizLoading) return;
+    setQuizLoading(true);
+    setQuiz(null);
+    setQuizClosed(null);
+    quizAppliedRef.current = false;
+    try {
+      const res = await invoke<{ questions: RoadmapQuizQuestion[] }>("roadmap_node_quiz", {
+        roadmapId,
+        nodeId: node.id,
+      });
+      setQuiz(res.questions);
+      setQuizAnswers(res.questions.map(() => null));
+    } catch {
+      setQuiz([]);
+    } finally {
+      setQuizLoading(false);
+    }
+  }
+
+  // All questions answered → close every skill whose questions are all
+  // correct (and isn't already done), once.
+  useEffect(() => {
+    if (!quiz || quiz.length === 0 || quizAppliedRef.current) return;
+    if (quizAnswers.some((a) => a === null)) return;
+    quizAppliedRef.current = true;
+    const bySkill = new Map<string, boolean>();
+    quiz.forEach((q, i) => {
+      const ok = quizAnswers[i] === q.correct;
+      bySkill.set(q.skillId, (bySkill.get(q.skillId) ?? true) && ok);
+    });
+    const toClose = [...bySkill.entries()]
+      .filter(([id, allOk]) => allOk && skills[id]?.state !== "done")
+      .map(([id]) => id);
+    setQuizClosed(toClose.length);
+    if (toClose.length > 0) onCloseSkills(toClose);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quiz, quizAnswers]);
+
+  return (
+    <article
+      className={`roadmap-node-card${open ? " open" : ""}${nodeDone ? " done" : ""}`}
+      ref={cardRef}
+    >
+      <button className="roadmap-node-head" onClick={() => setOpen((v) => !v)}>
+        <span className="roadmap-node-title">{node.title}</span>
+        <span className="roadmap-node-dots" aria-hidden="true">
+          {node.skills.map((sk) => (
+            <span key={sk.id} className={`skill-dot ${skills[sk.id]?.state ?? "open"}`} />
+          ))}
+        </span>
+        <span className="roadmap-node-count">
+          {nodeDone ? "✓" : `${doneCount}/${node.skills.length}`}
+        </span>
+      </button>
+      {node.summary && <p className="roadmap-node-summary">{node.summary}</p>}
+      {open && (
+        <div className="roadmap-node-body">
+          {node.sources.length > 0 && (
+            <div className="node-sources">
+              <div className="roadmap-subhead">{t("roadmapSources")}</div>
+              <ul>
+                {node.sources.map((src, i) => (
+                  <li key={i}>
+                    <a
+                      href={src.url}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        openUrl(src.url).catch(() => window.open(src.url, "_blank"));
+                      }}
+                    >
+                      <span aria-hidden="true">{ROADMAP_SOURCE_ICON[src.kind] ?? "🔗"}</span>{" "}
+                      {src.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="node-skills">
+            <div className="roadmap-subhead">{t("roadmapSkills")}</div>
+            {node.skills.map((skill) => {
+              const st = skills[skill.id];
+              const state = st?.state ?? "open";
+              return (
+                <div
+                  className={`skill-row${highlightSkill === skill.id ? " highlight" : ""}`}
+                  key={skill.id}
+                >
+                  <span className={`skill-dot ${state}`} aria-hidden="true" />
+                  <span className="skill-title" title={skill.desc || undefined}>
+                    {skill.title}
+                  </span>
+                  {st?.course_id ? (
+                    <span className="skill-actions">
+                      <button
+                        className="skill-course-chip"
+                        onClick={() => onOpenCourse(st.course_id!)}
+                      >
+                        {state === "done"
+                          ? t("skillDone")
+                          : st.total > 0
+                            ? `${st.percent}%`
+                            : t("skillInProgress")}
+                      </button>
+                      <button
+                        className="skill-unlink"
+                        title={t("skillUnlink")}
+                        onClick={() => onUnlinkCourse(st.course_id!)}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ) : linkPickerSkill === skill.id ? (
+                    <span className="skill-link-picker">
+                      <FieldSelect
+                        value=""
+                        onChange={(courseId) => {
+                          setLinkPickerSkill(null);
+                          if (courseId) onLinkCourse(skill, courseId);
+                        }}
+                        options={[
+                          { value: "", title: t("skillLinkPick") },
+                          ...linkableCourses.map((c) => ({
+                            value: c.id,
+                            title: courseTitle(c, t("courseTitlePending")),
+                          })),
+                        ]}
+                      />
+                      <button className="skill-unlink" onClick={() => setLinkPickerSkill(null)}>
+                        ✕
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="skill-actions">
+                      <button
+                        disabled={creatingLesson !== null}
+                        onClick={() => onMakeLesson(skill)}
+                      >
+                        {creatingLesson === skill.id ? "…" : t("skillMakeLesson")}
+                      </button>
+                      <button onClick={() => onMakeCourse(skill)}>{t("skillMakeCourse")}</button>
+                      {linkableCourses.length > 0 && (
+                        <button onClick={() => setLinkPickerSkill(skill.id)}>
+                          {t("skillLink")}
+                        </button>
+                      )}
+                    </span>
+                  )}
+                  <button
+                    className={`skill-known${st?.manual ? " on" : ""}`}
+                    onClick={() => onToggleSkill(skill.id, !(st?.manual ?? false))}
+                    title={st?.manual ? t("skillKnownReset") : t("skillKnown")}
+                  >
+                    {st?.manual ? t("skillKnownReset") : t("skillKnown")}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {hasOpenSkills && quiz === null && (
+            <button className="roadmap-quiz-start" onClick={startQuiz} disabled={quizLoading}>
+              {quizLoading ? (
+                <>
+                  <span className="spinner" /> {t("roadmapQuizLoading")}
+                </>
+              ) : (
+                t("roadmapQuizStart")
+              )}
+            </button>
+          )}
+          {quiz !== null && quiz.length === 0 && (
+            <div className="tpl-code-note">{t("roadmapQuizNone")}</div>
+          )}
+          {quiz !== null && quiz.length > 0 && (
+            <div className="roadmap-quiz">
+              <div className="roadmap-subhead">{t("roadmapQuizStart")}</div>
+              <ol className="tpl-quiz">
+                {quiz.map((q, i) => (
+                  <li key={i} className="tpl-quiz-item">
+                    <div className="tpl-quiz-q">{q.text}</div>
+                    <div className="tpl-options">
+                      {q.options.map((opt, j) => {
+                        const picked = quizAnswers[i];
+                        let cls = "tpl-option";
+                        if (picked !== null) {
+                          if (j === q.correct) cls += " correct";
+                          else if (picked === j) cls += " wrong";
+                        }
+                        return (
+                          <button
+                            key={j}
+                            className={cls}
+                            disabled={picked !== null}
+                            onClick={() =>
+                              setQuizAnswers((prev) =>
+                                prev.map((p, k) => (k === i ? j : p))
+                              )
+                            }
+                          >
+                            {opt}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {quizAnswers[i] !== null && q.explanation && (
+                      <div className="tpl-explanation">{q.explanation}</div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+              {quizClosed !== null && (
+                <div className={`roadmap-quiz-result${quizClosed > 0 ? " pass" : ""}`}>
+                  {quizClosed > 0
+                    ? t("roadmapQuizClosed", { n: String(quizClosed) })
+                    : t("roadmapQuizNone")}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+// Refinement chat for a roadmap (mirrors the course plan RefineChat): the
+// agent's reply may carry a full content proposal with an Accept button.
+function RoadmapRefineChat({
+  roadmapId,
+  refineJobStatus,
+  onAccepted,
+}: {
+  roadmapId: string;
+  refineJobStatus?: string;
+  onAccepted: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const [chat, setChat] = useState<RoadmapChatMsg[]>([]);
+  const [input, setInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [accepting, setAccepting] = useState<string | null>(null);
+
+  const reloadChat = useCallback(async () => {
+    try {
+      setChat(await invoke<RoadmapChatMsg[]>("get_roadmap_chat", { roadmapId }));
+    } catch {
+      /* chat is non-critical */
+    }
+  }, [roadmapId]);
+
+  // Reload on mount and whenever the refine job lands.
+  useEffect(() => {
+    reloadChat();
+  }, [reloadChat, refineJobStatus]);
+
+  const thinking = chat.length > 0 && chat[chat.length - 1].role === "user";
+
+  async function send() {
+    const text = input.trim();
+    if (!text || thinking) return;
+    setInput("");
+    setError(null);
+    try {
+      await invoke("start_roadmap_refine", { roadmapId, userMessage: text });
+      await reloadChat();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function accept(messageId: string) {
+    setAccepting(messageId);
+    setError(null);
+    try {
+      await invoke("accept_roadmap_refinement", { roadmapId, messageId });
+      await reloadChat();
+      await onAccepted();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAccepting(null);
+    }
+  }
+
+  return (
+    <div className="roadmap-refine">
+      <div className="roadmap-refine-msgs">
+        {chat.map((m) => (
+          <div key={m.id} className={`roadmap-refine-msg ${m.role}`}>
+            <div className="roadmap-refine-text">{m.text}</div>
+            {m.role === "agent" && m.content && (
+              <div className="roadmap-refine-proposal">
+                {m.accepted ? (
+                  <span className="roadmap-refine-accepted">✓ {t("roadmapRefineAccept")}</span>
+                ) : (
+                  <button
+                    disabled={accepting !== null}
+                    onClick={() => accept(m.id)}
+                  >
+                    {accepting === m.id ? "…" : t("roadmapRefineAccept")}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        {thinking && (
+          <div className="roadmap-refine-msg agent thinking">
+            <span className="spinner" /> {t("roadmapRefineThinking")}
+          </div>
+        )}
+      </div>
+      {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+      <div className="roadmap-refine-input">
+        <input
+          value={input}
+          placeholder={t("roadmapRefinePlaceholder")}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") send();
+          }}
+          disabled={thinking}
+        />
+        <button onClick={send} disabled={thinking || !input.trim()}>
+          {t("wizardSubmit")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -4205,15 +5831,100 @@ function SpaceView({
   );
 }
 
+// A styled replacement for native <select>: a trigger showing the selected
+// option (title + optional description) and a popover listbox underneath.
+function FieldSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: ReadonlyArray<{
+    value: string;
+    title: React.ReactNode;
+    desc?: string;
+    disabled?: boolean;
+  }>;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((o) => o.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, [open]);
+
+  return (
+    <div className="field-select" ref={rootRef}>
+      <button
+        type="button"
+        className={`field-select-trigger${open ? " open" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setOpen(false);
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="field-select-value">
+          <span className="field-select-title">{selected?.title ?? value}</span>
+          {selected?.desc && <span className="field-select-desc">{selected.desc}</span>}
+        </span>
+        <span className="field-select-chevron" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div className="field-select-menu" role="listbox">
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              role="option"
+              aria-selected={o.value === value}
+              className={`field-select-option${o.value === value ? " selected" : ""}`}
+              disabled={o.disabled}
+              onClick={() => {
+                onChange(o.value);
+                setOpen(false);
+              }}
+            >
+              <span className="field-select-title">{o.title}</span>
+              {o.desc && <span className="field-select-desc">{o.desc}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CreateCourse({
   agentAvail,
   spaceId,
+  roadmapId,
+  roadmapSkill,
+  initialTopic,
+  initialFormat,
   onCreated,
+  onCreatedRoadmap,
   onCancel,
 }: {
   agentAvail: { claude: boolean; codex: boolean } | null;
   spaceId?: string;
+  roadmapId?: string;
+  roadmapSkill?: string;
+  initialTopic?: string;
+  /// "roadmap" preselects the roadmap format in the picker.
+  initialFormat?: "roadmap";
   onCreated: (id: string) => void;
+  onCreatedRoadmap: (id: string) => void;
   onCancel: () => void;
 }) {
   const t = useT();
@@ -4221,10 +5932,21 @@ function CreateCourse({
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [selectedSpace, setSelectedSpace] = useState<string>(spaceId ?? "");
   const [strict, setStrict] = useState(true);
+  const [customMcpList, setCustomMcpList] = useState<McpServerStatus[]>([]);
+  const [selectedMcp, setSelectedMcp] = useState<string[]>([]);
 
   useEffect(() => {
     invoke<Space[]>("list_spaces")
       .then(setSpaces)
+      .catch(() => {});
+    invoke<SettingsStatus>("get_settings_status")
+      .then((s) =>
+        setCustomMcpList(
+          (s.mcp_servers ?? []).filter(
+            (m) => m.source === "custom" && m.enabled_for.length > 0
+          )
+        )
+      )
       .catch(() => {});
   }, []);
   useEffect(() => {
@@ -4237,8 +5959,13 @@ function CreateCourse({
     if (sp) setStrict(sp.strict);
   }, [selectedSpace, spaces]);
   const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
-  const [topic, setTopic] = useState("");
-  const [courseFormat, setCourseFormat] = useState<CourseFormat>(DEFAULT_COURSE_FORMAT);
+  const [topic, setTopic] = useState(initialTopic ?? "");
+  // "roadmap" is a creation choice, not a course format: it spawns a Roadmap
+  // entity instead of a course. Not offered when creating from a roadmap skill.
+  const [courseFormat, setCourseFormat] = useState<CourseFormat | "roadmap">(
+    initialFormat ?? DEFAULT_COURSE_FORMAT
+  );
+  const isRoadmap = courseFormat === "roadmap";
   const [tier, setTier] = useState<GenerationTier>(DEFAULT_GENERATION_TIER);
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
@@ -4267,6 +5994,15 @@ function CreateCourse({
     if (!topic.trim() || busy || !selectedAvail || noAgents) return;
     setBusy(true);
     localStorage.setItem(COURSE_LANGUAGE_STORAGE_KEY, language);
+    if (isRoadmap) {
+      const r = await invoke<Roadmap>("create_roadmap", {
+        topic: topic.trim(),
+        language,
+        agent,
+      });
+      onCreatedRoadmap(r.id);
+      return;
+    }
     const id = await invoke<string>("create_course", {
       topic: topic.trim(),
       language,
@@ -4274,158 +6010,164 @@ function CreateCourse({
       agent,
       spaceId: selectedSpace || null,
       strict: selectedSpace ? strict : null,
+      roadmapId: roadmapId ?? null,
+      roadmapSkill: roadmapSkill ?? null,
     });
     // Record the chosen cost/quality tier on the course (drives stage gating
     // and the sidecar depth/pedagogy knobs during generation).
     await invoke("set_course_profile", { courseId: id, profile: { tier } }).catch(() => {});
+    if (selectedMcp.length > 0) {
+      await invoke("set_course_mcp", { courseId: id, serverIds: selectedMcp }).catch(() => {});
+    }
     onCreated(id);
   }
 
   return (
     <form className="create-course" onSubmit={submit}>
       <h2>{t("createTitle")}</h2>
+      {roadmapId && <div className="field-note">{t("courseLinkedToRoadmap")}</div>}
       <label>
         {t("topicLabel")}
         <input
           autoFocus
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
-          placeholder={t("topicPlaceholder")}
+          placeholder={isRoadmap ? t("roadmapTopicPlaceholder") : t("topicPlaceholder")}
         />
       </label>
       <label>
         {t("courseFormatLabel")}
-        <div className="format-picker">
-          {COURSE_FORMATS.map((item) => (
-            <label
-              key={item.value}
-              className={`format-option ${courseFormat === item.value ? "selected" : ""}`}
-            >
-              <input
-                type="radio"
-                name="course-format"
-                value={item.value}
-                checked={courseFormat === item.value}
-                onChange={() => setCourseFormat(item.value)}
-              />
-              <div className="format-meta">
-                <div className="format-title">{t(item.titleKey)}</div>
-                <div className="format-desc">{t(item.descKey)}</div>
-              </div>
-            </label>
-          ))}
-        </div>
+        <FieldSelect
+          value={courseFormat}
+          onChange={(v) => setCourseFormat(v as CourseFormat | "roadmap")}
+          options={[
+            ...COURSE_FORMATS.map((item) => ({
+              value: item.value as string,
+              title: t(item.titleKey),
+              desc: t(item.descKey),
+            })),
+            // A roadmap spawned from a roadmap skill makes no sense.
+            ...(roadmapId
+              ? []
+              : [
+                  {
+                    value: "roadmap",
+                    title: t("courseFormatRoadmapTitle"),
+                    desc: t("courseFormatRoadmapDesc"),
+                  },
+                ]),
+          ]}
+        />
         <span className="field-note">{t("courseFormatNote")}</span>
       </label>
-      <label>
-        {t("tierLabel")}
-        <div className="format-picker">
-          {GENERATION_TIERS.map((item) => (
-            <label
-              key={item.value}
-              className={`format-option ${tier === item.value ? "selected" : ""}`}
-            >
-              <input
-                type="radio"
-                name="generation-tier"
-                value={item.value}
-                checked={tier === item.value}
-                onChange={() => setTier(item.value)}
-              />
-              <div className="format-meta">
-                <div className="format-title">{t(item.titleKey)}</div>
-                <div className="format-desc">{t(item.descKey)}</div>
-              </div>
-            </label>
-          ))}
-        </div>
-        <span className="field-note">{t("tierNote")}</span>
-      </label>
+      {!isRoadmap && (
+        <label>
+          {t("tierLabel")}
+          <FieldSelect
+            value={tier}
+            onChange={(v) => setTier(v as GenerationTier)}
+            options={GENERATION_TIERS.map((item) => ({
+              value: item.value,
+              title: t(item.titleKey),
+              desc: t(item.descKey),
+            }))}
+          />
+          <span className="field-note">{t("tierNote")}</span>
+        </label>
+      )}
       <label>
         {t("courseLanguageLabel")}
-        <select
+        <FieldSelect
           value={language}
-          onChange={(e) => setLanguage(e.target.value)}
-        >
-          {COURSE_LANGUAGES.map((item) => (
-            <option key={item.code} value={item.code}>
-              {uiLang === "ru" ? item.nameRu : item.nameEn} · {item.nativeName} ·{" "}
-              {item.code.toUpperCase()}
-            </option>
-          ))}
-        </select>
+          onChange={setLanguage}
+          options={COURSE_LANGUAGES.map((item) => ({
+            value: item.code,
+            title: `${uiLang === "ru" ? item.nameRu : item.nameEn} · ${item.nativeName} · ${item.code.toUpperCase()}`,
+          }))}
+        />
         <span className="field-note">{t("courseLanguageNote")}</span>
       </label>
       <label>
         {t("agentLabel")}
-        <div className="agent-picker">
-          <label
-            className={`agent-option ${agent === "claude" ? "selected" : ""} ${
-              !claudeOk ? "disabled" : ""
-            }`}
-          >
-            <input
-              type="radio"
-              name="agent"
-              value="claude"
-              checked={agent === "claude"}
-              onChange={() => claudeOk && setAgent("claude")}
-              disabled={!claudeOk}
-            />
-            <div className="agent-meta">
-              <div className="agent-name">
-                Claude
-                <AgentAvailBadge available={claudeOk} />
-              </div>
-              <div className="agent-desc">{t("claudeDesc")}</div>
-            </div>
-          </label>
-          <label
-            className={`agent-option ${agent === "codex" ? "selected" : ""} ${
-              !codexOk ? "disabled" : ""
-            }`}
-          >
-            <input
-              type="radio"
-              name="agent"
-              value="codex"
-              checked={agent === "codex"}
-              onChange={() => codexOk && setAgent("codex")}
-              disabled={!codexOk}
-            />
-            <div className="agent-meta">
-              <div className="agent-name">
-                Codex
-                <AgentAvailBadge available={codexOk} />
-              </div>
-              <div className="agent-desc">{t("codexDesc")}</div>
-            </div>
-          </label>
-        </div>
+        <FieldSelect
+          value={agent}
+          onChange={(v) => setAgent(v as Agent)}
+          options={[
+            {
+              value: "claude",
+              title: (
+                <>
+                  Claude
+                  <AgentAvailBadge available={claudeOk} />
+                </>
+              ),
+              desc: t("claudeDesc"),
+              disabled: !claudeOk,
+            },
+            {
+              value: "codex",
+              title: (
+                <>
+                  Codex
+                  <AgentAvailBadge available={codexOk} />
+                </>
+              ),
+              desc: t("codexDesc"),
+              disabled: !codexOk,
+            },
+          ]}
+        />
       </label>
-      {(spaces.length > 0 || selectedSpace) && (
+      {!isRoadmap && customMcpList.length > 0 && (
+        <label>
+          {t("courseMcpLabel")}
+          <div className="course-mcp-chips">
+            {customMcpList.map((m) => {
+              const on = selectedMcp.includes(m.id);
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`course-mcp-chip${on ? " on" : ""}`}
+                  onClick={() =>
+                    setSelectedMcp((prev) =>
+                      on ? prev.filter((x) => x !== m.id) : [...prev, m.id]
+                    )
+                  }
+                  aria-pressed={on}
+                >
+                  {m.name}
+                </button>
+              );
+            })}
+          </div>
+          <span className="field-note">{t("courseMcpNote")}</span>
+        </label>
+      )}
+      {!isRoadmap && (spaces.length > 0 || selectedSpace) && (
         <>
           <label>
             {t("spacePickLabel")}
-            <select value={selectedSpace} onChange={(e) => setSelectedSpace(e.target.value)}>
-              <option value="">{t("spaceNone")}</option>
-              {spaces.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
+            <FieldSelect
+              value={selectedSpace}
+              onChange={setSelectedSpace}
+              options={[
+                { value: "", title: t("spaceNone") },
+                ...spaces.map((s) => ({ value: s.id, title: s.name })),
+              ]}
+            />
           </label>
           {selectedSpace && (
             <label>
               {t("spaceStrictFieldLabel")}
-              <select
+              <FieldSelect
                 value={strict ? "strict" : "open"}
-                onChange={(e) => setStrict(e.target.value === "strict")}
-              >
-                <option value="strict">{t("spaceStrictOptStrict")}</option>
-                <option value="open">{t("spaceStrictOptOpen")}</option>
-              </select>
+                onChange={(v) => setStrict(v === "strict")}
+                options={[
+                  { value: "strict", title: t("spaceStrictOptStrict") },
+                  { value: "open", title: t("spaceStrictOptOpen") },
+                ]}
+              />
               <div className="field-note">
                 {strict ? t("spaceStrictOnNote") : t("spaceStrictOffNote")}
               </div>
@@ -4611,6 +6353,27 @@ function CourseView({
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updatingCatalog, setUpdatingCatalog] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [lessonStartError, setLessonStartError] = useState<string | null>(null);
+  const isLesson = course?.course_format === "single_lesson";
+
+  // Single lessons skip plan building entirely: the backend installs a trivial
+  // 1x1 structure (no sidecar call), queues generation, and we drop the
+  // learner straight into the reader. Idempotent on the backend, so this is
+  // also the recovery path for a course stuck at "structuring" after a crash.
+  const startLesson = useCallback(async () => {
+    if (!course) return;
+    setLessonStartError(null);
+    try {
+      const res = await invoke<{ moduleId: string; submoduleId: string }>(
+        "start_lesson_generation",
+        { courseId: course.id }
+      );
+      await onChanged();
+      onOpenSub(res.moduleId, res.submoduleId);
+    } catch (e) {
+      setLessonStartError(String(e));
+    }
+  }, [course, onChanged, onOpenSub]);
 
   // Once the wizard is done the course enters "structuring"; start the
   // plan-building agent automatically (no extra confirmation screen). Guarded
@@ -4620,11 +6383,16 @@ function CourseView({
   const autoStartedStructuring = useRef<string | null>(null);
   useEffect(() => {
     if (!course || course.status !== "structuring") return;
-    if (jobs.has(jobKey(course.id, "build_structure"))) return;
     if (autoStartedStructuring.current === course.id) return;
+    if (isLesson) {
+      autoStartedStructuring.current = course.id;
+      startLesson();
+      return;
+    }
+    if (jobs.has(jobKey(course.id, "build_structure"))) return;
     autoStartedStructuring.current = course.id;
     onStartJob("build_structure");
-  }, [course, jobs, onStartJob]);
+  }, [course, jobs, onStartJob, isLesson, startLesson]);
 
   const loadCatalogUpdate = useCallback(async () => {
     if (!course || course.status !== "ready") {
@@ -4831,19 +6599,34 @@ function CourseView({
       {course.status === "wizard" && (
         <Wizard key={course.id} course={course} onSaved={onChanged} />
       )}
-      {course.status === "structuring" && (
-        <StructureBuilder
-          job={jobs.get(jobKey(course.id, "build_structure"))}
-          course={course}
-          transcript={structureTranscript}
-          onStart={() => onStartJob("build_structure")}
-          onSwitchAndRetry={async (agent) => {
-            await invoke("set_course_agent", { courseId: course.id, agent });
-            await onChanged();
-            onStartJob("build_structure");
-          }}
-        />
-      )}
+      {course.status === "structuring" &&
+        (isLesson ? (
+          lessonStartError ? (
+            <div className="wizard error">
+              <p>{t("errorPrefix", { error: lessonStartError })}</p>
+              <button onClick={startLesson}>{t("retry")}</button>
+            </div>
+          ) : (
+            <div className="wizard wizard-loading" aria-busy="true">
+              <div className="wizard-loader-head">
+                <span className="wizard-loader-orb" />
+                <span className="wizard-loader-label">{t("lessonPreparing")}</span>
+              </div>
+            </div>
+          )
+        ) : (
+          <StructureBuilder
+            job={jobs.get(jobKey(course.id, "build_structure"))}
+            course={course}
+            transcript={structureTranscript}
+            onStart={() => onStartJob("build_structure")}
+            onSwitchAndRetry={async (agent) => {
+              await invoke("set_course_agent", { courseId: course.id, agent });
+              await onChanged();
+              onStartJob("build_structure");
+            }}
+          />
+        ))}
       {course.status === "ready" && (
         <>
           <div className="course-tabs">
@@ -5125,6 +6908,9 @@ function Wizard({
   const [finishing, setFinishing] = useState(false);
   const startedRef = useRef(false);
   const finalizedRef = useRef(false);
+  // Single lessons run a shortened interview: 1-3 questions instead of 3-10.
+  const minQuestions =
+    course.course_format === "single_lesson" ? 1 : WIZARD_MIN_QUESTIONS;
 
   const askNext = useCallback(
     async (history: QnA[], reRequested = false) => {
@@ -5140,8 +6926,8 @@ function Wizard({
           setCurrent(step.question);
           setDone(false);
           setPending(false);
-        } else if (history.length < WIZARD_MIN_QUESTIONS && !reRequested) {
-          // Model finished before the 3-question floor — ask once more rather
+        } else if (history.length < minQuestions && !reRequested) {
+          // Model finished before the question floor — ask once more rather
           // than dropping the learner onto an under-clarified build screen.
           await askNext(history, true);
         } else {
@@ -5156,7 +6942,7 @@ function Wizard({
         setLoading(false);
       }
     },
-    [course.id]
+    [course.id, minQuestions]
   );
 
   // Load the persisted dialog (if any) before deciding whether to auto-start.
@@ -5225,7 +7011,7 @@ function Wizard({
   // persist the answers and hand off to plan generation. No extra "build" click.
   useEffect(() => {
     if (!hydrated || loading || !done) return;
-    if (answered.length < WIZARD_MIN_QUESTIONS) return;
+    if (answered.length < minQuestions) return;
     if (finalizedRef.current || finishing || error) return;
     finalizedRef.current = true;
     buildCourse(answered);
@@ -5247,11 +7033,11 @@ function Wizard({
   }
 
   if (done || !current) {
-    const enough = answered.length >= WIZARD_MIN_QUESTIONS;
+    const enough = answered.length >= minQuestions;
     if (!enough) {
       return (
         <div className="wizard">
-          <p>{t("wizardNeedMore", { min: WIZARD_MIN_QUESTIONS })}</p>
+          <p>{t("wizardNeedMore", { min: minQuestions })}</p>
           <button onClick={() => askNext(answered)}>{t("wizardSubmit")}</button>
           {error && <p style={{ color: "var(--danger)" }}>{t("errorPrefix", { error })}</p>}
         </div>
@@ -5275,7 +7061,7 @@ function Wizard({
       key={answered.length}
       question={current}
       index={answered.length}
-      canFinishEarly={answered.length >= WIZARD_MIN_QUESTIONS}
+      canFinishEarly={answered.length >= minQuestions}
       finishing={finishing}
       onSubmit={submitAnswer}
       onFinishEarly={() => buildCourse(answered)}
@@ -5834,6 +7620,9 @@ function Structure({
   if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
   const progress = summarizeStructure(tree);
+  // Single lessons have a trivial 1x1 plan: no full-course generation,
+  // refinement, or structure editing — only the lesson row itself.
+  const isLesson = course.course_format === "single_lesson";
   const canStartFull =
     progress.pending > 0 || (progress.queued > 0 && progress.generating === 0);
 
@@ -5857,32 +7646,36 @@ function Structure({
       ) : (
         <>
           <div className="structure-toolbar">
-            <button
-              type="button"
-              onClick={startFullGeneration}
-              disabled={startingFull || !canStartFull}
-            >
-              {startingFull || (!canStartFull && (progress.queued > 0 || progress.generating > 0))
-                ? t("generateFullCourseBusy")
-                : t("generateFullCourse")}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setShowRefine((v) => !v)}
-              aria-expanded={showRefine}
-            >
-              {showRefine ? t("closeRefine") : t("refinePlanButton")}
-            </button>
-            <button
-              type="button"
-              className="ghost struct-edit-toggle"
-              onClick={() => setEditStruct((v) => !v)}
-              aria-expanded={editStruct}
-              title={t("editStructure")}
-            >
-              ✎ {t("editStructure")}
-            </button>
+            {!isLesson && (
+              <>
+                <button
+                  type="button"
+                  onClick={startFullGeneration}
+                  disabled={startingFull || !canStartFull}
+                >
+                  {startingFull || (!canStartFull && (progress.queued > 0 || progress.generating > 0))
+                    ? t("generateFullCourseBusy")
+                    : t("generateFullCourse")}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setShowRefine((v) => !v)}
+                  aria-expanded={showRefine}
+                >
+                  {showRefine ? t("closeRefine") : t("refinePlanButton")}
+                </button>
+                <button
+                  type="button"
+                  className="ghost struct-edit-toggle"
+                  onClick={() => setEditStruct((v) => !v)}
+                  aria-expanded={editStruct}
+                  title={t("editStructure")}
+                >
+                  ✎ {t("editStructure")}
+                </button>
+              </>
+            )}
             {progress.queued > 0 && (
               <span className="toolbar-note">
                 {t("fullCourseQueueStatus", { count: progress.queued })}
@@ -6339,7 +8132,16 @@ type WidgetData =
   | ({ type: "image" } & WidgetImageItem)
   | { type: "gallery"; caption?: string; items?: WidgetImageItem[] }
   | { type: "diagram"; source: string; caption?: string; error?: string }
-  | { type: "video"; url: string; title?: string; recommended_by?: string; why?: string }
+  | {
+      type: "video";
+      url: string;
+      title?: string;
+      recommended_by?: string;
+      why?: string;
+      start?: number;
+      end?: number;
+      focus?: string;
+    }
   | {
       type: "interactive";
       title?: string;
@@ -6367,9 +8169,21 @@ type LightboxImage = {
 
 type Source = { title: string; url: string; dead?: boolean };
 
-type AssignmentType = "image" | "text" | "document" | "archive" | "github";
+type AssignmentType = "image" | "text" | "document" | "archive" | "github" | "code";
 type Criticality = "critical" | "major" | "minor";
 type AssignmentRemark = { text: string; criticality: Criticality };
+type AssignmentTestCase = { stdin?: string; expected_output: string; hidden?: boolean };
+type AutogradeCase = {
+  idx: number;
+  pass: boolean;
+  hidden: boolean;
+  phase: "compile" | "run";
+  timed_out: boolean;
+  expected?: string;
+  got?: string;
+  stderr?: string;
+};
+type Autograde = { passed: number; total: number; cases: AutogradeCase[] };
 type AssignmentTurn =
   | {
       role: "user";
@@ -6379,6 +8193,8 @@ type AssignmentTurn =
       text?: string;
       files?: { name: string; path: string }[];
       githubUrl?: string;
+      code?: string;
+      autograde?: Autograde;
     }
   | {
       role: "agent";
@@ -6396,6 +8212,9 @@ type Assignment = {
   criteria: string;
   status: "pending" | "in_progress" | "passed";
   chat: AssignmentTurn[];
+  language?: string;
+  starter_code?: string;
+  tests?: AssignmentTestCase[];
 };
 
 function countUnresolvedImageWidgets(widgets: Record<string, WidgetData>) {
@@ -8695,6 +10514,87 @@ function AssignmentCard({
 
   const passed = a.status === "passed";
   const fileType = a.type === "image" || a.type === "document" || a.type === "archive";
+  const isCode = a.type === "code";
+
+  // Code assignments: editor seeded with the last submitted code (or starter),
+  // local autograde for instant iteration, runtime availability badge.
+  const lastSubmittedCode = useMemo(() => {
+    for (let i = a.chat.length - 1; i >= 0; i--) {
+      const turn = a.chat[i];
+      if (turn.role === "user" && turn.code) return turn.code;
+    }
+    return null;
+  }, [a.chat]);
+  const [codeText, setCodeText] = useState<string>(
+    lastSubmittedCode ?? a.starter_code ?? ""
+  );
+  const [localCheck, setLocalCheck] = useState<Autograde | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [runtime, setRuntime] = useState<RuntimeStatus | null | "loading">("loading");
+  useEffect(() => {
+    if (!isCode || !isTauri) return;
+    getCodeRuntimes()
+      .then((list) => setRuntime(list.find((r) => r.language === a.language) ?? null))
+      .catch(() => setRuntime(null));
+  }, [isCode, a.language]);
+  const runtimeOk = typeof runtime === "object" && runtime !== null && runtime.available;
+
+  async function runLocalCheck() {
+    if (!isCode || !a.tests || checking || !codeText.trim()) return;
+    setChecking(true);
+    setError(null);
+    setLocalCheck(null);
+    try {
+      const tests = a.tests.slice(0, 6);
+      const cases: AutogradeCase[] = [];
+      let passedCount = 0;
+      for (let i = 0; i < tests.length; i++) {
+        const tc = tests[i];
+        const res = await invoke<CodeRunResult>("run_code_snippet", {
+          language: a.language,
+          code: codeText,
+          stdin: tc.stdin ?? "",
+        });
+        const ok =
+          res.phase === "run" &&
+          !res.timed_out &&
+          res.exit_code === 0 &&
+          normalizeRunOutput(res.stdout) === normalizeRunOutput(tc.expected_output);
+        if (ok) passedCount++;
+        cases.push({
+          idx: i,
+          pass: ok,
+          hidden: !!tc.hidden,
+          phase: res.phase,
+          timed_out: res.timed_out,
+          ...(tc.hidden
+            ? {}
+            : {
+                expected: tc.expected_output,
+                got: res.stdout,
+                ...(res.stderr.trim() ? { stderr: res.stderr } : {}),
+              }),
+        });
+        if (res.phase === "compile") {
+          for (let j = i + 1; j < tests.length; j++) {
+            cases.push({
+              idx: j,
+              pass: false,
+              hidden: !!tests[j].hidden,
+              phase: "compile",
+              timed_out: false,
+            });
+          }
+          break;
+        }
+      }
+      setLocalCheck({ passed: passedCount, total: cases.length, cases });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChecking(false);
+    }
+  }
 
   function onPickFiles(e: ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(e.target.files ?? []);
@@ -8710,6 +10610,7 @@ function AssignmentCard({
     setError(null);
     if (a.type === "text" && !text.trim()) return setError(t("assignmentNeedText"));
     if (a.type === "github" && !githubUrl.trim()) return setError(t("assignmentNeedUrl"));
+    if (isCode && !codeText.trim()) return setError(t("assignmentNeedCode"));
     if (fileType && files.length === 0) return setError(t("assignmentNeedFile"));
     setBusy(true);
     try {
@@ -8725,10 +10626,12 @@ function AssignmentCard({
         text: text.trim() || null,
         githubUrl: githubUrl.trim() || null,
         files: uploads,
+        code: isCode ? codeText : null,
       });
       setText("");
       setGithubUrl("");
       setFiles([]);
+      setLocalCheck(null);
       await onReviewed();
     } catch (e) {
       setError(String(e));
@@ -8763,6 +10666,42 @@ function AssignmentCard({
 
       {!passed && !locked && (
         <div className="assignment-submit">
+          {isCode && (
+            <>
+              <div className="tpl-code-toolbar">
+                <span
+                  className={`tpl-code-badge${runtimeOk ? " ok" : runtime === "loading" ? "" : " missing"}`}
+                >
+                  {typeof runtime === "object" && runtime !== null
+                    ? runtime.label
+                    : a.language}
+                </span>
+                {isTauri && runtime !== "loading" && !runtimeOk && (
+                  <span className="tpl-code-missing">
+                    {t("codeRuntimeMissing", { lang: a.language ?? "" })}
+                  </span>
+                )}
+              </div>
+              {isTauri &&
+                runtime !== "loading" &&
+                !runtimeOk &&
+                typeof runtime === "object" &&
+                runtime !== null && (
+                  <div className="tpl-code-install">
+                    <code>{runtime.install_hint}</code>
+                    <a href={runtime.url} target="_blank" rel="noreferrer">
+                      {runtime.url}
+                    </a>
+                  </div>
+                )}
+              <CodeEditor
+                value={codeText}
+                language={a.language ?? "python"}
+                onChange={setCodeText}
+              />
+              {localCheck && <AutogradeTable ag={localCheck} />}
+            </>
+          )}
           {a.type === "text" && (
             <textarea
               className="assignment-textarea"
@@ -8819,19 +10758,76 @@ function AssignmentCard({
             </div>
           )}
           {error && <div className="assignment-error">{error}</div>}
-          <button className="assignment-send" onClick={submit} disabled={busy}>
-            {busy ? (
-              <>
-                <span className="spinner" /> {t("assignmentReviewing")}
-              </>
-            ) : (
-              t("assignmentSend")
+          <div className="assignment-actions">
+            {isCode && isTauri && (
+              <button
+                className="assignment-check"
+                onClick={runLocalCheck}
+                disabled={busy || checking || !runtimeOk || !codeText.trim()}
+              >
+                {checking ? (
+                  <>
+                    <span className="spinner" /> {t("assignmentCodeChecking")}
+                  </>
+                ) : (
+                  t("assignmentCodeCheck")
+                )}
+              </button>
             )}
-          </button>
+            <button className="assignment-send" onClick={submit} disabled={busy || checking}>
+              {busy ? (
+                <>
+                  <span className="spinner" /> {t("assignmentReviewing")}
+                </>
+              ) : (
+                t("assignmentSend")
+              )}
+            </button>
+          </div>
         </div>
       )}
 
       {passed && <div className="assignment-passed-note">{t("assignmentPassed")}</div>}
+    </div>
+  );
+}
+
+// Per-case results of running submitted code against the assignment's IO
+// tests (shared by the local pre-check and the recorded submission turns).
+function AutogradeTable({ ag }: { ag: Autograde }) {
+  const t = useT();
+  const allPass = ag.passed === ag.total;
+  return (
+    <div className="assignment-autograde">
+      <div className={`assignment-autograde-head ${allPass ? "pass" : "fail"}`}>
+        {t("assignmentCodeCases", { passed: String(ag.passed), total: String(ag.total) })}
+      </div>
+      <ul>
+        {ag.cases.map((c) => (
+          <li key={c.idx} className={c.pass ? "pass" : "fail"}>
+            <span className="assignment-case-mark">{c.pass ? "✓" : "✗"}</span>
+            {t("assignmentCodeCase", { n: String(c.idx + 1) })}
+            {c.hidden && <span className="assignment-case-tag"> · {t("assignmentCodeCaseHidden")}</span>}
+            {!c.pass && c.phase === "compile" && <span> · {t("codeCompileError")}</span>}
+            {c.timed_out && <span> · {t("codeTimedOut")}</span>}
+            {!c.pass && !c.hidden && c.expected !== undefined && (
+              <div className="tpl-code-diff">
+                <div>
+                  <span>{t("codeExpected")}:</span>
+                  <pre>{c.expected}</pre>
+                </div>
+                <div>
+                  <span>{t("codeActual")}:</span>
+                  <pre>{c.got ?? ""}</pre>
+                </div>
+              </div>
+            )}
+            {!c.pass && !c.hidden && c.stderr && (
+              <pre className="assignment-case-stderr">{c.stderr}</pre>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -8842,6 +10838,12 @@ function AssignmentTurnView({ turn }: { turn: AssignmentTurn }) {
     return (
       <div className="assignment-bubble user">
         <div className="assignment-bubble-who">{t("assignmentYou")}</div>
+        {turn.code && (
+          <pre className="tpl-step-code assignment-bubble-code">
+            <code>{turn.code}</code>
+          </pre>
+        )}
+        {turn.autograde && <AutogradeTable ag={turn.autograde} />}
         {turn.text && (
           <div className="assignment-bubble-text assignment-bubble-md">
             <MathMarkdown>{turn.text}</MathMarkdown>
@@ -8918,6 +10920,7 @@ const STAGE_LABEL_KEYS: Record<string, string> = {
   annotate: "stageAnnotate",
   illustrate: "stageIllustrate",
   test: "stageTest",
+  roadmap: "stageRoadmap",
 };
 
 // Live feed of agent activity during generation, rendered as chat bubbles.
@@ -9328,6 +11331,14 @@ function defaultWidget(kind: string): any {
         title: "",
         description: "",
         params: { items: [{ question: "", options: ["", ""], correct: 0 }] },
+      };
+    case "code":
+      return {
+        type: "interactive",
+        template: "code",
+        title: "",
+        description: "",
+        params: { language: "python", mode: "example", code: 'print("hello")\n' },
       };
     case "checkpoint":
       return { type: "checkpoint", question: "", answer: "" };
@@ -9875,6 +11886,7 @@ function InsertBar({ onInsert }: { onInsert: (k: string) => void }) {
     { k: "video", label: t("blockVideo") },
     { k: "diagram", label: t("blockDiagram") },
     { k: "interactive", label: t("blockInteractive") },
+    { k: "code", label: t("blockCode") },
     { k: "checkpoint", label: t("blockCheckpoint") },
     { k: "recall", label: t("recallLabel") },
   ];
@@ -10346,25 +12358,36 @@ function ImageLightbox({
   );
 }
 
-function videoEmbedUrl(url: string): string | null {
+function videoEmbedUrl(url: string, start?: number, end?: number): string | null {
   try {
     const u = new URL(url);
+    const ytParams = () => {
+      const p = new URLSearchParams();
+      if (typeof start === "number" && start > 0) p.set("start", String(Math.floor(start)));
+      if (typeof end === "number" && end > 0) p.set("end", String(Math.floor(end)));
+      const q = p.toString();
+      return q ? `?${q}` : "";
+    };
     // YouTube
     if (u.hostname.includes("youtube.com")) {
       const v = u.searchParams.get("v");
-      if (v) return `https://www.youtube.com/embed/${v}`;
+      if (v) return `https://www.youtube.com/embed/${v}${ytParams()}`;
       // youtube.com/shorts/ID
       const m = u.pathname.match(/^\/(?:shorts|embed)\/([^/]+)/);
-      if (m) return `https://www.youtube.com/embed/${m[1]}`;
+      if (m) return `https://www.youtube.com/embed/${m[1]}${ytParams()}`;
     }
     if (u.hostname === "youtu.be") {
       const id = u.pathname.replace(/^\//, "").split("/")[0];
-      if (id) return `https://www.youtube.com/embed/${id}`;
+      if (id) return `https://www.youtube.com/embed/${id}${ytParams()}`;
     }
-    // Vimeo
+    // Vimeo (only a start offset is supported)
     if (u.hostname.includes("vimeo.com")) {
       const id = u.pathname.replace(/^\//, "").split("/")[0];
-      if (/^\d+$/.test(id)) return `https://player.vimeo.com/video/${id}`;
+      if (/^\d+$/.test(id)) {
+        const frag =
+          typeof start === "number" && start > 0 ? `#t=${Math.floor(start)}s` : "";
+        return `https://player.vimeo.com/video/${id}${frag}`;
+      }
     }
     return null;
   } catch {
@@ -10372,15 +12395,32 @@ function videoEmbedUrl(url: string): string | null {
   }
 }
 
+function formatVideoTime(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? `${h}:` : ""}${mm}:${String(s).padStart(2, "0")}`;
+}
+
 function VideoWidget({
   id,
   widget,
 }: {
   id: string;
-  widget: { url: string; title?: string; recommended_by?: string; why?: string };
+  widget: {
+    url: string;
+    title?: string;
+    recommended_by?: string;
+    why?: string;
+    start?: number;
+    end?: number;
+    focus?: string;
+  };
 }) {
   const t = useT();
-  const embed = videoEmbedUrl(widget.url);
+  const embed = videoEmbedUrl(widget.url, widget.start, widget.end);
+  const hasSegment = typeof widget.start === "number" && widget.start > 0;
   return (
     <figure className="widget widget-video">
       {embed ? (
@@ -10408,11 +12448,20 @@ function VideoWidget({
       )}
       <figcaption>
         {widget.title && <div className="widget-video-title">{widget.title}</div>}
+        {hasSegment && (
+          <span className="video-segment-chip">
+            ▶ {formatVideoTime(widget.start!)}
+            {typeof widget.end === "number" && widget.end > 0
+              ? `–${formatVideoTime(widget.end)}`
+              : ""}
+          </span>
+        )}
         {embed && (
           <a className="widget-video-open" href={widget.url} target="_blank" rel="noreferrer">
             {t("widgetVideoOpen")} ↗
           </a>
         )}
+        {widget.focus && <div className="video-focus">{widget.focus}</div>}
         {widget.why && <div className="widget-video-why">{widget.why}</div>}
         {widget.recommended_by && (
           <div className="widget-video-rec">
@@ -11772,6 +13821,526 @@ function FlipcardsTemplate({ params }: { params: any }) {
   );
 }
 
+// ── Runnable code widget (template "code") ──────────────────────────────────
+
+type RuntimeStatus = {
+  language: string;
+  label: string;
+  available: boolean;
+  version?: string | null;
+  install_hint: string;
+  url: string;
+};
+
+type CodeRunResult = {
+  phase: "compile" | "run";
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  truncated: boolean;
+  duration_ms: number;
+};
+
+type PyTraceStep = {
+  line: number;
+  event: string;
+  func: string;
+  locals: Record<string, string>;
+  stdout_len: number;
+};
+type PyTrace = {
+  steps: PyTraceStep[];
+  stdout: string;
+  stderr: string;
+  error: string | null;
+  truncated: boolean;
+};
+
+// One probe shared by every code widget on the page; reset on failure so a
+// later widget can retry.
+let codeRuntimesPromise: Promise<RuntimeStatus[]> | null = null;
+function getCodeRuntimes(refresh = false): Promise<RuntimeStatus[]> {
+  if (!codeRuntimesPromise || refresh) {
+    codeRuntimesPromise = invoke<RuntimeStatus[]>("check_code_runtimes", { refresh }).catch(
+      (e) => {
+        codeRuntimesPromise = null;
+        throw e;
+      }
+    );
+  }
+  return codeRuntimesPromise;
+}
+
+const CM_LANGS: Record<string, () => ReturnType<typeof python>> = {
+  python,
+  javascript,
+  go,
+  rust,
+  java,
+  c: cpp,
+  cpp,
+};
+
+const cmAppTheme = EditorView.theme({
+  "&": {
+    fontSize: "13px",
+    backgroundColor: "var(--surface)",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+  },
+  "&.cm-focused": { outline: "none", borderColor: "var(--accent)" },
+  ".cm-scroller": {
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    lineHeight: "1.55",
+    maxHeight: "480px",
+    borderRadius: "8px",
+  },
+  ".cm-content": { padding: "10px 2px" },
+  ".cm-gutters": {
+    backgroundColor: "transparent",
+    border: "none",
+    color: "var(--text-subtle)",
+  },
+  ".cm-activeLine": { backgroundColor: "rgba(127, 127, 127, 0.05)" },
+  ".cm-activeLineGutter": { backgroundColor: "transparent" },
+});
+
+// CodeMirror wrapper: syntax highlighting, line numbers, bracket matching and
+// autocomplete (language-aware sources plus an any-word fallback).
+function CodeEditor({
+  value,
+  language,
+  onChange,
+}: {
+  value: string;
+  language: string;
+  onChange: (v: string) => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const support = CM_LANGS[language]?.();
+    const extensions = [
+      basicSetup,
+      keymap.of([indentWithTab]),
+      cmAppTheme,
+      EditorView.updateListener.of((u) => {
+        if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+      }),
+    ];
+    if (support) {
+      extensions.push(
+        support,
+        support.language.data.of({ autocomplete: completeAnyWord })
+      );
+    } else {
+      extensions.push(autocompletion());
+    }
+    const view = new EditorView({
+      doc: viewRef.current?.state.doc.toString() ?? value,
+      parent: host,
+      extensions,
+    });
+    viewRef.current = view;
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // Recreated only on language change; doc sync is handled below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [language]);
+
+  // External value changes (reset, solution insert) — push into the editor.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const cur = view.state.doc.toString();
+    if (cur !== value) {
+      view.dispatch({ changes: { from: 0, to: cur.length, insert: value } });
+    }
+  }, [value]);
+
+  return <div className="tpl-code-cm" ref={hostRef} />;
+}
+
+// Trailing whitespace and CRLF differences should never fail an exercise.
+function normalizeRunOutput(s: string): string {
+  return s
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .join("\n")
+    .trim();
+}
+
+function PyTracePlayer({ code, trace }: { code: string; trace: PyTrace }) {
+  const t = useT();
+  const [idx, setIdx] = useState(0);
+  const activeRef = useRef<HTMLDivElement>(null);
+  const step = trace.steps[Math.min(idx, trace.steps.length - 1)];
+  const lines = code.split("\n");
+
+  // Frame depth per step (from call/return events) — powers the debugger-style
+  // fast-forward controls below.
+  const depths = useMemo(() => {
+    const out: number[] = [];
+    let depth = 0;
+    for (const s of trace.steps) {
+      if (s.event === "call") depth += 1;
+      out.push(depth);
+      if (s.event === "return") depth -= 1;
+    }
+    return out;
+  }, [trace]);
+
+  // Indices where a (func, line) pair appears for the FIRST time. Jumping to
+  // the next such index skips repeated loop iterations in one click.
+  const firstSeenIdx = useMemo(() => {
+    const seen = new Set<string>();
+    const out: number[] = [];
+    trace.steps.forEach((s, i) => {
+      const key = `${s.func}:${s.line}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(i);
+      }
+    });
+    return out;
+  }, [trace]);
+
+  const last = trace.steps.length - 1;
+  // Step over: next step at the same depth or shallower (skips inside calls).
+  const stepOver = () => {
+    let j = idx + 1;
+    while (j < last && depths[j] > depths[idx]) j++;
+    setIdx(Math.min(j, last));
+  };
+  // Step out: run until the current frame returns to its caller.
+  const stepOut = () => {
+    let j = idx + 1;
+    while (j < last && depths[j] >= depths[idx]) j++;
+    setIdx(Math.min(j, last));
+  };
+  // Next new line: first never-yet-visited line — exits a loop in one click
+  // instead of paging through every iteration.
+  const nextNew = () => {
+    const j = firstSeenIdx.find((i) => i > idx);
+    setIdx(j === undefined ? last : j);
+  };
+
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: "nearest" });
+  }, [idx]);
+  if (!step) return null;
+  return (
+    <div className="tpl-trace">
+      <div className="tpl-trace-panes">
+        <pre className="tpl-trace-code">
+          {lines.map((ln, i) => {
+            const active = step.line === i + 1;
+            return (
+              <div
+                key={i}
+                ref={active ? activeRef : undefined}
+                className={`tpl-trace-line${active ? " active" : ""}`}
+              >
+                <span className="tpl-trace-ln">{i + 1}</span>
+                {ln || " "}
+              </div>
+            );
+          })}
+        </pre>
+        <div className="tpl-trace-side">
+          <div className="tpl-trace-func">
+            {step.func === "<module>" ? t("codeTraceModule") : `${step.func}()`} ·{" "}
+            {step.event}
+          </div>
+          <table className="tpl-trace-vars">
+            <tbody>
+              {Object.entries(step.locals).map(([k, v]) => (
+                <tr key={k}>
+                  <td>{k}</td>
+                  <td>
+                    <code>{v}</code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {step.stdout_len > 0 && (
+            <pre className="tpl-trace-stdout">{trace.stdout.slice(0, step.stdout_len)}</pre>
+          )}
+        </div>
+      </div>
+      <div className="tpl-trace-nav">
+        <button disabled={idx === 0} onClick={() => setIdx((i) => i - 1)}>
+          ← {t("tplPrev")}
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={trace.steps.length - 1}
+          value={idx}
+          onChange={(e) => setIdx(Number(e.target.value))}
+        />
+        <button
+          disabled={idx >= trace.steps.length - 1}
+          onClick={() => setIdx((i) => i + 1)}
+        >
+          {t("tplNext")} →
+        </button>
+        <span className="tpl-trace-count">
+          {idx + 1}/{trace.steps.length}
+        </span>
+      </div>
+      <div className="tpl-trace-nav tpl-trace-jumps">
+        <button
+          disabled={idx >= last}
+          onClick={stepOver}
+          title={t("codeStepOverHint")}
+        >
+          ⤼ {t("codeStepOver")}
+        </button>
+        <button
+          disabled={idx >= last || depths[idx] <= 1}
+          onClick={stepOut}
+          title={t("codeStepOutHint")}
+        >
+          ⇧ {t("codeStepOut")}
+        </button>
+        <button
+          disabled={idx >= last}
+          onClick={nextNew}
+          title={t("codeStepNewHint")}
+        >
+          ⤸ {t("codeStepNew")}
+        </button>
+      </div>
+      {trace.truncated && <div className="tpl-code-note">{t("codeTraceTruncated")}</div>}
+      {trace.error && <div className="tpl-code-err">{trace.error}</div>}
+    </div>
+  );
+}
+
+function CodeTemplate({ params }: { params: any }) {
+  const t = useT();
+  const language: string = params.language ?? "python";
+  const isExercise = params.mode === "exercise";
+  const [code, setCode] = useState<string>(params.code ?? "");
+  const [out, setOut] = useState<CodeRunResult | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"run" | "check" | "trace" | null>(null);
+  const [verdict, setVerdict] = useState<"pass" | "fail" | null>(null);
+  const [showSolution, setShowSolution] = useState(false);
+  const [showHint, setShowHint] = useState(false);
+  const [runtime, setRuntime] = useState<RuntimeStatus | null | "loading">("loading");
+  const [trace, setTrace] = useState<PyTrace | null>(null);
+
+  const loadRuntime = useCallback(
+    (refresh = false) => {
+      if (!isTauri) return;
+      setRuntime("loading");
+      getCodeRuntimes(refresh)
+        .then((list) => setRuntime(list.find((r) => r.language === language) ?? null))
+        .catch(() => setRuntime(null));
+    },
+    [language]
+  );
+  useEffect(() => {
+    loadRuntime();
+  }, [loadRuntime]);
+
+  const available = typeof runtime === "object" && runtime !== null && runtime.available;
+
+  async function execute(kind: "run" | "check") {
+    if (busy || !available) return;
+    setBusy(kind);
+    setRunError(null);
+    setTrace(null);
+    setVerdict(null);
+    try {
+      const res = await invoke<CodeRunResult>("run_code_snippet", {
+        language,
+        code,
+        stdin: params.stdin ?? null,
+      });
+      setOut(res);
+      if (kind === "check" && res.phase === "run" && !res.timed_out) {
+        setVerdict(
+          normalizeRunOutput(res.stdout) === normalizeRunOutput(params.expected_output ?? "")
+            ? "pass"
+            : "fail"
+        );
+      }
+    } catch (e) {
+      setOut(null);
+      setRunError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function visualize() {
+    if (busy || !available) return;
+    setBusy("trace");
+    setRunError(null);
+    setOut(null);
+    setVerdict(null);
+    try {
+      setTrace(await invoke<PyTrace>("trace_python_snippet", { code }));
+    } catch (e) {
+      setRunError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function reset() {
+    setCode(params.code ?? "");
+    setOut(null);
+    setRunError(null);
+    setVerdict(null);
+    setTrace(null);
+    setShowSolution(false);
+  }
+
+  if (!isTauri) {
+    return (
+      <div className="tpl-code">
+        {isExercise && params.task && (
+          <div className="tpl-code-task reader">
+            <TplMd>{params.task}</TplMd>
+          </div>
+        )}
+        <pre className="tpl-step-code">
+          <code className={`language-${language}`}>{params.code}</code>
+        </pre>
+        <div className="tpl-code-note">{t("codeDesktopOnly")}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tpl-code">
+      {isExercise && params.task && (
+        <div className="tpl-code-task reader">
+          <TplMd>{params.task}</TplMd>
+        </div>
+      )}
+      {isExercise && params.hint && (
+        <div className="tpl-code-hint-row">
+          <button className="tpl-code-link" onClick={() => setShowHint((v) => !v)}>
+            {t("codeHintLabel")}
+          </button>
+          {showHint && <span className="tpl-code-hint-text">{params.hint}</span>}
+        </div>
+      )}
+      <div className="tpl-code-toolbar">
+        <span className={`tpl-code-badge${available ? " ok" : runtime === "loading" ? "" : " missing"}`}>
+          {typeof runtime === "object" && runtime !== null ? runtime.label : language}
+          {typeof runtime === "object" && runtime !== null && runtime.available && runtime.version
+            ? ` · ${runtime.version.replace(/^[^\d]*/, "").split(" ")[0]}`
+            : ""}
+        </span>
+        {runtime !== "loading" && !available && (
+          <span className="tpl-code-missing">{t("codeRuntimeMissing", { lang: language })}</span>
+        )}
+      </div>
+      {runtime !== "loading" && !available && typeof runtime === "object" && runtime !== null && (
+        <div className="tpl-code-install">
+          <code>{runtime.install_hint}</code>
+          <a href={runtime.url} target="_blank" rel="noreferrer">
+            {runtime.url}
+          </a>
+          <button className="tpl-code-link" onClick={() => loadRuntime(true)}>
+            {t("codeRecheck")}
+          </button>
+        </div>
+      )}
+      <CodeEditor value={code} language={language} onChange={setCode} />
+      <div className="tpl-code-actions">
+        <button disabled={!available || busy !== null} onClick={() => execute("run")}>
+          {busy === "run" ? t("codeRunning") : t("codeRun")}
+        </button>
+        {isExercise && (
+          <button disabled={!available || busy !== null} onClick={() => execute("check")}>
+            {busy === "check" ? t("codeRunning") : t("codeCheck")}
+          </button>
+        )}
+        {language === "python" && (
+          <button
+            disabled={!available || busy !== null}
+            onClick={visualize}
+            title={t("codeVisualize")}
+          >
+            {busy === "trace" ? t("codeRunning") : t("codeVisualize")}
+          </button>
+        )}
+        {isExercise && params.solution && (
+          <button className="tpl-code-link" onClick={() => setShowSolution((v) => !v)}>
+            {showSolution ? t("codeHideSolution") : t("codeShowSolution")}
+          </button>
+        )}
+        <button className="tpl-code-link" onClick={reset}>
+          {t("codeReset")}
+        </button>
+      </div>
+      {verdict && (
+        <div className={`tpl-code-verdict ${verdict}`}>
+          {verdict === "pass" ? t("codePassed") : t("codeFailed")}
+          {verdict === "fail" && out && (
+            <div className="tpl-code-diff">
+              <div>
+                <span>{t("codeExpected")}:</span>
+                <pre>{params.expected_output}</pre>
+              </div>
+              <div>
+                <span>{t("codeActual")}:</span>
+                <pre>{out.stdout}</pre>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {showSolution && params.solution && (
+        <pre className="tpl-step-code tpl-code-solution">
+          <code className={`language-${language}`}>{params.solution}</code>
+        </pre>
+      )}
+      {runError && <div className="tpl-code-err">{runError}</div>}
+      {out && !verdict && (
+        <div className="tpl-code-output">
+          {out.phase === "compile" && (
+            <div className="tpl-code-out-label err-label">{t("codeCompileError")}</div>
+          )}
+          {out.stdout && <pre>{out.stdout}</pre>}
+          {out.stderr && <pre className="err">{out.stderr}</pre>}
+          <div className="tpl-code-meta">
+            {out.timed_out && <span className="err-label">{t("codeTimedOut")}</span>}
+            {out.truncated && <span>{t("codeTruncated")}</span>}
+            {out.exit_code !== null && out.exit_code !== 0 && !out.timed_out && (
+              <span>
+                {t("codeExitCode")}: {out.exit_code}
+              </span>
+            )}
+            <span>{(out.duration_ms / 1000).toFixed(1)}s</span>
+          </div>
+        </div>
+      )}
+      {trace && trace.steps.length > 0 && <PyTracePlayer code={code} trace={trace} />}
+      {trace && trace.steps.length === 0 && trace.error && (
+        <div className="tpl-code-err">{trace.error}</div>
+      )}
+    </div>
+  );
+}
+
 const TEMPLATE_COMPONENTS: Record<string, (p: { params: any }) => ReactNode> = {
   quiz: QuizTemplate,
   steps: StepsTemplate,
@@ -11781,6 +14350,7 @@ const TEMPLATE_COMPONENTS: Record<string, (p: { params: any }) => ReactNode> = {
   slider: SliderTemplate,
   categorize: CategorizeTemplate,
   flipcards: FlipcardsTemplate,
+  code: CodeTemplate,
 };
 
 function TemplateWidget({

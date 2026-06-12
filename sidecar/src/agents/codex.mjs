@@ -27,6 +27,7 @@ import {
 import {
   templateCatalogBlock,
   normalizeTemplateWidget,
+  normalizeCodeLang,
   TEMPLATE_NAMES,
 } from "../lib/widget-templates.mjs";
 import {
@@ -82,11 +83,45 @@ function makeCodex(braveApiKey, opts = {}) {
       brave: braveStdioServer(braveApiKey),
     };
   }
+  // User-attached course MCP servers (already approved in settings).
+  if (Array.isArray(opts.customMcp)) {
+    for (const s of opts.customMcp) {
+      if (!s || typeof s.id !== "string" || typeof s.command !== "string") continue;
+      config.mcp_servers = {
+        ...(config.mcp_servers || {}),
+        [s.id]: {
+          command: s.command,
+          args: Array.isArray(s.args) ? s.args : [],
+          ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+        },
+      };
+    }
+  }
   if (opts.imageGenerationEnabled === false) {
     config.features = { image_generation: false };
   }
   if (Object.keys(config).length === 0) return getDefaultCodex();
   return new Codex(codexOptions(config));
+}
+
+// Prompt hint for user-attached course MCP servers.
+function customMcpBlock(customMcp) {
+  const servers = Array.isArray(customMcp)
+    ? customMcp.filter((s) => s && s.id && s.command)
+    : [];
+  if (!servers.length) return "";
+  const lines = servers
+    .map((s) => {
+      const tools = Array.isArray(s.tools) && s.tools.length
+        ? s.tools.map((t) => `mcp__${s.id}__${t}`).join(", ")
+        : `tools under the mcp__${s.id}__ prefix`;
+      return `- ${s.name || s.id}: ${tools}`;
+    })
+    .join("\n");
+  return `\nUSER-ATTACHED MCP TOOLS: the learner connected these domain-specific tool
+servers to this course — actively use them when they help research, verify, or
+produce material (they often give live access to the actual tool/domain):
+${lines}\n`;
 }
 
 function terminologyGuide(lang) {
@@ -102,7 +137,9 @@ function languageStyleGuide(lang) {
 }
 
 function normalizeCourseFormat(value) {
-  return ["academic_course", "mini_module", "podcast_series"].includes(value)
+  return ["academic_course", "mini_module", "podcast_series", "single_lesson", "roadmap"].includes(
+    value
+  )
     ? value
     : "academic_course";
 }
@@ -126,6 +163,20 @@ function courseFormatGuide(courseFormat, lang) {
 - Do not generate tests or homework assignments for podcast-series material.
 - Do not plan image/gallery/diagram/interactive widgets. If references help, mention them as optional show notes or source links, not visual lesson blocks.`;
   }
+  if (format === "single_lesson") {
+    return `Generation format: single standalone lesson.
+- This is ONE complete, self-contained lesson article — not a course. There is no curriculum, no other modules, and no previous or next lessons.
+- Cover the requested topic end-to-end at the learner's level: motivation, core explanation, concrete examples, common pitfalls, and a short actionable wrap-up.
+- Never reference "this course", "later modules", or future lessons.
+- Keep tests and assignments small and focused strictly on this one lesson.`;
+  }
+  if (format === "roadmap") {
+    return `Generation format: learning ROADMAP.
+- You are clarifying a learning GOAL to plan a roadmap — a vertical route of
+  stages with skill nodes — NOT a course curriculum.
+- Focus on: current level, the concrete end goal (job/project/exam), and any
+  deadline or known sub-areas to include or skip.`;
+  }
   return `Generation format: full academic course.
 - Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
 - Build a serious, progressive curriculum with research-backed sequencing.
@@ -141,6 +192,12 @@ function wizardQuestionGuide(courseFormat, lang) {
   }
   if (format === "mini_module") {
     return `For the mini-course wizard, ask only questions that materially narrow one compact module: outcome, current level, time budget, and the few subtopics that matter most.`;
+  }
+  if (format === "single_lesson") {
+    return `For the single-lesson wizard, ask at most a couple of laser-focused questions: the exact angle or use-case the learner wants covered, and their current level. Do NOT ask about weekly time budget, schedules, or course-scale preferences.`;
+  }
+  if (format === "roadmap") {
+    return `For the roadmap wizard, ask at most a couple of laser-focused questions: the learner's current level and the precise target outcome (job, project, exam). Do NOT ask about lesson formats, weekly schedules, tests, or visual assets.`;
   }
   return "";
 }
@@ -484,6 +541,14 @@ export async function wizardNextQuestion(
   const lang = (language || "en").trim();
   const asked = Array.isArray(answered) ? answered : [];
   const isFirst = asked.length === 0;
+  const wizardFormat = normalizeCourseFormat(courseFormat);
+  // Short interviews: a single lesson or a roadmap need 1-3 focused questions,
+  // not the full 3-10 learner-profile interview.
+  const isShort = wizardFormat === "single_lesson" || wizardFormat === "roadmap";
+  const minQ = isShort ? 1 : 3;
+  const maxQ = isShort ? 3 : 10;
+  const subjectNoun =
+    wizardFormat === "single_lesson" ? "lesson" : wizardFormat === "roadmap" ? "roadmap" : "course";
   const hasSpace =
     (Array.isArray(spaceDirs) && spaceDirs.length > 0) ||
     (Array.isArray(spaceSources) && spaceSources.length > 0) ||
@@ -505,16 +570,27 @@ what they already told you: follow up on, drill into, disambiguate, or branch
 from a previous answer. Never repeat covered ground, and never ask the learner
 to choose the generation format again. Skip pleasantries.
 
-By the END of the interview you must have covered these four LEARNER-PROFILE
+${
+  wizardFormat === "single_lesson"
+    ? `Cover only what materially changes this ONE lesson — primarily the goal
+(what exactly they want covered and from what angle) and their current level.
+Do not interview about weekly time budget or course-scale preferences.`
+    : wizardFormat === "roadmap"
+      ? `Cover only what materially changes the ROADMAP — primarily the learner's
+current level and the precise target outcome (job, project, exam, deadline).
+Do not interview about lesson formats, weekly schedules, or assessments.`
+      : `By the END of the interview you must have covered these four LEARNER-PROFILE
 dimensions (they drive personalization of every future lesson): (1) current
 level, (2) goals — what they want to be able to DO, (3) weekly time budget,
 (4) prior/adjacent knowledge. When no better topic-specific question exists,
-ask about an uncovered dimension; weave it naturally into the topic.
+ask about an uncovered dimension; weave it naturally into the topic.`
+}
 
-Conduct between 3 and 10 questions in TOTAL. You have asked ${asked.length} so far.
-- If you have asked FEWER than 3, you MUST ask another question (done=false).
-- If you have asked AT LEAST 3 and now have enough to build an excellent,
-  specific course, set done=true and set "question": null (and "title": null).
+Conduct between ${minQ} and ${maxQ} questions in TOTAL. You have asked ${asked.length} so far.
+- If you have asked FEWER than ${minQ}, you MUST ask another question (done=false).
+- If you have asked AT LEAST ${minQ} and now have enough to build an excellent,
+  specific ${subjectNoun}, set done=true and set "question": null (and "title": null).
+- If you have asked ${maxQ} or more, you MUST set done=true.
 - Otherwise return the next "question".
 
 When you ask a question, provide 3-5 realistic, mutually-distinct, concrete,
@@ -784,9 +860,10 @@ Widget template: "${template}".
 Rules:
 - Translate ONLY display text: questions, options, explanations, prompts, labels,
   step titles/texts, card fronts/backs, list items, bucket names, hints, accepted
-  answers, notes.
+  answers, notes, tasks.
 - Do NOT change keys, numbers, booleans, indexes, or array order/length.
-- Keep these fields VERBATIM: name, expr, format, suffix, code, codeLang.
+- Keep these fields VERBATIM: name, expr, format, suffix, code, codeLang,
+  language, mode, solution, expected_output, stdin.
 - In fillblank texts keep the literal gap token "___" intact.
 Return ONLY the same JSON object shape, no prose.
 
@@ -1411,7 +1488,7 @@ function extractJsonLoose(text) {
 
 // ── Homework assignments ────────────────────────────────────────────────────
 
-const ASSIGNMENT_TYPES = ["image", "text", "document", "archive", "github"];
+const ASSIGNMENT_TYPES = ["image", "text", "document", "archive", "github", "code"];
 const CRITICALITIES = ["critical", "major", "minor"];
 
 const assignmentSchema = {
@@ -1426,10 +1503,32 @@ const assignmentSchema = {
         properties: {
           title: { type: "string" },
           prompt: { type: "string" },
-          type: { type: "string", enum: ["image", "text", "document", "archive", "github"] },
+          type: {
+            type: "string",
+            enum: ["image", "text", "document", "archive", "github", "code"],
+          },
           criteria: { type: "string" },
+          // Code-type extras; null for every other type.
+          language: {
+            type: ["string", "null"],
+            enum: ["python", "javascript", "go", "c", "cpp", "rust", "java", null],
+          },
+          starter_code: { type: ["string", "null"] },
+          tests: {
+            type: ["array", "null"],
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                stdin: { type: ["string", "null"] },
+                expected_output: { type: "string" },
+                hidden: { type: ["boolean", "null"] },
+              },
+              required: ["stdin", "expected_output", "hidden"],
+            },
+          },
         },
-        required: ["title", "prompt", "type", "criteria"],
+        required: ["title", "prompt", "type", "criteria", "language", "starter_code", "tests"],
       },
     },
   },
@@ -1444,15 +1543,66 @@ function normalizeAssignments(raw) {
     if (typeof a.prompt !== "string" || !a.prompt.trim()) return;
     let type = typeof a.type === "string" ? a.type.trim().toLowerCase() : "text";
     if (!ASSIGNMENT_TYPES.includes(type)) type = "text";
-    out.push({
+    const entry = {
       id: `a${i + 1}`,
       title: a.title.trim(),
       prompt: a.prompt.trim(),
       type,
       criteria: typeof a.criteria === "string" ? a.criteria.trim() : "",
-    });
+    };
+    if (type === "code") {
+      // Autograded code task: needs a runnable language and at least one IO
+      // test case; otherwise degrade to "text" so the chain stays usable.
+      const language = normalizeCodeLang(a.language);
+      const rawStr = (v, max) =>
+        typeof v === "string" && v.trim() && v.length <= max ? v : "";
+      const tests = (Array.isArray(a.tests) ? a.tests : [])
+        .filter((t) => t && rawStr(t.expected_output, 2000))
+        .slice(0, 6)
+        .map((t) => ({
+          ...(typeof t.stdin === "string" && t.stdin && t.stdin.length <= 2000
+            ? { stdin: t.stdin }
+            : {}),
+          expected_output: t.expected_output,
+          ...(t.hidden === true ? { hidden: true } : {}),
+        }));
+      const starter = rawStr(a.starter_code, 8000);
+      if (!language || tests.length === 0) {
+        entry.type = "text";
+      } else {
+        entry.language = language;
+        entry.tests = tests;
+        if (starter) entry.starter_code = starter;
+      }
+    }
+    out.push(entry);
   });
   return out.slice(0, 4);
+}
+
+// Render the autograde results (real execution) for the review prompt.
+function autogradeBlock(ag) {
+  if (!ag || typeof ag.total !== "number" || ag.total === 0) return "";
+  const lines = (Array.isArray(ag.cases) ? ag.cases : [])
+    .filter((c) => c && c.pass === false)
+    .map((c) => {
+      if (c.hidden) return `- case ${c.idx + 1} (hidden): FAILED`;
+      const parts = [`- case ${c.idx + 1}: FAILED`];
+      if (c.phase === "compile") parts.push("(compile error)");
+      if (c.timed_out) parts.push("(timed out)");
+      if (typeof c.expected === "string")
+        parts.push(`expected=${JSON.stringify(c.expected)} got=${JSON.stringify(c.got ?? "")}`);
+      if (typeof c.stderr === "string" && c.stderr) parts.push(`stderr: ${c.stderr}`);
+      return parts.join(" ");
+    });
+  return `\nAUTOMATED TEST RESULTS (ground truth — the submitted code was actually executed):
+${ag.passed}/${ag.total} test cases passed.
+${lines.length ? lines.join("\n") + "\n" : ""}Rules for code submissions:
+- If ANY case failed, the verdict MUST be "revise" and your remarks must explain
+  WHY those cases fail, referencing the concrete inputs/outputs above.
+- If ALL cases passed, judge code quality, clarity, and the grading criteria;
+  with no critical/major remarks, the verdict is "passed". Never claim a test
+  outcome different from the results above.\n`;
 }
 
 function normalizeReview(parsed) {
@@ -1492,6 +1642,22 @@ export async function generateAssignments({ topic, language, courseFormat, submo
     intensity === "max"
       ? `\nSCAFFOLDING (worked -> guided -> independent): make the chain a faded progression — a WORKED example to complete, then a GUIDED task with hints, then an INDEPENDENT task with none.\n`
       : "";
+  const isCodey = ["programming", "data_ai"].includes(category);
+  const codeRules = isCodey
+    ? `\nCODE ASSIGNMENTS (type "code") — an AUTOGRADED coding task: the learner
+writes a complete program in the app's editor and it is EXECUTED against your
+test cases. Prefer "code" over archive/github for small coding tasks. Extra fields:
+- "language": one of python|javascript|go|c|cpp|rust|java (the language this submodule teaches);
+- "starter_code": optional runnable scaffold with a TODO comment (null otherwise);
+- "tests": 2-6 IO cases [{"stdin","expected_output","hidden"}] (null for other types).
+HARD RULES for code tasks: the task is a COMPLETE program that reads stdin and
+prints stdout; state the EXACT input/output format in "prompt" and include at
+least one example input/output pair there; at least one test must be non-hidden;
+"expected_output" must be the EXACT stdout of a correct solution; output must be
+DETERMINISTIC (no randomness, time, or hash-order dependence); standard library
+only; each run finishes in under 5 seconds.
+For non-code assignments set "language", "starter_code", and "tests" to null.\n`
+    : `\nSet "language", "starter_code", and "tests" to null (they only apply to type "code", which is not available for this course).\n`;
   const prompt = `You are designing practical homework for one submodule of a
 course on "${topic}" (language: ${lang}).
 
@@ -1509,8 +1675,9 @@ Design a SHORT CHAIN of 1-3 practical assignments that make the learner APPLY
 what they learned, ordered as a progression. For each pick the single best
 submission type: "image" (drawing/sketch/diagram/photo), "text" (written
 answer/essay), "document" (uploaded file), "archive" (.zip of a program),
-"github" (link to a repo). Match type to skill: drawing→image,
-writing→text, coding→archive/github, longer deliverables→document.
+"github" (link to a repo)${isCodey ? `, "code" (autograded program)` : ""}. Match type to skill: drawing→image,
+writing→text, coding→${isCodey ? "code (small tasks) or archive/github (multi-file projects)" : "archive/github"}, longer deliverables→document.
+${codeRules}
 For each write clear "criteria" — concrete checkable things a reviewer grades
 against (drives an iterative review-and-revise loop). Concrete, achievable from
 the article; no busywork. All text in language "${lang}".
@@ -1552,8 +1719,7 @@ export async function reviewAssignment(params, ctx) {
 Assignment: ${a.title || ""}
 Task: ${a.prompt || ""}
 ${a.criteria ? `Grading criteria:\n${a.criteria}\n` : ""}
-${histBlock}Now review the learner's NEW submission below.${imageNote}${githubBlock}${textBlock}
-
+${histBlock}Now review the learner's NEW submission below.${imageNote}${githubBlock}${textBlock}${autogradeBlock(sub.autograde)}
 Judge the submission against the task and criteria. Produce:
 - "remarks": specific, actionable points. Each has "text" and "criticality" ∈
   "critical" | "major" | "minor". critical/major mean it does not yet meet the
@@ -1789,8 +1955,13 @@ const draftSchema = {
           title: { type: "string" },
           recommended_by: { type: "string" },
           why: { type: "string" },
+          // Relevant segment in seconds (null = whole video / open-ended) and
+          // what to watch for in it.
+          start: { type: ["integer", "null"] },
+          end: { type: ["integer", "null"] },
+          focus: { type: ["string", "null"] },
         },
-        required: ["id", "url", "title", "recommended_by", "why"],
+        required: ["id", "url", "title", "recommended_by", "why", "start", "end", "focus"],
       },
     },
     templateWidgets: {
@@ -1908,6 +2079,7 @@ async function draftArticleInternal(
     category,
     learnerProfile,
     researchPack,
+    customMcp,
   },
   onProgress
 ) {
@@ -2019,8 +2191,26 @@ video's surrounding page proving it is directly relevant. Put that evidence URL
 in "recommended_by" (it may be the official video/channel/playlist page when
 that is the evidence). If the video is not embeddable or you cannot find any
 quality signal, skip it.
+When only a SEGMENT of a video is relevant, set "start"/"end" (in seconds) and
+"focus" (1-2 sentences: what exactly to watch for in that fragment). Never drop
+an hour-long tutorial on the learner without timestamps when the relevant part
+is shorter.
 
-${templateCatalogBlock(lang)}
+VISUAL/TOOL SUBJECTS — when this lesson teaches operating a SOFTWARE TOOL or a
+visual workflow (3D/Blender, video editing, image editors, DAWs, CAD, any
+software-driven craft):
+- Video is the PRIMARY carrier: include 1-2 video widgets with verified,
+  reasonably recent tutorials; the article is the structured companion (what to
+  watch for, the exact procedure, pitfalls) — not a substitute for seeing it.
+- UI screenshots: image widgets MUST use mode "search" (real screenshots of the
+  actual interface; include the software name and version in the search prompt).
+  NEVER use mode "generate" for software UI — generated interfaces show controls
+  that don't exist and actively mislead.
+- Every procedural step names the exact menu path and keyboard shortcut
+  (e.g. Edit Mode → Ctrl+B → drag to set bevel width).
+- Prefer the "steps" template for tool procedures.
+
+${templateCatalogBlock(lang, category)}
 
 IMAGE AND GALLERY WIDGETS — set "mode" per image item:
   • "search" — a real, specific, existing thing to FIND not invent: a particular
@@ -2086,7 +2276,9 @@ Return widgets in five separate arrays:
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
 - videoWidgets: [{id, url (watch url), title, recommended_by (url of the
   recommendation source — REQUIRED, never "" unless you skip the video),
-  why (one sentence in ${lang})}]
+  why (one sentence in ${lang}), start (segment start in seconds, null for the
+  whole video), end (segment end in seconds or null), focus (what to watch for
+  in that fragment, in ${lang}, or null)}]
 - templateWidgets: [{id, template (a catalog name), title (in ${lang}),
   description (in ${lang}), paramsJson (the template's params object
   JSON-encoded AS A STRING)}]
@@ -2147,6 +2339,7 @@ editor + fact-checker. Do this silently; return only the polished result:
 5. Flow — light polish only; do NOT restructure or change the voice.
 Put a 1-3 sentence log of what you changed in "notes" (empty string if nothing).
 
+${customMcpBlock(customMcp)}
 ${languageStyleGuide(lang)}`;
   onProgress?.({ label: "thinking" });
   const text = await runStreamed(prompt, draftSchema, onProgress, {
@@ -2155,6 +2348,7 @@ ${languageStyleGuide(lang)}`;
     dirs: spaceDirs,
     category,
     stage: "draft",
+    customMcp,
   });
   const parsed = JSON.parse(text);
   if (!parsed?.article || typeof parsed.article !== "string") {
@@ -2260,6 +2454,8 @@ function mergeWidgets(
       if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
       const url = typeof w.url === "string" ? w.url.trim() : "";
       if (!url) continue;
+      const start = Number.isInteger(w.start) && w.start >= 0 ? w.start : null;
+      const end = Number.isInteger(w.end) && w.end > (start ?? 0) ? w.end : null;
       out[w.id.trim()] = {
         type: "video",
         url,
@@ -2267,6 +2463,11 @@ function mergeWidgets(
         recommended_by:
           typeof w.recommended_by === "string" ? w.recommended_by.trim() : "",
         why: typeof w.why === "string" ? w.why.trim() : "",
+        ...(start !== null ? { start } : {}),
+        ...(end !== null ? { end } : {}),
+        ...(typeof w.focus === "string" && w.focus.trim()
+          ? { focus: w.focus.trim().slice(0, 300) }
+          : {}),
       };
     }
   }
@@ -2997,6 +3198,7 @@ export async function buildStructure(
     spaceDirs,
     spaceStrict,
     learnerProfile,
+    customMcp,
   },
   ctx
 ) {
@@ -3064,7 +3266,8 @@ Then one "## <module title>" section per module:
 - module-specific facts/terminology;
 - 2-4 recommended search queries for the lesson writer.
 Keep the whole pack under ~2500 words — it is injected into every lesson prompt
-as pre-verified grounding.`;
+as pre-verified grounding.
+${customMcpBlock(customMcp)}`;
 
   const submoduleSchema = {
     type: "object",
@@ -3127,6 +3330,7 @@ as pre-verified grounding.`;
     idleTimeoutMs: 420_000,
     totalTimeoutMs: 3_600_000,
     stage: "structure",
+    customMcp,
   });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
@@ -3163,4 +3367,457 @@ as pre-verified grounding.`;
     researchPack:
       typeof parsed?.researchPack === "string" ? parsed.researchPack.trim() : "",
   };
+}
+
+/**
+ * Design a learning roadmap for a goal: vertical stages of node cards, each
+ * with curated sources and a set of checkable skills. Skills later become
+ * lessons or courses, so they must be sized accordingly.
+ * @param {{ topic:string, language:string, wizardMd:string, modelConfig?:object }} params
+ * @returns {Promise<{title:string, stages:Array}>}
+ */
+export async function buildRoadmap({ topic, language, wizardMd, modelConfig }, ctx) {
+  if (typeof topic !== "string" || !topic.trim()) {
+    throw new Error("topic must be a non-empty string");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `You are designing a personalized LEARNING ROADMAP for the goal "${topic}" (language code "${lang}").
+
+Below is the brief — the goal plus a short clarifying interview with the learner.
+
+<roadmap-md>
+${typeof wizardMd === "string" ? wizardMd : ""}
+</roadmap-md>
+
+A roadmap is a vertical sequence of STAGES (top to bottom, each builds on the
+previous). Each stage contains 1-4 NODES — thematic cards. Each node has:
+- "summary": 1-2 sentences on what this node covers and why it matters for the goal;
+- "skills": 2-6 concrete, checkable skills (verb phrases — what the learner will
+  be able to DO). Each skill will later become a standalone lesson or a
+  mini-course, so size each one accordingly: a teachable, assessable unit.
+- "sources": 2-5 curated links — official docs, well-known articles, books,
+  videos, or courses.
+
+Research first: web-search how respected roadmaps and tracks (roadmap.sh,
+university programs, well-known guides) structure this path, and verify that
+every source URL you include actually exists and is the canonical address.
+NEVER invent URLs; if you cannot verify a link, leave it out.
+
+Constraints:
+- 3-7 stages total, ordered from the learner's CURRENT level (from the brief) to
+  the goal — skip stages the learner already masters.
+- Each stage: 1-4 nodes; each node: 2-6 skills, 2-5 sources.
+- Source "kind" is exactly one of: "docs" | "article" | "video" | "course" | "book".
+- All titles, summaries, and skills in language "${lang}". Source titles may stay
+  in their original language.
+
+${languageStyleGuide(lang)}
+
+Also generate a short display "title" for the roadmap: a concise noun phrase,
+2-6 words, in language "${lang}", no quotes.`;
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      title: { type: "string" },
+      stages: {
+        type: "array",
+        minItems: 3,
+        maxItems: 7,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            summary: { type: "string" },
+            nodes: {
+              type: "array",
+              minItems: 1,
+              maxItems: 4,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  title: { type: "string" },
+                  summary: { type: "string" },
+                  sources: {
+                    type: "array",
+                    minItems: 2,
+                    maxItems: 5,
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        title: { type: "string" },
+                        url: { type: "string" },
+                        kind: {
+                          type: "string",
+                          enum: ["docs", "article", "video", "course", "book"],
+                        },
+                      },
+                      required: ["title", "url", "kind"],
+                    },
+                  },
+                  skills: {
+                    type: "array",
+                    minItems: 2,
+                    maxItems: 6,
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        title: { type: "string" },
+                        desc: { type: "string" },
+                      },
+                      required: ["title", "desc"],
+                    },
+                  },
+                },
+                required: ["title", "summary", "sources", "skills"],
+              },
+            },
+          },
+          required: ["title", "summary", "nodes"],
+        },
+      },
+    },
+    required: ["title", "stages"],
+  };
+
+  const text = await runStreamed(prompt, schema, ctx?.progress, {
+    modelConfig,
+    idleTimeoutMs: 420_000,
+    totalTimeoutMs: 3_600_000,
+    stage: "structure",
+  });
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed?.stages) || parsed.stages.length === 0) {
+    throw new Error("Codex response missing non-empty 'stages' array");
+  }
+  const stages = parsed.stages
+    .filter((s) => s && typeof s.title === "string" && s.title.trim())
+    .map((s) => ({
+      title: s.title.trim(),
+      summary: typeof s.summary === "string" ? s.summary.trim() : "",
+      nodes: (Array.isArray(s.nodes) ? s.nodes : [])
+        .filter((n) => n && typeof n.title === "string" && n.title.trim())
+        .map((n) => ({
+          title: n.title.trim(),
+          summary: typeof n.summary === "string" ? n.summary.trim() : "",
+          sources: (Array.isArray(n.sources) ? n.sources : [])
+            .filter(
+              (src) =>
+                src &&
+                typeof src.title === "string" &&
+                src.title.trim() &&
+                typeof src.url === "string" &&
+                src.url.trim().startsWith("http")
+            )
+            .map((src) => ({
+              title: src.title.trim(),
+              url: src.url.trim(),
+              kind: typeof src.kind === "string" ? src.kind.trim() : "",
+            })),
+          skills: (Array.isArray(n.skills) ? n.skills : [])
+            .filter((sk) => sk && typeof sk.title === "string" && sk.title.trim())
+            .map((sk) => ({
+              title: sk.title.trim(),
+              desc: typeof sk.desc === "string" ? sk.desc.trim() : "",
+            })),
+        }))
+        .filter((n) => n.skills.length > 0),
+    }))
+    .filter((s) => s.nodes.length > 0);
+  if (stages.length === 0) {
+    throw new Error("response had no usable stages");
+  }
+  return { title: normalizeCourseTitle(parsed?.title), stages };
+}
+
+// Shared validation for discover_mcp results (duplicated from claude.mjs to
+// avoid importing the Claude SDK module here).
+function normalizeMcpCandidates(parsed) {
+  const candidates = (Array.isArray(parsed?.candidates) ? parsed.candidates : [])
+    .filter(
+      (c) =>
+        c &&
+        typeof c.name === "string" &&
+        c.name.trim() &&
+        typeof c.command === "string" &&
+        c.command.trim() &&
+        typeof c.sourceUrl === "string" &&
+        c.sourceUrl.trim().startsWith("http")
+    )
+    .slice(0, 4)
+    .map((c) => ({
+      name: c.name.trim().slice(0, 80),
+      description: typeof c.description === "string" ? c.description.trim().slice(0, 300) : "",
+      command: c.command.trim(),
+      args: (Array.isArray(c.args) ? c.args : [])
+        .filter((a) => typeof a === "string" && a.trim())
+        .map((a) => a.trim()),
+      envKeys: (Array.isArray(c.envKeys) ? c.envKeys : [])
+        .filter((k) => typeof k === "string" && k.trim())
+        .map((k) => k.trim()),
+      sourceUrl: c.sourceUrl.trim(),
+    }));
+  return { candidates };
+}
+
+/**
+ * Web-research MCP servers that could enrich a course on this topic.
+ */
+export async function discoverMcp({ topic, language, modelConfig }, ctx) {
+  if (typeof topic !== "string" || !topic.trim()) {
+    throw new Error("topic must be a non-empty string");
+  }
+  const lang = (language || "en").trim();
+  const prompt = `Find MCP (Model Context Protocol) servers that could ENRICH the
+generation of a learning course on "${topic}" — tools the writing agent could
+call for live, domain-specific data or control of the actual software being
+taught (e.g. blender-mcp for a Blender course, a chess-engine MCP for chess).
+
+Research with web search: check the official registry/lists
+(github.com/modelcontextprotocol/servers, mcpservers.org, npm search
+"mcp <topic>"), the tool's own ecosystem, and GitHub. Verify each candidate's
+page actually exists and describes an MCP server.
+
+HARD RULES:
+- Only servers runnable as a LOCAL stdio process with a simple command — prefer
+  "npx" with args ["-y","<npm-package>"]; a documented "uvx <pkg>" is also
+  acceptable. Skip anything needing cloning/building or a remote URL transport.
+- Skip servers that require heavy external setup UNLESS that setup is exactly
+  the software being taught (a Blender MCP needing a running Blender is fine
+  for a Blender course).
+- List required environment variables (API keys) in "envKeys" — empty if none.
+- "sourceUrl" is the real GitHub/npm page you verified. NEVER invent packages.
+- 0-4 candidates; an empty list is a perfectly good answer for most topics.
+- "description": 1-2 sentences in language "${lang}" — what the tools give the
+  course generator, plus any setup caveat.`;
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      candidates: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string" },
+            description: { type: "string" },
+            command: { type: "string" },
+            args: { type: "array", items: { type: "string" } },
+            envKeys: { type: "array", items: { type: "string" } },
+            sourceUrl: { type: "string" },
+          },
+          required: ["name", "description", "command", "args", "envKeys", "sourceUrl"],
+        },
+      },
+    },
+    required: ["candidates"],
+  };
+  ctx?.progress?.({ label: "searching" });
+  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
+  return normalizeMcpCandidates(JSON.parse(text));
+}
+
+// Clamp + validate roadmap-node quiz questions.
+function normalizeNodeQuiz(parsed, skillIds) {
+  const valid = new Set(skillIds);
+  const questions = (Array.isArray(parsed?.questions) ? parsed.questions : [])
+    .filter(
+      (q) =>
+        q &&
+        typeof q.text === "string" &&
+        q.text.trim() &&
+        valid.has(q.skillId) &&
+        Array.isArray(q.options) &&
+        q.options.filter((o) => typeof o === "string" && o.trim()).length >= 2 &&
+        Number.isInteger(q.correct) &&
+        q.correct >= 0 &&
+        q.correct < q.options.length
+    )
+    .slice(0, 12)
+    .map((q) => ({
+      skillId: q.skillId,
+      text: q.text.trim(),
+      options: q.options.map((o) => String(o).trim()),
+      correct: q.correct,
+      explanation: typeof q.explanation === "string" ? q.explanation.trim() : "",
+    }));
+  return { questions };
+}
+
+/**
+ * Diagnostic mini-quiz for one roadmap node (correct answers auto-close skills).
+ */
+export async function roadmapNodeQuiz({ topic, language, node, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const skills = Array.isArray(node?.skills) ? node.skills : [];
+  if (!skills.length) return { questions: [] };
+  const prompt = `You are writing a short DIAGNOSTIC quiz for one node of a learning
+roadmap on "${topic}" (language "${lang}"). The learner claims they may already
+know this material — your questions decide which skills can be marked as known.
+
+Node: ${node.title}${node.summary ? ` — ${node.summary}` : ""}
+Skills (each question must target exactly ONE of these by its "skillId"):
+${skills.map((s) => `- id "${s.id}": ${s.title}${s.desc ? ` — ${s.desc}` : ""}`).join("\n")}
+
+Write 1-2 multiple-choice questions PER SKILL (max 12 total). Questions must be
+practical and discriminative: someone who truly has the skill answers easily,
+someone who doesn't will fail. 2-4 plausible options each, exactly one correct.
+All text in language "${lang}".
+
+${languageStyleGuide(lang)}`;
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            skillId: { type: "string" },
+            text: { type: "string" },
+            options: { type: "array", minItems: 2, maxItems: 4, items: { type: "string" } },
+            correct: { type: "integer" },
+            explanation: { type: "string" },
+          },
+          required: ["skillId", "text", "options", "correct", "explanation"],
+        },
+      },
+    },
+    required: ["questions"],
+  };
+  ctx?.progress?.({ label: "thinking" });
+  const text = await runStreamed(prompt, schema, ctx?.progress, { modelConfig });
+  return normalizeNodeQuiz(JSON.parse(text), skills.map((s) => s.id));
+}
+
+/**
+ * Conversational refinement of a roadmap; preserves item ids for kept items.
+ */
+export async function refineRoadmap(
+  { topic, language, currentContent, chatHistory, userMessage, modelConfig },
+  ctx
+) {
+  if (typeof userMessage !== "string" || !userMessage.trim()) {
+    throw new Error("userMessage must be a non-empty string");
+  }
+  const lang = (language || "en").trim();
+  const hist =
+    Array.isArray(chatHistory) && chatHistory.length
+      ? `Conversation so far:\n${chatHistory
+          .map((m) => `${m.role === "agent" ? "Assistant" : "Learner"}: ${m.text}`)
+          .join("\n")}\n\n`
+      : "";
+  const prompt = `You are refining a LEARNING ROADMAP for the goal "${topic}" (language "${lang}")
+in a dialog with the learner.
+
+Current roadmap (JSON, including item ids):
+${JSON.stringify(currentContent ?? {})}
+
+${hist}Learner's new message:
+${userMessage.trim()}
+
+If the message asks for CHANGES, produce the FULL updated roadmap in "content".
+CRITICAL ID RULES:
+- Every stage/node/skill you KEEP must keep its exact "id" from the current
+  JSON (course links and done-marks are attached to those ids).
+- New items you add must have an empty "" id.
+- Removing items is allowed when asked.
+Respect the caps: 3-7 stages / 1-4 nodes / 2-6 skills / 2-5 sources, kinds
+docs|article|video|course|book, verified real URLs only (web-search to check
+anything you add).
+If the message is just a question, answer it and set "content": null.
+"reply": 1-3 sentences in "${lang}" describing what you changed (or the answer).
+
+${languageStyleGuide(lang)}`;
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      reply: { type: "string" },
+      content: {
+        type: ["object", "null"],
+        additionalProperties: false,
+        properties: {
+          stages: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                id: { type: "string" },
+                title: { type: "string" },
+                summary: { type: "string" },
+                nodes: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: "string" },
+                      title: { type: "string" },
+                      summary: { type: "string" },
+                      sources: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            title: { type: "string" },
+                            url: { type: "string" },
+                            kind: {
+                              type: "string",
+                              enum: ["docs", "article", "video", "course", "book"],
+                            },
+                          },
+                          required: ["title", "url", "kind"],
+                        },
+                      },
+                      skills: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            id: { type: "string" },
+                            title: { type: "string" },
+                            desc: { type: "string" },
+                          },
+                          required: ["id", "title", "desc"],
+                        },
+                      },
+                    },
+                    required: ["id", "title", "summary", "sources", "skills"],
+                  },
+                },
+              },
+              required: ["id", "title", "summary", "nodes"],
+            },
+          },
+        },
+        required: ["stages"],
+      },
+    },
+    required: ["reply", "content"],
+  };
+  ctx?.progress?.({ label: "refining" });
+  const text = await runStreamed(prompt, schema, ctx?.progress, {
+    modelConfig,
+    idleTimeoutMs: 420_000,
+    totalTimeoutMs: 3_600_000,
+  });
+  const parsed = JSON.parse(text);
+  const reply =
+    typeof parsed?.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : "";
+  if (!reply) throw new Error("refine response missing 'reply'");
+  const content =
+    parsed?.content && Array.isArray(parsed.content.stages) ? parsed.content : null;
+  return { reply, content };
 }

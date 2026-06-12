@@ -15,7 +15,29 @@ export const TEMPLATE_NAMES = [
   "slider",
   "categorize",
   "flipcards",
+  "code",
 ];
+
+// Languages the desktop app can execute locally (see src-tauri/src/coderun.rs).
+export const CODE_LANGS = ["python", "javascript", "go", "c", "cpp", "rust", "java"];
+const CODE_LANG_ALIASES = {
+  py: "python",
+  python3: "python",
+  js: "javascript",
+  node: "javascript",
+  nodejs: "javascript",
+  golang: "go",
+  "c++": "cpp",
+  rs: "rust",
+};
+
+/** Resolve a model-supplied language to a runnable id, or null. */
+export function normalizeCodeLang(value) {
+  const v = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return CODE_LANGS.includes(v) ? v : CODE_LANG_ALIASES[v] || null;
+}
 
 // ── Safe expression evaluator (slider template) ─────────────────────────────
 // Grammar: numbers, declared variable names, + - * / ^ (right-assoc pow),
@@ -323,6 +345,39 @@ function normalizeFlipcards(p) {
   return cards.length >= 3 ? { cards } : null;
 }
 
+// Code blocks keep raw (untrimmed) strings: indentation and trailing newlines
+// matter for source code and expected output.
+function rawStr(v, max) {
+  if (typeof v !== "string" || !v.trim()) return "";
+  return v.length <= max ? v : "";
+}
+
+function normalizeCode(p) {
+  const requested = str(p?.language).toLowerCase();
+  const language = CODE_LANGS.includes(requested)
+    ? requested
+    : CODE_LANG_ALIASES[requested] || null;
+  if (!language) return null;
+  const code = rawStr(p?.code, 8000);
+  if (!code) return null;
+  const task = str(p?.task).slice(0, 1000);
+  const solution = rawStr(p?.solution, 8000);
+  const expected = rawStr(p?.expected_output, 4000);
+  const hint = str(p?.hint).slice(0, 300);
+  const stdin = rawStr(p?.stdin, 2000);
+  // Exercise only when fully specified; otherwise downgrade to a runnable
+  // example instead of dropping the widget.
+  const exercise = p?.mode === "exercise" && task && solution && expected;
+  return {
+    language,
+    mode: exercise ? "exercise" : "example",
+    code,
+    ...(exercise ? { task, solution, expected_output: expected } : {}),
+    ...(hint ? { hint } : {}),
+    ...(stdin ? { stdin } : {}),
+  };
+}
+
 const NORMALIZERS = {
   quiz: normalizeQuiz,
   steps: normalizeSteps,
@@ -332,6 +387,7 @@ const NORMALIZERS = {
   slider: normalizeSlider,
   categorize: normalizeCategorize,
   flipcards: normalizeFlipcards,
+  code: normalizeCode,
 };
 
 /**
@@ -367,7 +423,27 @@ export function normalizeTemplateWidget(raw) {
  * Compact prompt catalog: replaces the free-form interactive-widget
  * instructions in both agents' draft prompts.
  */
-export function templateCatalogBlock(lang) {
+export function templateCatalogBlock(lang, category) {
+  // The runnable-code template only makes sense for programming-adjacent
+  // courses. An undefined category (e.g. the fix-widget path) keeps it
+  // included so widget repair still knows the schema.
+  const codeEntry =
+    category === undefined || ["programming", "data_ai"].includes(category)
+      ? `
+- code — runnable code block (the desktop app executes it locally). Two modes.
+  params: {"language":"python|javascript|go|c|cpp|rust|java","mode":"example|exercise",
+           "code":"<full runnable source>","task"?,"solution"?,"expected_output"?,"hint"?,"stdin"?}
+  example: complete, ready-to-run code the learner tweaks and runs.
+  exercise: "code" is starter code with a clearly marked gap (a TODO comment),
+  "task" tells the learner what to implement (in language "${lang}"), "solution" is
+  the complete working version, "expected_output" is the EXACT stdout of the solution.
+  HARD RULES for code: self-contained single file; standard library only — no
+  third-party packages, no file or network access, no input()/readline prompts
+  (provide stdin via the "stdin" param instead); must finish in under 5 seconds;
+  exercises must print DETERMINISTIC output (no randomness, time, or hash-order
+  dependence). Java: any class name works (single-file launcher). Prefer "code"
+  over "steps" whenever the learner should RUN the code, not just read it.`
+      : "";
   return `TEMPLATE WIDGETS (type "interactive"): pick from this FIXED catalog — you supply
 ONLY parameters; the app renders the UI natively. Use 0-2 per submodule, only where
 interaction genuinely aids learning. All learner-visible strings in language "${lang}".
@@ -390,7 +466,7 @@ Widget shape: {"id":"int-1","type":"interactive","template":"<name>","title":"<s
 - categorize — sort items into 2-4 buckets, then check.
   params: {"prompt"?,"buckets":[2-4 strings],"items":[{"text","bucket":<index>}]} (4-10 items)
 - flipcards — a small flip-through card deck (vocabulary, term/definition).
-  params: {"cards":[{"front","back"}]} (3-8 cards)
+  params: {"cards":[{"front","back"}]} (3-8 cards)${codeEntry}
 Pick by pedagogy: quiz/fillblank for recall, steps for procedures, match/categorize
 for relationships, order for sequences, slider for quantitative intuition, flipcards
 for vocabulary. Do NOT invent other templates or extra param fields. Do NOT write

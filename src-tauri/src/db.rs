@@ -51,6 +51,11 @@ pub struct Course {
     /// Learner profile (level/goals/time/prior knowledge), distinct from the
     /// cost/quality generation_profile. JSON, set by the wizard/diagnostic.
     pub learner_profile: Option<serde_json::Value>,
+    /// Set when the course was spawned from a roadmap skill.
+    pub roadmap_id: Option<String>,
+    pub roadmap_skill: Option<String>,
+    /// User-attached custom MCP server ids (JSON array) used during generation.
+    pub mcp_servers: Option<serde_json::Value>,
 }
 
 pub const DEFAULT_COURSE_FORMAT: &str = "academic_course";
@@ -59,11 +64,12 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
     match value.map(str::trim) {
         Some("mini_module") => "mini_module",
         Some("podcast_series") => "podcast_series",
+        Some("single_lesson") => "single_lesson",
         Some("academic_course") | _ => DEFAULT_COURSE_FORMAT,
     }
 }
 
-const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category, generation_profile, learner_profile";
+const COURSE_COLS: &str = "id, topic, title, language, course_format, status, agent, created_at, updated_at, catalog_origin_id, catalog_version, catalog_synced_at, space_id, strict_sources, translated_from, category, generation_profile, learner_profile, roadmap_id, roadmap_skill, mcp_servers";
 
 fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
     Ok(Course {
@@ -89,7 +95,26 @@ fn row_to_course(r: &rusqlite::Row) -> rusqlite::Result<Course> {
         learner_profile: r
             .get::<_, Option<String>>(17)?
             .and_then(|s| serde_json::from_str(&s).ok()),
+        roadmap_id: r.get(18)?,
+        roadmap_skill: r.get(19)?,
+        mcp_servers: r
+            .get::<_, Option<String>>(20)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
+}
+
+/// Set the course's attached custom MCP server ids (JSON array, or NULL).
+pub fn set_course_mcp_servers(
+    conn: &Connection,
+    course_id: &str,
+    ids_json: Option<&str>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET mcp_servers = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![course_id, ids_json, now],
+    )?;
+    Ok(())
 }
 
 /// Insert a translated copy of `source` in `language`, linked via translated_from.
@@ -157,6 +182,7 @@ pub fn list_courses(conn: &Connection) -> Result<Vec<Course>, rusqlite::Error> {
     rows.collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn insert_course(
     conn: &Connection,
     id: &str,
@@ -167,10 +193,12 @@ pub fn insert_course(
     now: i64,
     space_id: Option<&str>,
     strict_sources: Option<bool>,
+    roadmap_id: Option<&str>,
+    roadmap_skill: Option<&str>,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO courses (id, topic, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources) \
-         VALUES (?1, ?2, ?3, ?4, 'wizard', ?5, ?6, ?6, ?7, ?8)",
+        "INSERT INTO courses (id, topic, language, course_format, status, agent, created_at, updated_at, space_id, strict_sources, roadmap_id, roadmap_skill) \
+         VALUES (?1, ?2, ?3, ?4, 'wizard', ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             id,
             topic,
@@ -180,6 +208,8 @@ pub fn insert_course(
             now,
             space_id,
             strict_sources.map(|b| b as i64),
+            roadmap_id,
+            roadmap_skill,
         ],
     )?;
     Ok(())
@@ -943,6 +973,243 @@ pub fn set_space_strict(
 pub fn delete_space(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM spaces WHERE id = ?1", [id])?;
     Ok(())
+}
+
+// ===== Roadmaps =====
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Roadmap {
+    pub id: String,
+    pub topic: String,
+    pub title: Option<String>,
+    pub language: String,
+    /// 'wizard' | 'generating' | 'ready' | 'failed'
+    pub status: String,
+    pub agent: String,
+    /// Whole roadmap body: { stages: [{ id, title, summary, nodes: [...] }] }
+    pub content: Option<serde_json::Value>,
+    /// Persisted adaptive-wizard dialog (answered/current/done/pending).
+    pub wizard: Option<serde_json::Value>,
+    /// Refinement chat: [{id, ts, role, text, content?, accepted?}].
+    pub chat: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+const ROADMAP_COLS: &str =
+    "id, topic, title, language, status, agent, content, wizard, chat, error, created_at, updated_at";
+
+fn row_to_roadmap(r: &rusqlite::Row) -> rusqlite::Result<Roadmap> {
+    Ok(Roadmap {
+        id: r.get(0)?,
+        topic: r.get(1)?,
+        title: r.get(2)?,
+        language: r.get(3)?,
+        status: r.get(4)?,
+        agent: r.get(5)?,
+        content: r
+            .get::<_, Option<String>>(6)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        wizard: r
+            .get::<_, Option<String>>(7)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        chat: r
+            .get::<_, Option<String>>(8)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        error: r.get(9)?,
+        created_at: r.get(10)?,
+        updated_at: r.get(11)?,
+    })
+}
+
+pub fn list_roadmaps(conn: &Connection) -> Result<Vec<Roadmap>, rusqlite::Error> {
+    let sql = format!("SELECT {ROADMAP_COLS} FROM roadmaps ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_roadmap)?;
+    rows.collect()
+}
+
+pub fn get_roadmap(conn: &Connection, id: &str) -> Result<Option<Roadmap>, rusqlite::Error> {
+    let sql = format!("SELECT {ROADMAP_COLS} FROM roadmaps WHERE id = ?1");
+    conn.query_row(&sql, [id], row_to_roadmap)
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+pub fn insert_roadmap(
+    conn: &Connection,
+    id: &str,
+    topic: &str,
+    language: &str,
+    agent: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO roadmaps (id, topic, language, status, agent, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, 'wizard', ?4, ?5, ?5)",
+        rusqlite::params![id, topic, language, agent, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_roadmap_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    error: Option<&str>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE roadmaps SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
+        rusqlite::params![id, status, error, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_roadmap_title(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE roadmaps SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, title, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_roadmap_wizard(
+    conn: &Connection,
+    id: &str,
+    wizard_json: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE roadmaps SET wizard = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, wizard_json, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_roadmap_content(
+    conn: &Connection,
+    id: &str,
+    content_json: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE roadmaps SET content = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, content_json, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_roadmap_chat(
+    conn: &Connection,
+    id: &str,
+    chat_json: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE roadmaps SET chat = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, chat_json, now],
+    )?;
+    Ok(())
+}
+
+/// Link or unlink a course to a roadmap skill (None/None clears the link).
+pub fn set_course_roadmap_link(
+    conn: &Connection,
+    course_id: &str,
+    roadmap_id: Option<&str>,
+    roadmap_skill: Option<&str>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE courses SET roadmap_id = ?2, roadmap_skill = ?3, updated_at = ?4 WHERE id = ?1",
+        rusqlite::params![course_id, roadmap_id, roadmap_skill, now],
+    )?;
+    Ok(())
+}
+
+/// Drop manual done-marks for skills that no longer exist in the content
+/// (called after a refinement replaces the roadmap body).
+pub fn prune_done_skills(
+    conn: &Connection,
+    roadmap_id: &str,
+    alive_ids: &[String],
+) -> Result<(), rusqlite::Error> {
+    let existing = list_done_skills(conn, roadmap_id)?;
+    for id in existing {
+        if !alive_ids.contains(&id) {
+            conn.execute(
+                "DELETE FROM roadmap_skill_done WHERE roadmap_id = ?1 AND skill_id = ?2",
+                rusqlite::params![roadmap_id, id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn delete_roadmap(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    // Orphan linked courses explicitly — the link is user-visible on skills.
+    conn.execute(
+        "UPDATE courses SET roadmap_id = NULL, roadmap_skill = NULL WHERE roadmap_id = ?1",
+        [id],
+    )?;
+    conn.execute("DELETE FROM roadmaps WHERE id = ?1", [id])?; // skill_done cascades
+    Ok(())
+}
+
+pub fn set_roadmap_skill_done(
+    conn: &Connection,
+    roadmap_id: &str,
+    skill_id: &str,
+    done: bool,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    if done {
+        conn.execute(
+            "INSERT OR IGNORE INTO roadmap_skill_done (roadmap_id, skill_id, done_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![roadmap_id, skill_id, now],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM roadmap_skill_done WHERE roadmap_id = ?1 AND skill_id = ?2",
+            rusqlite::params![roadmap_id, skill_id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE roadmaps SET updated_at = ?2 WHERE id = ?1",
+        rusqlite::params![roadmap_id, now],
+    )?;
+    Ok(())
+}
+
+pub fn list_done_skills(
+    conn: &Connection,
+    roadmap_id: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt =
+        conn.prepare("SELECT skill_id FROM roadmap_skill_done WHERE roadmap_id = ?1")?;
+    let rows = stmt.query_map([roadmap_id], |r| r.get(0))?;
+    rows.collect()
+}
+
+pub fn list_roadmap_courses(
+    conn: &Connection,
+    roadmap_id: &str,
+) -> Result<Vec<Course>, rusqlite::Error> {
+    let sql =
+        format!("SELECT {COURSE_COLS} FROM courses WHERE roadmap_id = ?1 ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([roadmap_id], row_to_course)?;
+    rows.collect()
 }
 
 const SOURCE_COLS: &str =

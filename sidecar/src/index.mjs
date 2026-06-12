@@ -18,6 +18,7 @@ import process from "node:process";
 import * as claude from "./agents/claude.mjs";
 import * as codex from "./agents/codex.mjs";
 import * as devlog from "./lib/devlog.mjs";
+import { probeMcp } from "./lib/mcp-probe.mjs";
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 const log = (...args) => process.stderr.write("[sidecar] " + args.join(" ") + "\n");
@@ -51,6 +52,11 @@ const methods = {
   wizard_next_question: async (params, ctx) => pickAgent(params).wizardNextQuestion(params, ctx),
   suggest_course_idea: async (params, ctx) => pickAgent(params).suggestCourseIdea(params, ctx),
   build_structure: async (params, ctx) => pickAgent(params).buildStructure(params, ctx),
+  build_roadmap: async (params, ctx) => pickAgent(params).buildRoadmap(params, ctx),
+  roadmap_node_quiz: async (params, ctx) => pickAgent(params).roadmapNodeQuiz(params, ctx),
+  refine_roadmap: async (params, ctx) => pickAgent(params).refineRoadmap(params, ctx),
+  discover_mcp: async (params, ctx) => pickAgent(params).discoverMcp(params, ctx),
+  probe_mcp: async (params, ctx) => probeMcp(params, ctx),
   refine_structure: async (params, ctx) => pickAgent(params).refineStructure(params, ctx),
   generate_submodule: async (params) => pickAgent(params).generateSubmodule(params),
   submodule_draft: async (params, ctx) => pickAgent(params).submoduleDraft(params, ctx),

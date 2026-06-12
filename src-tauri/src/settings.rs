@@ -45,6 +45,43 @@ pub struct Settings {
     /// override per-course; default == today's behavior.
     #[serde(default)]
     pub generation_profile: GenerationProfile,
+    /// Per-agent kill switches: when false the agent is reported unavailable
+    /// and hidden from pickers/suggestions. `None` means enabled.
+    #[serde(default)]
+    pub agent_claude_enabled: Option<bool>,
+    #[serde(default)]
+    pub agent_codex_enabled: Option<bool>,
+    /// User-registered third-party MCP servers (attachable to courses during
+    /// generation). Adding one is an explicit code-execution approval: the
+    /// command is shown verbatim in the UI before saving.
+    #[serde(default)]
+    pub custom_mcp_servers: Vec<CustomMcpServer>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CustomMcpServer {
+    /// Slug used as the MCP server name (tool prefix mcp__<id>__...).
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// KEY=VALUE pairs (API keys etc.) passed as the server's environment.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Tool names discovered by the probe (without the mcp__ prefix); used
+    /// for allowlisting. Empty = allow the whole server.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Where the server was found (registry/GitHub page) — provenance.
+    #[serde(default)]
+    pub source_url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Per-backend model + reasoning choices for each kind of task. Empty
@@ -271,7 +308,11 @@ impl GenerationProfile {
     pub fn draft_research_max_turns(&self, category: Option<&str>, has_pack: bool) -> u32 {
         let full = self.research_max_turns(category);
         if has_pack {
-            (full / 2).max(2)
+            // The pack covers fact research, but the draft still spends turns
+            // hunting widgets (videos with quality signals, real screenshots),
+            // so the halved budget needs a floor — 5 turns was hitting the
+            // "maximum number of turns" error on balanced tier.
+            (full / 2).max(8).min(full)
         } else {
             full
         }
@@ -599,6 +640,69 @@ impl SettingsState {
         {
             let mut guard = self.inner.lock().expect("settings lock");
             guard.image_generation = Some(enabled);
+        }
+        self.persist()
+    }
+
+    /// Whether the agent is enabled in settings ("claude" | "codex").
+    /// Defaults to on; independent of whether the agent's CLI is installed.
+    pub fn agent_enabled(&self, agent: &str) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| match agent {
+                "claude" => s.agent_claude_enabled,
+                "codex" => s.agent_codex_enabled,
+                _ => None,
+            })
+            .unwrap_or(true)
+    }
+
+    pub fn set_agent_enabled(&self, agent: &str, enabled: bool) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            match agent {
+                "claude" => guard.agent_claude_enabled = Some(enabled),
+                "codex" => guard.agent_codex_enabled = Some(enabled),
+                _ => {}
+            }
+        }
+        self.persist()
+    }
+
+    pub fn custom_mcp_servers(&self) -> Vec<CustomMcpServer> {
+        self.inner
+            .lock()
+            .map(|s| s.custom_mcp_servers.clone())
+            .unwrap_or_default()
+    }
+
+    /// Insert or replace (by id) a custom MCP server.
+    pub fn upsert_custom_mcp(&self, server: CustomMcpServer) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.custom_mcp_servers.retain(|s| s.id != server.id);
+            guard.custom_mcp_servers.push(server);
+        }
+        self.persist()
+    }
+
+    pub fn delete_custom_mcp(&self, id: &str) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.custom_mcp_servers.retain(|s| s.id != id);
+        }
+        self.persist()
+    }
+
+    pub fn set_custom_mcp_enabled(&self, id: &str, enabled: bool) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            for s in guard.custom_mcp_servers.iter_mut() {
+                if s.id == id {
+                    s.enabled = enabled;
+                }
+            }
         }
         self.persist()
     }

@@ -8,7 +8,9 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+mod coderun;
 mod courses;
+mod roadmaps;
 mod catalog;
 mod db;
 mod events;
@@ -59,6 +61,7 @@ fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String>
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn create_course(
     state: tauri::State<'_, Arc<Db>>,
     topic: String,
@@ -67,6 +70,8 @@ fn create_course(
     agent: Option<String>,
     space_id: Option<String>,
     strict: Option<bool>,
+    roadmap_id: Option<String>,
+    roadmap_skill: Option<String>,
 ) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| "claude".to_string());
     if agent != "claude" && agent != "codex" {
@@ -78,9 +83,28 @@ fn create_course(
     let space = space_id.as_deref().filter(|s| !s.trim().is_empty());
     // Per-course strict override only matters for space-scoped courses.
     let strict = if space.is_some() { strict } else { None };
+    let roadmap = roadmap_id.as_deref().filter(|s| !s.trim().is_empty());
+    // A skill link only makes sense within a roadmap.
+    let skill = if roadmap.is_some() {
+        roadmap_skill.as_deref().filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    db::insert_course(&conn, &id, &topic, &language, course_format, &agent, now, space, strict)
-        .map_err(|e| e.to_string())?;
+    db::insert_course(
+        &conn,
+        &id,
+        &topic,
+        &language,
+        course_format,
+        &agent,
+        now,
+        space,
+        strict,
+        roadmap,
+        skill,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -517,6 +541,7 @@ fn start_build_structure(
     let cid = course_id.clone();
     let agent = course.agent.clone();
     let gen_profile = gen_profile_json(&profile, course.category.as_deref());
+    let custom_mcp = course_custom_mcp(&settings_state, &course);
 
     thread::spawn(move || {
         let params = json!({
@@ -532,6 +557,7 @@ fn start_build_structure(
             "spaceStrict": space_strict,
             "genProfile": gen_profile,
             "learnerProfile": course.learner_profile,
+            "customMcp": custom_mcp,
         });
         // Durability: the planning agent can fail (timeout, bad JSON, transient
         // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the
@@ -585,6 +611,680 @@ fn start_build_structure(
         emit_job_event(&app2, &cid, "build_structure", payload);
     });
     Ok(())
+}
+
+// ===== Roadmaps =====
+
+#[tauri::command]
+fn create_roadmap(
+    state: tauri::State<'_, Arc<Db>>,
+    topic: String,
+    language: String,
+    agent: Option<String>,
+) -> Result<db::Roadmap, String> {
+    let agent = agent.unwrap_or_else(|| "claude".to_string());
+    if agent != "claude" && agent != "codex" {
+        return Err(format!("unknown agent: {agent}"));
+    }
+    let topic = topic.trim().to_string();
+    if topic.is_empty() {
+        return Err("topic must not be empty".to_string());
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = now_unix_secs()?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::insert_roadmap(&conn, &id, &topic, &language, &agent, now).map_err(|e| e.to_string())?;
+    db::get_roadmap(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "roadmap not found after insert".to_string())
+}
+
+/// Roadmaps with lightweight skill progress (done/total) for ready ones —
+/// powers the home cards and the roadmaps list.
+#[tauri::command]
+fn list_roadmaps(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<serde_json::Value>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmaps = db::list_roadmaps(&conn).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(roadmaps.len());
+    for r in roadmaps {
+        let mut v = serde_json::to_value(&r).map_err(|e| e.to_string())?;
+        if r.status == "ready" && r.content.is_some() {
+            let ids = roadmap_skill_ids(&r);
+            let skills = compute_roadmap_skills(&conn, &r.id)?;
+            let done = ids
+                .iter()
+                .filter(|id| skills.get(*id).map(|s| s.state == "done").unwrap_or(false))
+                .count();
+            if let Some(map) = v.as_object_mut() {
+                map.insert("done_skills".into(), json!(done));
+                map.insert("total_skills".into(), json!(ids.len()));
+            }
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn delete_roadmap(state: tauri::State<'_, Arc<Db>>, roadmap_id: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::delete_roadmap(&conn, &roadmap_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_roadmap_wizard_dialog(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmap = db::get_roadmap(&conn, &roadmap_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?;
+    Ok(roadmap.wizard.unwrap_or_else(|| json!({})))
+}
+
+/// Sibling of wizard_next_question for roadmaps: same sidecar method with
+/// courseFormat "roadmap" (a short 1-3 question interview); dialog persisted
+/// in the roadmaps.wizard column instead of course files.
+#[tauri::command]
+async fn roadmap_wizard_next_question(
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    roadmap_id: String,
+    answered: Vec<courses::QnA>,
+) -> Result<serde_json::Value, String> {
+    let db = db_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let roadmap = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_roadmap(&conn, &roadmap_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?
+        };
+        let answered_json = serde_json::to_value(&answered).unwrap_or_else(|_| json!([]));
+
+        // Hard cap a bit above the 3-question ceiling of the short interview.
+        if answered.len() >= 5 {
+            let dialog = json!({ "answered": answered_json, "current": Value::Null, "done": true });
+            if let Ok(conn) = db.0.lock() {
+                let _ = db::set_roadmap_wizard(
+                    &conn,
+                    &roadmap_id,
+                    &dialog.to_string(),
+                    now_unix_secs()?,
+                );
+            }
+            return Ok(json!({ "done": true }));
+        }
+
+        // Durability: persist the just-submitted answers BEFORE the slow,
+        // fallible sidecar call so a crash/remount resumes instead of restarting.
+        {
+            let pending = json!({
+                "answered": answered_json,
+                "current": Value::Null,
+                "done": false,
+                "pending": true,
+            });
+            if let Ok(conn) = db.0.lock() {
+                let _ = db::set_roadmap_wizard(
+                    &conn,
+                    &roadmap_id,
+                    &pending.to_string(),
+                    now_unix_secs()?,
+                );
+            }
+        }
+
+        let model_config = settings.stage_model(&roadmap.agent, "utility");
+        let params = json!({
+            "backend": roadmap.agent,
+            "topic": roadmap.topic,
+            "language": roadmap.language,
+            "courseFormat": "roadmap",
+            "answered": answered_json,
+            "modelConfig": model_config,
+        });
+        let step = sidecar
+            .call_with_progress(
+                "wizard_next_question",
+                params,
+                Duration::from_secs(600),
+                |_p: sidecar::ProgressPayload| {},
+            )
+            .map_err(|e| e.to_string())?;
+
+        // First question carries the generated roadmap title — persist it.
+        if answered.is_empty() {
+            if let Some(title) = generated_course_title(&step) {
+                if let Ok(conn) = db.0.lock() {
+                    if let Ok(now) = now_unix_secs() {
+                        let _ = db::set_roadmap_title(&conn, &roadmap_id, &title, now);
+                    }
+                }
+            }
+        }
+
+        let current = step.get("question").cloned().unwrap_or(Value::Null);
+        let done = step.get("done").and_then(Value::as_bool).unwrap_or(false) || current.is_null();
+        let dialog = json!({
+            "title": step.get("title").cloned().unwrap_or(Value::Null),
+            "answered": answered_json,
+            "current": if done { Value::Null } else { current },
+            "done": done,
+        });
+        if let Ok(conn) = db.0.lock() {
+            let _ = db::set_roadmap_wizard(&conn, &roadmap_id, &dialog.to_string(), now_unix_secs()?);
+        }
+        Ok(step)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn save_roadmap_wizard_answers(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    roadmap_id: String,
+    answers: Vec<courses::QnA>,
+) -> Result<(), String> {
+    let roadmap = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let answered_json = serde_json::to_value(&answers).unwrap_or_else(|_| json!([]));
+        let dialog = json!({ "answered": answered_json, "current": Value::Null, "done": true });
+        let now = now_unix_secs()?;
+        db::set_roadmap_wizard(&conn, &roadmap_id, &dialog.to_string(), now)
+            .map_err(|e| e.to_string())?;
+        db::set_roadmap_status(&conn, &roadmap_id, "generating", None, now)
+            .map_err(|e| e.to_string())?;
+        db::get_roadmap(&conn, &roadmap_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?
+    };
+    spawn_build_roadmap(
+        app,
+        db_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        settings_state.inner().clone(),
+        roadmap,
+    );
+    Ok(())
+}
+
+/// Retry entry point: flips failed → generating and relaunches the build.
+#[tauri::command]
+fn start_build_roadmap(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    roadmap_id: String,
+) -> Result<(), String> {
+    let roadmap = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::set_roadmap_status(&conn, &roadmap_id, "generating", None, now_unix_secs()?)
+            .map_err(|e| e.to_string())?;
+        db::get_roadmap(&conn, &roadmap_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?
+    };
+    spawn_build_roadmap(
+        app,
+        db_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        settings_state.inner().clone(),
+        roadmap,
+    );
+    Ok(())
+}
+
+fn spawn_build_roadmap(
+    app: AppHandle,
+    db: Arc<Db>,
+    sidecar: Arc<Sidecar>,
+    settings: Arc<SettingsState>,
+    roadmap: db::Roadmap,
+) {
+    let rid = roadmap.id.clone();
+    let agent = roadmap.agent.clone();
+    let model_config = settings.stage_model(&roadmap.agent, "planning");
+    let answers = roadmaps::answers_from_wizard(&roadmap);
+    let wizard_md = roadmaps::render_roadmap_wizard_md(&roadmap, &answers);
+    thread::spawn(move || {
+        let params = json!({
+            "backend": agent,
+            "topic": roadmap.topic,
+            "language": roadmap.language,
+            "wizardMd": wizard_md,
+            "modelConfig": model_config,
+        });
+        let result = retry_stage(
+            STAGE_MAX_ATTEMPTS,
+            |next, err| {
+                emit_progress_event(
+                    &app,
+                    &rid,
+                    &rid,
+                    "roadmap",
+                    &format!("повтор {next}/{STAGE_MAX_ATTEMPTS}"),
+                    Some(err),
+                );
+            },
+            || {
+                let app2 = app.clone();
+                let rid2 = rid.clone();
+                let cb = move |p: sidecar::ProgressPayload| {
+                    emit_progress_event(&app2, &rid2, &rid2, "roadmap", &p.label, p.detail.as_deref());
+                };
+                let v = sidecar
+                    .call_with_progress("build_roadmap", params.clone(), Duration::from_secs(4200), cb)
+                    .map_err(|e| e.to_string())?;
+                let raw = serde_json::from_value::<roadmaps::SidecarRoadmap>(v)
+                    .map_err(|e| format!("sidecar payload: {e}"))?;
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                let now = now_unix_secs()?;
+                roadmaps::install_roadmap(&conn, &rid, raw, now)?;
+                Ok::<(), String>(())
+            },
+        );
+        let payload = match result {
+            Ok(()) => json!({ "ok": true }),
+            Err(e) => {
+                if let Ok(conn) = db.0.lock() {
+                    let _ = db::set_roadmap_status(
+                        &conn,
+                        &rid,
+                        "failed",
+                        Some(&e),
+                        now_unix_secs().unwrap_or(0),
+                    );
+                }
+                json!({ "ok": false, "error": e, "exhausted": true, "agent": agent })
+            }
+        };
+        emit_job_event(&app, &rid, "build_roadmap", payload);
+    });
+}
+
+#[derive(serde::Serialize)]
+struct RoadmapSkillStatus {
+    /// "open" | "in_progress" | "done"
+    state: String,
+    manual: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    course_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    course_status: Option<String>,
+    percent: u32,
+    total: u32,
+    verified: u32,
+}
+
+/// Compute per-skill statuses for a roadmap: best linked course per skill
+/// (completed = all submodules test_passed; podcast courses, which have no
+/// tests, count when fully generated), overlaid with manual done-marks.
+fn compute_roadmap_skills(
+    conn: &rusqlite::Connection,
+    roadmap_id: &str,
+) -> Result<std::collections::HashMap<String, RoadmapSkillStatus>, String> {
+    let mut skills: std::collections::HashMap<String, RoadmapSkillStatus> =
+        std::collections::HashMap::new();
+    for course in db::list_roadmap_courses(conn, roadmap_id).map_err(|e| e.to_string())? {
+        let Some(skill_id) = course.roadmap_skill.clone() else {
+            continue;
+        };
+        let (total, ready, verified) = courses::load_structure(conn, &course.id)
+            .map(|s| {
+                let mut total = 0u32;
+                let mut ready = 0u32;
+                let mut verified = 0u32;
+                for m in &s.modules {
+                    for sub in &m.submodules {
+                        total += 1;
+                        if sub.generation_state == "ready" {
+                            ready += 1;
+                        }
+                        if sub.test_passed {
+                            verified += 1;
+                        }
+                    }
+                }
+                (total, ready, verified)
+            })
+            .unwrap_or((0, 0, 0));
+        let completed = total > 0
+            && (verified == total
+                || (course.course_format == "podcast_series" && ready == total));
+        let percent = if total == 0 { 0 } else { verified * 100 / total };
+        let cand = RoadmapSkillStatus {
+            state: if completed { "done" } else { "in_progress" }.to_string(),
+            manual: false,
+            course_id: Some(course.id),
+            course_status: Some(course.status),
+            percent,
+            total,
+            verified,
+        };
+        // Keep the best course per skill: completed first, then highest percent
+        // (list is updated_at DESC, so ties keep the most recent).
+        match skills.get(&skill_id) {
+            Some(prev)
+                if prev.state == "done"
+                    || (cand.state != "done" && prev.percent >= cand.percent) => {}
+            _ => {
+                skills.insert(skill_id, cand);
+            }
+        }
+    }
+    for id in db::list_done_skills(conn, roadmap_id).map_err(|e| e.to_string())? {
+        skills
+            .entry(id)
+            .and_modify(|s| {
+                s.state = "done".to_string();
+                s.manual = true;
+            })
+            .or_insert(RoadmapSkillStatus {
+                state: "done".to_string(),
+                manual: true,
+                course_id: None,
+                course_status: None,
+                percent: 0,
+                total: 0,
+                verified: 0,
+            });
+    }
+    Ok(skills)
+}
+
+/// All skill ids present in the roadmap content, in document order.
+fn roadmap_skill_ids(roadmap: &db::Roadmap) -> Vec<String> {
+    let Some(content) = roadmap.content.as_ref() else {
+        return vec![];
+    };
+    let Ok(parsed) = serde_json::from_value::<roadmaps::RoadmapContent>(content.clone()) else {
+        return vec![];
+    };
+    parsed
+        .stages
+        .iter()
+        .flat_map(|st| st.nodes.iter())
+        .flat_map(|n| n.skills.iter())
+        .map(|sk| sk.id.clone())
+        .collect()
+}
+
+/// Roadmap + computed per-skill statuses.
+#[tauri::command]
+fn get_roadmap(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmap = db::get_roadmap(&conn, &roadmap_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?;
+    let skills = compute_roadmap_skills(&conn, &roadmap_id)?;
+    Ok(json!({ "roadmap": roadmap, "skills": skills }))
+}
+
+#[tauri::command]
+fn link_course_to_skill(
+    state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    roadmap_id: Option<String>,
+    roadmap_skill: Option<String>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmap = roadmap_id.as_deref().filter(|s| !s.trim().is_empty());
+    let skill = if roadmap.is_some() {
+        roadmap_skill.as_deref().filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    db::set_course_roadmap_link(&conn, &course_id, roadmap, skill, now_unix_secs()?)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_skill_done(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+    skill_id: String,
+    done: bool,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_roadmap_skill_done(&conn, &roadmap_id, &skill_id, done, now_unix_secs()?)
+        .map_err(|e| e.to_string())
+}
+
+/// Diagnostic quiz for one roadmap node — questions tagged by skillId; the
+/// frontend closes skills whose questions were all answered correctly.
+#[tauri::command]
+async fn roadmap_node_quiz(
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    roadmap_id: String,
+    node_id: String,
+) -> Result<serde_json::Value, String> {
+    let db = db_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let roadmap = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_roadmap(&conn, &roadmap_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?
+        };
+        let content = roadmap
+            .content
+            .clone()
+            .ok_or_else(|| "roadmap has no content".to_string())?;
+        let parsed = serde_json::from_value::<roadmaps::RoadmapContent>(content)
+            .map_err(|e| e.to_string())?;
+        let node = parsed
+            .stages
+            .iter()
+            .flat_map(|st| st.nodes.iter())
+            .find(|n| n.id == node_id)
+            .ok_or_else(|| format!("node not found: {node_id}"))?;
+        let model_config = settings.stage_model(&roadmap.agent, "tests");
+        let params = json!({
+            "backend": roadmap.agent,
+            "topic": roadmap.title.clone().unwrap_or_else(|| roadmap.topic.clone()),
+            "language": roadmap.language,
+            "node": node,
+            "modelConfig": model_config,
+        });
+        sidecar
+            .call("roadmap_node_quiz", params, Duration::from_secs(600))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn read_roadmap_chat(roadmap: &db::Roadmap) -> Vec<serde_json::Value> {
+    roadmap
+        .chat
+        .as_ref()
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_roadmap_chat(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmap = db::get_roadmap(&conn, &roadmap_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?;
+    Ok(json!(read_roadmap_chat(&roadmap)))
+}
+
+/// Conversational roadmap refinement (mirrors start_structure_refine): the
+/// user message is appended to roadmaps.chat, the sidecar proposes changes,
+/// the agent reply (optionally carrying a full content proposal) lands in the
+/// chat, and a "refine_roadmap" job event fires.
+#[tauri::command]
+fn start_roadmap_refine(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    roadmap_id: String,
+    user_message: String,
+) -> Result<(), String> {
+    let text = user_message.trim().to_string();
+    if text.is_empty() {
+        return Err("message must be non-empty".to_string());
+    }
+    let (roadmap, mut chat) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let roadmap = db::get_roadmap(&conn, &roadmap_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?;
+        let chat = read_roadmap_chat(&roadmap);
+        (roadmap, chat)
+    };
+    let content = roadmap
+        .content
+        .clone()
+        .ok_or_else(|| "roadmap has no content yet".to_string())?;
+
+    let history: Vec<serde_json::Value> = chat
+        .iter()
+        .filter_map(|m| {
+            let role = m.get("role")?.as_str()?;
+            let text = m.get("text")?.as_str()?;
+            Some(json!({ "role": role, "text": text }))
+        })
+        .collect();
+
+    chat.push(json!({
+        "id": Uuid::new_v4().to_string(),
+        "ts": now_unix_secs()?,
+        "role": "user",
+        "text": text,
+    }));
+    {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        db::set_roadmap_chat(&conn, &roadmap_id, &json!(chat).to_string(), now_unix_secs()?)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let db = db_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let model_config = settings_state.stage_model(&roadmap.agent, "planning");
+    let rid = roadmap_id.clone();
+    thread::spawn(move || {
+        let params = json!({
+            "backend": roadmap.agent,
+            "topic": roadmap.title.clone().unwrap_or_else(|| roadmap.topic.clone()),
+            "language": roadmap.language,
+            "currentContent": content,
+            "chatHistory": history,
+            "userMessage": text,
+            "modelConfig": model_config,
+        });
+        let cb = {
+            let app2 = app.clone();
+            let rid2 = rid.clone();
+            move |p: sidecar::ProgressPayload| {
+                emit_progress_event(&app2, &rid2, &rid2, "roadmap", &p.label, p.detail.as_deref());
+            }
+        };
+        let payload = match sidecar.call_with_progress(
+            "refine_roadmap",
+            params,
+            Duration::from_secs(3000),
+            cb,
+        ) {
+            Ok(v) => {
+                let reply = v
+                    .get("reply")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let proposal = v.get("content").filter(|c| !c.is_null()).cloned();
+                let msg_id = Uuid::new_v4().to_string();
+                let mut msg = json!({
+                    "id": msg_id,
+                    "ts": now_unix_secs().unwrap_or(0),
+                    "role": "agent",
+                    "text": reply,
+                });
+                if let Some(p) = proposal {
+                    msg["content"] = p;
+                }
+                let res = (|| -> Result<(), String> {
+                    let conn = db.0.lock().map_err(|e| e.to_string())?;
+                    let roadmap = db::get_roadmap(&conn, &rid)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| "roadmap gone".to_string())?;
+                    let mut chat = read_roadmap_chat(&roadmap);
+                    chat.push(msg);
+                    db::set_roadmap_chat(
+                        &conn,
+                        &rid,
+                        &json!(chat).to_string(),
+                        now_unix_secs().unwrap_or(0),
+                    )
+                    .map_err(|e| e.to_string())
+                })();
+                match res {
+                    Ok(()) => json!({ "ok": true, "messageId": msg_id }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        };
+        emit_job_event(&app, &rid, "refine_roadmap", payload);
+    });
+    Ok(())
+}
+
+/// Apply an agent-proposed roadmap from the refine chat: validates, preserves
+/// kept item ids, prunes dead done-marks, and marks the message accepted.
+#[tauri::command]
+fn accept_roadmap_refinement(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+    message_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let roadmap = db::get_roadmap(&conn, &roadmap_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("roadmap not found: {roadmap_id}"))?;
+    let mut chat = read_roadmap_chat(&roadmap);
+    let proposal = chat
+        .iter()
+        .find(|m| m.get("id").and_then(|i| i.as_str()) == Some(message_id.as_str()))
+        .and_then(|m| m.get("content"))
+        .filter(|c| !c.is_null())
+        .cloned()
+        .ok_or_else(|| "no proposal in that message".to_string())?;
+    let raw = serde_json::from_value::<roadmaps::RefinedContent>(proposal)
+        .map_err(|e| format!("bad proposal: {e}"))?;
+    let now = now_unix_secs()?;
+    let content = roadmaps::install_refined_content(&conn, &roadmap_id, raw, now)?;
+    for m in chat.iter_mut() {
+        if m.get("id").and_then(|i| i.as_str()) == Some(message_id.as_str()) {
+            m["accepted"] = json!(true);
+        }
+    }
+    let _ = db::set_roadmap_chat(&conn, &roadmap_id, &json!(chat).to_string(), now);
+    Ok(serde_json::to_value(content).map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -866,6 +1566,13 @@ fn spawn_generate_submodule(
     // tree: every lesson prompt carries this, so size matters.
     let structure_value = courses::structure_outline(&structure, &module_id);
 
+    // Course-attached custom MCP servers, resolved against the registry now
+    // (the settings state is on the app handle; the thread gets plain JSON).
+    let custom_mcp = {
+        let settings = app.state::<Arc<SettingsState>>();
+        course_custom_mcp(&settings, &course)
+    };
+
     let app2 = app.clone();
     let cid = course.id.clone();
     let mid = module_id.clone();
@@ -924,6 +1631,7 @@ fn spawn_generate_submodule(
             "genProfile": gen_profile.clone(),
             "learnerProfile": course.learner_profile.clone(),
             "researchPack": research_pack,
+            "customMcp": custom_mcp,
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
@@ -2418,6 +3126,8 @@ struct SettingsStatus {
     gemini_tts_model: String,
     debug_logging: bool,
     image_generation: bool,
+    claude_enabled: bool,
+    codex_enabled: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -2514,6 +3224,19 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
             source: "settings.json".to_string(),
         });
     }
+    for s in state.custom_mcp_servers() {
+        mcp_servers.push(McpServerStatus {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            enabled_for: if s.enabled {
+                vec!["Claude".to_string(), "Codex".to_string()]
+            } else {
+                vec![]
+            },
+            tools: s.tools.clone(),
+            source: "custom".to_string(),
+        });
+    }
     SettingsStatus {
         brave_configured,
         gemini_configured: state.gemini_api_key().is_some(),
@@ -2525,7 +3248,179 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         gemini_tts_model: state.gemini_tts_model(),
         debug_logging: state.debug_logging(),
         image_generation: state.image_generation(),
+        claude_enabled: state.agent_enabled("claude"),
+        codex_enabled: state.agent_enabled("codex"),
     }
+}
+
+// ===== Custom MCP servers =====
+
+/// Resolve the course's attached custom MCP servers (enabled only) into the
+/// sidecar param shape: [{id, name, command, args, env, tools}].
+fn course_custom_mcp(settings: &SettingsState, course: &db::Course) -> serde_json::Value {
+    let Some(ids) = course.mcp_servers.as_ref().and_then(|v| v.as_array()) else {
+        return json!([]);
+    };
+    let ids: Vec<&str> = ids.iter().filter_map(|v| v.as_str()).collect();
+    if ids.is_empty() {
+        return json!([]);
+    }
+    let list: Vec<serde_json::Value> = settings
+        .custom_mcp_servers()
+        .into_iter()
+        .filter(|s| s.enabled && ids.contains(&s.id.as_str()))
+        .map(|s| {
+            let env: serde_json::Map<String, serde_json::Value> =
+                s.env.into_iter().map(|(k, v)| (k, json!(v))).collect();
+            json!({
+                "id": s.id,
+                "name": s.name,
+                "command": s.command,
+                "args": s.args,
+                "env": env,
+                "tools": s.tools,
+            })
+        })
+        .collect();
+    json!(list)
+}
+
+#[tauri::command]
+fn set_course_mcp(
+    db_state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    server_ids: Vec<String>,
+) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let json = if server_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&server_ids).map_err(|e| e.to_string())?)
+    };
+    db::set_course_mcp_servers(&conn, &course_id, json.as_deref(), now_unix_secs()?)
+        .map_err(|e| e.to_string())
+}
+
+fn slugify_mcp_id(name: &str) -> String {
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() { "mcp".to_string() } else { slug }
+}
+
+/// Add (or replace) a user-approved custom MCP server. The frontend shows the
+/// exact command before calling this — saving IS the approval.
+#[tauri::command]
+fn add_custom_mcp(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    tools: Vec<String>,
+    source_url: Option<String>,
+) -> Result<SettingsStatus, String> {
+    let name = name.trim().to_string();
+    let command = command.trim().to_string();
+    if name.is_empty() || command.is_empty() {
+        return Err("name and command are required".to_string());
+    }
+    let server = settings::CustomMcpServer {
+        id: slugify_mcp_id(&name),
+        name,
+        command,
+        args: args.into_iter().filter(|a| !a.trim().is_empty()).collect(),
+        env: env
+            .into_iter()
+            .filter(|(k, _)| !k.trim().is_empty())
+            .collect(),
+        tools,
+        source_url: source_url.unwrap_or_default(),
+        enabled: true,
+    };
+    settings_state.upsert_custom_mcp(server).map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
+}
+
+#[tauri::command]
+fn delete_custom_mcp(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    id: String,
+) -> Result<SettingsStatus, String> {
+    settings_state.delete_custom_mcp(&id).map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
+}
+
+#[tauri::command]
+fn set_custom_mcp_enabled(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    id: String,
+    enabled: bool,
+) -> Result<SettingsStatus, String> {
+    settings_state
+        .set_custom_mcp_enabled(&id, enabled)
+        .map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
+}
+
+/// Spawn an MCP server once and list its tools (validation before saving).
+#[tauri::command]
+async fn probe_mcp_server(
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    command: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+) -> Result<serde_json::Value, String> {
+    let sidecar = sidecar_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env_obj: serde_json::Map<String, serde_json::Value> = env
+            .into_iter()
+            .filter(|(k, _)| !k.trim().is_empty())
+            .map(|(k, v)| (k, json!(v)))
+            .collect();
+        let params = json!({ "command": command, "args": args, "env": env_obj });
+        sidecar
+            .call("probe_mcp", params, Duration::from_secs(120))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Web-research MCP server candidates for a course topic.
+#[tauri::command]
+async fn discover_course_mcp(
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    topic: String,
+    language: String,
+    agent: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let sidecar = sidecar_state.inner().clone();
+    let agent = match agent.as_deref() {
+        Some("codex") => "codex".to_string(),
+        _ => "claude".to_string(),
+    };
+    let model_config = settings_state.stage_model(&agent, "utility");
+    tauri::async_runtime::spawn_blocking(move || {
+        let params = json!({
+            "backend": agent,
+            "topic": topic,
+            "language": language,
+            "modelConfig": model_config,
+        });
+        sidecar
+            .call("discover_mcp", params, Duration::from_secs(600))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(serde::Serialize)]
@@ -2539,10 +3434,12 @@ fn cli_present(cmd: &str) -> bool {
 }
 
 #[tauri::command]
-fn check_agent_availability() -> AgentAvailability {
+fn check_agent_availability(state: tauri::State<'_, Arc<SettingsState>>) -> AgentAvailability {
+    // An agent disabled in settings is reported unavailable, which hides it
+    // from pickers and suggestions everywhere.
     AgentAvailability {
-        claude: cli_present("claude"),
-        codex: cli_present("codex"),
+        claude: cli_present("claude") && state.agent_enabled("claude"),
+        codex: cli_present("codex") && state.agent_enabled("codex"),
     }
 }
 
@@ -3523,6 +4420,90 @@ fn get_assignments(
     Ok(json!({ "assignments": out }))
 }
 
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
+    }
+}
+
+/// Run a code-assignment submission against its IO test cases.
+/// Returns {passed, total, cases:[{idx, pass, hidden, phase, timed_out, expected?, got?, stderr?}]}.
+/// Hidden cases expose only pass/fail — never expected/got — so learners can't
+/// pattern-match the answer.
+fn autograde_code_assignment(
+    assignment: &serde_json::Value,
+    code: &str,
+) -> Result<serde_json::Value, String> {
+    let language = assignment
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("python");
+    let tests = assignment
+        .get("tests")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut cases: Vec<serde_json::Value> = Vec::new();
+    let mut passed = 0u64;
+    // Once compilation fails it fails for every case — don't re-run.
+    let mut compile_stderr: Option<String> = None;
+    for (idx, t) in tests.iter().take(6).enumerate() {
+        let hidden = t.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+        let stdin = t.get("stdin").and_then(|v| v.as_str()).unwrap_or("");
+        let expected = t
+            .get("expected_output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some(stderr) = &compile_stderr {
+            let mut case = json!({
+                "idx": idx, "pass": false, "hidden": hidden,
+                "phase": "compile", "timed_out": false,
+            });
+            if !hidden {
+                case["stderr"] = json!(stderr);
+            }
+            cases.push(case);
+            continue;
+        }
+        let res = coderun::run_code_blocking(language, code, Some(stdin))?;
+        if res.phase == "compile" {
+            let stderr = truncate_chars(res.stderr.trim(), 1000);
+            let mut case = json!({
+                "idx": idx, "pass": false, "hidden": hidden,
+                "phase": "compile", "timed_out": res.timed_out,
+            });
+            if !hidden {
+                case["stderr"] = json!(stderr);
+            }
+            cases.push(case);
+            compile_stderr = Some(stderr);
+            continue;
+        }
+        let pass = !res.timed_out
+            && res.exit_code == Some(0)
+            && coderun::normalize_run_output(&res.stdout)
+                == coderun::normalize_run_output(expected);
+        if pass {
+            passed += 1;
+        }
+        let mut case = json!({
+            "idx": idx, "pass": pass, "hidden": hidden,
+            "phase": "run", "timed_out": res.timed_out,
+        });
+        if !hidden {
+            case["expected"] = json!(expected);
+            case["got"] = json!(truncate_chars(&res.stdout, 2000));
+            if !res.stderr.trim().is_empty() {
+                case["stderr"] = json!(truncate_chars(res.stderr.trim(), 1000));
+            }
+        }
+        cases.push(case);
+    }
+    Ok(json!({ "passed": passed, "total": cases.len(), "cases": cases }))
+}
+
 /// Submit a result for one assignment, run the agent review synchronously, and
 /// return the review. Stores files + appends to the assignment's chat.
 #[tauri::command]
@@ -3540,8 +4521,15 @@ fn submit_assignment(
     text: Option<String>,
     github_url: Option<String>,
     files: Vec<UploadFile>,
+    code: Option<String>,
 ) -> Result<serde_json::Value, String> {
     use base64::Engine as _;
+
+    let is_code = submission_type == "code";
+    let code_text = code.as_deref().unwrap_or("");
+    if is_code && code_text.trim().is_empty() {
+        return Err("empty code submission".to_string());
+    }
 
     let course = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
@@ -3593,6 +4581,23 @@ fn submit_assignment(
         }
     }
 
+    // Code submissions: persist the source for the record, run the IO test
+    // cases, and feed both the code and the autograde into the review.
+    let mut autograde: Option<serde_json::Value> = None;
+    if is_code {
+        let lang = assignment
+            .get("language")
+            .and_then(|v| v.as_str())
+            .unwrap_or("python");
+        if let Some(fname) = coderun::source_file_name(lang) {
+            let dest = uploads_dir.join(fname);
+            if media::save_bytes(code_text.as_bytes(), &dest).is_ok() {
+                saved_files.push(json!({ "name": fname, "path": dest.to_string_lossy() }));
+            }
+        }
+        autograde = Some(autograde_code_assignment(&assignment, code_text)?);
+    }
+
     // Assemble the textual submission (user text + extracted file content).
     let mut sub_text = String::new();
     if let Some(t) = text.as_deref() {
@@ -3600,6 +4605,11 @@ fn submit_assignment(
             sub_text.push_str(t.trim());
             sub_text.push('\n');
         }
+    }
+    if is_code {
+        sub_text.push_str("Submitted code:\n```\n");
+        sub_text.push_str(code_text);
+        sub_text.push_str("\n```\n");
     }
     for t in &extracted_texts {
         sub_text.push('\n');
@@ -3637,7 +4647,7 @@ fn submit_assignment(
         .collect();
 
     // Record the learner's submission turn.
-    let user_turn = json!({
+    let mut user_turn = json!({
         "role": "user",
         "ts": now_ms(),
         "kind": "submission",
@@ -3646,6 +4656,12 @@ fn submit_assignment(
         "files": saved_files,
         "githubUrl": github_url.clone().unwrap_or_default(),
     });
+    if is_code {
+        user_turn["code"] = json!(code_text);
+        if let Some(ag) = &autograde {
+            user_turn["autograde"] = ag.clone();
+        }
+    }
     courses::append_assignment_chat(&paths, &course_id, &module_id, &submodule_id, &assignment_id, &user_turn)
         .map_err(|e| e.to_string())?;
 
@@ -3662,6 +4678,7 @@ fn submit_assignment(
             "text": sub_text,
             "images": image_paths,
             "githubUrl": github_url.clone().unwrap_or_default(),
+            "autograde": autograde,
         },
         "history": history,
         "modelConfig": tests_model,
@@ -3671,7 +4688,16 @@ fn submit_assignment(
         .map_err(|e| e.to_string())?;
 
     // Record the reviewer's turn + update state.
-    let verdict = review.get("verdict").and_then(|v| v.as_str()).unwrap_or("revise");
+    let mut verdict = review.get("verdict").and_then(|v| v.as_str()).unwrap_or("revise");
+    // Hard gate: failed autograde cases always mean "revise", no matter what
+    // the LLM concluded — the test run is the source of truth.
+    if let Some(ag) = &autograde {
+        let p = ag.get("passed").and_then(|v| v.as_u64()).unwrap_or(0);
+        let t = ag.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        if t > 0 && p < t {
+            verdict = "revise";
+        }
+    }
     let status = if verdict == "passed" { "passed" } else { "in_progress" };
     let agent_turn = json!({
         "role": "agent",
@@ -4151,6 +5177,91 @@ fn start_full_course_generation(
     )
 }
 
+/// Single-lesson courses skip structure generation: install a trivial
+/// 1 module x 1 submodule tree locally (no sidecar call) and start
+/// generating immediately. Idempotent — safe to call again after a crash
+/// or double-fired effect: once status is "ready" it reuses the existing
+/// tree and queueing/spawning are no-ops while a job is running.
+#[tauri::command]
+fn start_lesson_generation(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+) -> Result<serde_json::Value, String> {
+    let (course, structure) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let course = db::get_course(&conn, &course_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("course not found: {course_id}"))?;
+        if course.course_format != "single_lesson" {
+            return Err(format!("not a single-lesson course: {course_id}"));
+        }
+        let structure = if course.status == "structuring" {
+            let title = course
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or(&course.topic)
+                .to_string();
+            let raw = courses::SidecarTree {
+                title: None,
+                category: None,
+                research_pack: None,
+                modules: vec![courses::SidecarModule {
+                    title: title.clone(),
+                    summary: None,
+                    submodules: vec![courses::SidecarSubmodule {
+                        title,
+                        summary: None,
+                        prereqs: vec![],
+                    }],
+                }],
+            };
+            courses::install_structure(&conn, &paths_state, &course_id, raw)
+                .map_err(|e| e.to_string())?
+        } else {
+            courses::load_structure(&conn, &course_id).map_err(|e| e.to_string())?
+        };
+        let queued = db::queue_pending_submodules(&conn, &course_id).map_err(|e| e.to_string())?;
+        if queued > 0 {
+            if let Ok(now) = now_unix_secs() {
+                let _ = db::touch_course(&conn, &course_id, now);
+            }
+        }
+        (course, structure)
+    };
+    let writing_model = settings_state.stage_model(&course.agent, "writing");
+    let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let verify_model = settings_state.stage_model(&course.agent, "verify");
+    spawn_next_queued_submodule(
+        &app,
+        db_state.inner().clone(),
+        paths_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        course,
+        settings_state.brave_api_key(),
+        settings_state.gemini_api_key(),
+        writing_model,
+        tests_model,
+        verify_model,
+        settings_state.gemini_image_model(),
+        settings_state.catalog_upload_token(),
+    )?;
+    let module = structure
+        .modules
+        .first()
+        .ok_or_else(|| "empty structure".to_string())?;
+    let sub = module
+        .submodules
+        .first()
+        .ok_or_else(|| "empty module".to_string())?;
+    Ok(json!({ "moduleId": module.id, "submoduleId": sub.id }))
+}
+
 #[tauri::command]
 fn accept_structure_refinement(
     db_state: tauri::State<'_, Arc<Db>>,
@@ -4334,6 +5445,21 @@ fn set_image_generation(
 ) -> Result<bool, String> {
     settings_state.set_image_generation(enabled).map_err(|e| e.to_string())?;
     Ok(enabled)
+}
+
+#[tauri::command]
+fn set_agent_enabled(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    agent: String,
+    enabled: bool,
+) -> Result<SettingsStatus, String> {
+    if agent != "claude" && agent != "codex" {
+        return Err(format!("unknown agent: {agent}"));
+    }
+    settings_state
+        .set_agent_enabled(&agent, enabled)
+        .map_err(|e| e.to_string())?;
+    Ok(settings_status(&settings_state))
 }
 
 // ===== Course translation (linked copy in another language) =====
@@ -4712,8 +5838,8 @@ fn translate_course_content(
         let widgets_path = dir.join("widgets.json");
         if let Ok(ws) = std::fs::read_to_string(&widgets_path) {
             if let Ok(mut widgets) = serde_json::from_str::<serde_json::Value>(&ws) {
-                const CAPTION_FIELDS: [&str; 7] =
-                    ["description", "alt", "caption", "title", "why", "question", "answer"];
+                const CAPTION_FIELDS: [&str; 8] =
+                    ["description", "alt", "caption", "title", "why", "question", "answer", "focus"];
                 if let Some(obj) = widgets.as_object_mut() {
                     let mut wstr: Vec<String> = Vec::new();
                     let mut collect = |w: &serde_json::Value| {
@@ -6811,6 +7937,20 @@ pub fn run() {
             save_wizard_answers,
             wizard_next_question,
             start_build_structure,
+            create_roadmap,
+            list_roadmaps,
+            get_roadmap,
+            delete_roadmap,
+            roadmap_wizard_next_question,
+            get_roadmap_wizard_dialog,
+            save_roadmap_wizard_answers,
+            start_build_roadmap,
+            set_skill_done,
+            link_course_to_skill,
+            roadmap_node_quiz,
+            get_roadmap_chat,
+            start_roadmap_refine,
+            accept_roadmap_refinement,
             get_structure,
             save_structure,
             list_chat,
@@ -6819,6 +7959,7 @@ pub fn run() {
             start_generate_submodule,
             start_first_pending_submodule,
             start_full_course_generation,
+            start_lesson_generation,
             translate_course,
             ask_course_assistant,
             list_notes,
@@ -6879,6 +8020,16 @@ pub fn run() {
             clear_dev_log,
             set_debug_logging,
             set_image_generation,
+            set_agent_enabled,
+            add_custom_mcp,
+            delete_custom_mcp,
+            set_custom_mcp_enabled,
+            probe_mcp_server,
+            discover_course_mcp,
+            set_course_mcp,
+            coderun::check_code_runtimes,
+            coderun::run_code_snippet,
+            coderun::trace_python_snippet,
             search_widget_candidates,
             set_widget_image,
             generate_widget_image,

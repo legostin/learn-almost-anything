@@ -224,13 +224,15 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             s("agent"),
             s("spaceId").or_else(|| s("space_id")),
             None,
+            s("roadmapId").or_else(|| s("roadmap_id")),
+            s("roadmapSkill").or_else(|| s("roadmap_skill")),
         )?),
         "set_course_agent" => {
             crate::set_course_agent(app.state(), req("courseId")?, req("agent")?)?;
             Ok(Value::Null)
         }
         "get_settings_status" => to_val(crate::get_settings_status(app.state())),
-        "check_agent_availability" => to_val(crate::check_agent_availability()),
+        "check_agent_availability" => to_val(crate::check_agent_availability(app.state())),
         "set_brave_key" => to_val(crate::set_brave_key(app.state(), s("key"))?),
         "set_gemini_key" => to_val(crate::set_gemini_key(app.state(), s("key"))?),
         "set_catalog_upload_token" => {
@@ -379,6 +381,94 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             req("courseId")?,
             from_arg(a, "answered", json!([]))?,
         ))?),
+        "list_roadmaps" => to_val(crate::list_roadmaps(app.state())?),
+        "get_roadmap" => to_val(crate::get_roadmap(app.state(), req("roadmapId")?)?),
+        "create_roadmap" => to_val(crate::create_roadmap(
+            app.state(),
+            req("topic")?,
+            req("language")?,
+            s("agent"),
+        )?),
+        "delete_roadmap" => {
+            crate::delete_roadmap(app.state(), req("roadmapId")?)?;
+            Ok(Value::Null)
+        }
+        "roadmap_wizard_next_question" => to_val(tauri::async_runtime::block_on(
+            crate::roadmap_wizard_next_question(
+                app.state(),
+                app.state(),
+                app.state(),
+                req("roadmapId")?,
+                from_arg(a, "answered", json!([]))?,
+            ),
+        )?),
+        "get_roadmap_wizard_dialog" => to_val(crate::get_roadmap_wizard_dialog(
+            app.state(),
+            req("roadmapId")?,
+        )?),
+        "save_roadmap_wizard_answers" => {
+            crate::save_roadmap_wizard_answers(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                req("roadmapId")?,
+                from_arg(a, "answers", json!([]))?,
+            )?;
+            Ok(Value::Null)
+        }
+        "start_build_roadmap" => {
+            crate::start_build_roadmap(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                req("roadmapId")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "set_skill_done" => {
+            crate::set_skill_done(
+                app.state(),
+                req("roadmapId")?,
+                req("skillId")?,
+                a.get("done").and_then(|v| v.as_bool()).unwrap_or(true),
+            )?;
+            Ok(Value::Null)
+        }
+        "link_course_to_skill" => {
+            crate::link_course_to_skill(
+                app.state(),
+                req("courseId")?,
+                s("roadmapId").or_else(|| s("roadmap_id")),
+                s("roadmapSkill").or_else(|| s("roadmap_skill")),
+            )?;
+            Ok(Value::Null)
+        }
+        "roadmap_node_quiz" => to_val(tauri::async_runtime::block_on(crate::roadmap_node_quiz(
+            app.state(),
+            app.state(),
+            app.state(),
+            req("roadmapId")?,
+            req("nodeId")?,
+        ))?),
+        "get_roadmap_chat" => to_val(crate::get_roadmap_chat(app.state(), req("roadmapId")?)?),
+        "start_roadmap_refine" => {
+            crate::start_roadmap_refine(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                req("roadmapId")?,
+                req("userMessage")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "accept_roadmap_refinement" => to_val(crate::accept_roadmap_refinement(
+            app.state(),
+            req("roadmapId")?,
+            req("messageId")?,
+        )?),
         "start_course_suggestion" => {
             crate::start_course_suggestion(
                 app.clone(),
@@ -466,6 +556,7 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             s("text"),
             s("githubUrl"),
             from_arg(a, "files", json!([]))?,
+            s("code"),
         )?),
         "start_generate_assignments" => {
             crate::start_generate_assignments(
