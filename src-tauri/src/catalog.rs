@@ -45,6 +45,9 @@ pub struct CatalogSubmodulePackage {
     pub test: Value,
     pub review_notes: String,
     pub assignments: Value,
+    /// Added after schema 1 shipped — defaulted so older packages still parse.
+    #[serde(default)]
+    pub flashcards: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -156,6 +159,7 @@ pub fn build_package(
                 test: content.test,
                 review_notes: content.review_notes,
                 assignments,
+                flashcards: content.flashcards,
             });
         }
     }
@@ -454,6 +458,29 @@ fn write_package_to_course(
             &sub.assignments,
         )
         .map_err(|e| e.to_string())?;
+        // Flashcards ship with the package since schema-1 packages gained the
+        // field; sync the SRS deck so Mastery/review work on imported courses.
+        // Older packages have Null here — skip, nothing to install.
+        if sub.flashcards.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            courses::write_submodule_flashcards(
+                paths,
+                &course_id,
+                &module_id,
+                &submodule_id,
+                &sub.flashcards,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Err(e) = crate::srs::sync_cards_for_submodule(
+                conn,
+                &course_id,
+                &module_id,
+                &submodule_id,
+                &sub.flashcards,
+                now,
+            ) {
+                eprintln!("[catalog] flashcard sync failed for {submodule_id}: {e}");
+            }
+        }
     }
 
     Ok(())
