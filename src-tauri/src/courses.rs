@@ -65,6 +65,9 @@ fn render_course_md(course: &db::Course, answers: &[QnA]) -> String {
     out.push_str(&format!("topic: {topic_line}\n"));
     out.push_str(&format!("language: {}\n", course.language));
     out.push_str(&format!("course_format: {}\n", course.course_format));
+    if !course.tags.is_empty() {
+        out.push_str(&format!("tags: {}\n", course.tags.join(", ")));
+    }
     out.push_str(&format!("created_at: {}\n", course.created_at));
     out.push_str("---\n\n");
 

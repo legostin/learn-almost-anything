@@ -231,6 +231,11 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             crate::set_course_agent(app.state(), req("courseId")?, req("agent")?)?;
             Ok(Value::Null)
         }
+        "set_course_tags" => to_val(crate::set_course_tags(
+            app.state(),
+            req("courseId")?,
+            from_arg(a, "tags", json!([]))?,
+        )?),
         "get_settings_status" => to_val(crate::get_settings_status(app.state())),
         "check_agent_availability" => to_val(crate::check_agent_availability(app.state())),
         "set_brave_key" => to_val(crate::set_brave_key(app.state(), s("key"))?),
@@ -406,6 +411,11 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
             crate::delete_roadmap(app.state(), req("roadmapId")?)?;
             Ok(Value::Null)
         }
+        "set_roadmap_tags" => to_val(crate::set_roadmap_tags(
+            app.state(),
+            req("roadmapId")?,
+            from_arg(a, "tags", json!([]))?,
+        )?),
         "roadmap_wizard_next_question" => to_val(tauri::async_runtime::block_on(
             crate::roadmap_wizard_next_question(
                 app.state(),

@@ -19,6 +19,8 @@ pub struct CatalogCourseMeta {
     pub id: String,
     pub topic: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub language: String,
     #[serde(default = "default_course_format")]
     pub course_format: String,
@@ -181,6 +183,7 @@ pub fn build_package(
             id: catalog_origin_id.clone(),
             topic: course.topic,
             title: course.title,
+            tags: course.tags,
             language: course.language,
             course_format: course.course_format,
             agent: course.agent,
@@ -367,6 +370,7 @@ fn write_package_to_course(
         package_version,
         now,
         catalog_server_url,
+        &package.course.tags,
     )
     .map_err(|e| e.to_string())?;
 

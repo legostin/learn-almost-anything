@@ -54,6 +54,138 @@ fn generated_course_title(value: &Value) -> Option<String> {
         .map(|s| s.chars().take(80).collect::<String>())
 }
 
+fn generated_tags(value: &Value) -> Vec<String> {
+    let raw = value
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    db::normalize_tags(&raw)
+}
+
+fn spawn_generate_course_tags(
+    db: Arc<Db>,
+    sidecar: Arc<Sidecar>,
+    course_id: String,
+    structure: courses::StructureFile,
+    model_config: Value,
+) {
+    thread::spawn(move || {
+        let course = match db.0.lock() {
+            Ok(conn) => match db::get_course(&conn, &course_id) {
+                Ok(Some(course)) => course,
+                Ok(None) => return,
+                Err(e) => {
+                    eprintln!("[tags] load course failed: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("[tags] lock db failed: {e}");
+                return;
+            }
+        };
+        if !course.tags.is_empty() {
+            return;
+        }
+        let params = json!({
+            "backend": course.agent,
+            "kind": if course.course_format == "single_lesson" { "lesson" } else { "course" },
+            "topic": course.topic,
+            "title": course.title,
+            "language": course.language,
+            "courseFormat": course.course_format,
+            "structure": structure,
+            "modelConfig": model_config,
+        });
+        let response = match sidecar.call("generate_tags", params, Duration::from_secs(180)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[tags] course tag generation failed: {e}");
+                return;
+            }
+        };
+        let tags = generated_tags(&response);
+        if tags.is_empty() {
+            return;
+        }
+        match db.0.lock() {
+            Ok(conn) => {
+                if let Err(e) =
+                    db::set_course_tags(&conn, &course_id, &tags, now_unix_secs().unwrap_or(0))
+                {
+                    eprintln!("[tags] save course tags failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[tags] lock db failed: {e}"),
+        }
+    });
+}
+
+fn spawn_generate_roadmap_tags(
+    db: Arc<Db>,
+    sidecar: Arc<Sidecar>,
+    roadmap_id: String,
+    content: roadmaps::RoadmapContent,
+    model_config: Value,
+) {
+    thread::spawn(move || {
+        let roadmap = match db.0.lock() {
+            Ok(conn) => match db::get_roadmap(&conn, &roadmap_id) {
+                Ok(Some(roadmap)) => roadmap,
+                Ok(None) => return,
+                Err(e) => {
+                    eprintln!("[tags] load roadmap failed: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                eprintln!("[tags] lock db failed: {e}");
+                return;
+            }
+        };
+        if !roadmap.tags.is_empty() {
+            return;
+        }
+        let params = json!({
+            "backend": roadmap.agent,
+            "kind": "roadmap",
+            "topic": roadmap.topic,
+            "title": roadmap.title,
+            "language": roadmap.language,
+            "roadmap": content,
+            "modelConfig": model_config,
+        });
+        let response = match sidecar.call("generate_tags", params, Duration::from_secs(180)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[tags] roadmap tag generation failed: {e}");
+                return;
+            }
+        };
+        let tags = generated_tags(&response);
+        if tags.is_empty() {
+            return;
+        }
+        match db.0.lock() {
+            Ok(conn) => {
+                if let Err(e) =
+                    db::set_roadmap_tags(&conn, &roadmap_id, &tags, now_unix_secs().unwrap_or(0))
+                {
+                    eprintln!("[tags] save roadmap tags failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[tags] lock db failed: {e}"),
+        }
+    });
+}
+
 #[tauri::command]
 fn list_courses(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<Course>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -120,6 +252,19 @@ fn set_course_agent(
     let now = now_unix_secs()?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::set_course_agent(&conn, &course_id, &agent, now).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_course_tags(
+    state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    tags: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let tags = db::normalize_tags(&tags);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_course_tags(&conn, &course_id, &tags, now_unix_secs()?)
+        .map_err(|e| e.to_string())?;
+    Ok(tags)
 }
 
 #[tauri::command]
@@ -537,6 +682,7 @@ fn start_build_structure(
         &profile,
         "planning",
     );
+    let tag_model_config = settings_state.stage_model(&course.agent, "utility");
     let app2 = app.clone();
     let cid = course_id.clone();
     let agent = course.agent.clone();
@@ -594,13 +740,23 @@ fn start_build_structure(
                     .clone()
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty());
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                courses::install_structure(&conn, &paths, &cid, raw).map_err(|e| e.to_string())?;
+                let structure = {
+                    let conn = db.0.lock().map_err(|e| e.to_string())?;
+                    courses::install_structure(&conn, &paths, &cid, raw)
+                        .map_err(|e| e.to_string())?
+                };
                 if let Some(pack) = research_pack {
                     if let Err(e) = courses::write_course_research(&paths, &cid, &pack) {
                         eprintln!("[build_structure] write research.md (non-fatal): {e}");
                     }
                 }
+                spawn_generate_course_tags(
+                    db.clone(),
+                    sidecar.clone(),
+                    cid.clone(),
+                    structure,
+                    tag_model_config.clone(),
+                );
                 Ok::<(), String>(())
             },
         );
@@ -669,6 +825,19 @@ fn list_roadmaps(state: tauri::State<'_, Arc<Db>>) -> Result<Vec<serde_json::Val
 fn delete_roadmap(state: tauri::State<'_, Arc<Db>>, roadmap_id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::delete_roadmap(&conn, &roadmap_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_roadmap_tags(
+    state: tauri::State<'_, Arc<Db>>,
+    roadmap_id: String,
+    tags: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let tags = db::normalize_tags(&tags);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_roadmap_tags(&conn, &roadmap_id, &tags, now_unix_secs()?)
+        .map_err(|e| e.to_string())?;
+    Ok(tags)
 }
 
 #[tauri::command]
@@ -854,6 +1023,7 @@ fn spawn_build_roadmap(
     let rid = roadmap.id.clone();
     let agent = roadmap.agent.clone();
     let model_config = settings.stage_model(&roadmap.agent, "planning");
+    let tag_model_config = settings.stage_model(&roadmap.agent, "utility");
     let answers = roadmaps::answers_from_wizard(&roadmap);
     let wizard_md = roadmaps::render_roadmap_wizard_md(&roadmap, &answers);
     thread::spawn(move || {
@@ -889,7 +1059,14 @@ fn spawn_build_roadmap(
                     .map_err(|e| format!("sidecar payload: {e}"))?;
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 let now = now_unix_secs()?;
-                roadmaps::install_roadmap(&conn, &rid, raw, now)?;
+                let content = roadmaps::install_roadmap(&conn, &rid, raw, now)?;
+                spawn_generate_roadmap_tags(
+                    db.clone(),
+                    sidecar.clone(),
+                    rid.clone(),
+                    content,
+                    tag_model_config.clone(),
+                );
                 Ok::<(), String>(())
             },
         );
@@ -5457,6 +5634,14 @@ fn start_lesson_generation(
         }
         (course, structure)
     };
+    let tag_model_config = settings_state.stage_model(&course.agent, "utility");
+    spawn_generate_course_tags(
+        db_state.inner().clone(),
+        sidecar_state.inner().clone(),
+        course.id.clone(),
+        structure.clone(),
+        tag_model_config,
+    );
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let verify_model = settings_state.stage_model(&course.agent, "verify");
@@ -8152,6 +8337,7 @@ pub fn run() {
             list_courses,
             create_course,
             set_course_agent,
+            set_course_tags,
             sidecar_status,
             get_course_profile,
             set_course_profile,
@@ -8165,6 +8351,7 @@ pub fn run() {
             list_roadmaps,
             get_roadmap,
             delete_roadmap,
+            set_roadmap_tags,
             roadmap_wizard_next_question,
             get_roadmap_wizard_dialog,
             save_roadmap_wizard_answers,

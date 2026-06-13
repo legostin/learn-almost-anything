@@ -3535,6 +3535,72 @@ Also generate a short display "title" for the roadmap: a concise noun phrase,
   return { title: normalizeCourseTitle(parsed?.title), stages };
 }
 
+function normalizeGeneratedTags(raw) {
+  const seen = new Set();
+  const tags = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const tag = String(item || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/^[#,\s;]+|[#,\s;]+$/g, "")
+      .trim();
+    if (tag.length < 2 || tag.length > 36) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length >= 8) break;
+  }
+  return tags;
+}
+
+export async function generateTags({ kind, topic, title, language, courseFormat, structure, roadmap, modelConfig }) {
+  const lang = (language || "en").trim();
+  const itemKind = String(kind || "course");
+  const context = JSON.stringify(
+    {
+      kind: itemKind,
+      topic,
+      title,
+      language: lang,
+      courseFormat,
+      structure,
+      roadmap,
+    },
+    null,
+    2
+  ).slice(0, 12000);
+  const prompt = `Generate clean search/display tags for this learning ${itemKind}.
+Language code: "${lang}".
+
+Rules:
+- Return 3-8 tags.
+- Each tag is 1-3 words, specific, and useful for catalog search.
+- Prefer the content language; keep standard English technical terms when natural.
+- Do not include generic tags like course, lesson, roadmap, study, education, learning.
+- No hashtags, punctuation wrappers, sentences, or duplicates.
+
+Context JSON:
+${context}`;
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      tags: {
+        type: "array",
+        minItems: 3,
+        maxItems: 8,
+        items: { type: "string" },
+      },
+    },
+    required: ["tags"],
+  };
+  const text = await runOnce(prompt, schema, { modelConfig });
+  const parsed = JSON.parse(text);
+  return { tags: normalizeGeneratedTags(parsed?.tags) };
+}
+
 // Shared validation for discover_mcp results (duplicated from claude.mjs to
 // avoid importing the Claude SDK module here).
 function normalizeMcpCandidates(parsed) {

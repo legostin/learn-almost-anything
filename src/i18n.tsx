@@ -666,6 +666,10 @@ const STRINGS = {
     privateCatalogReadOnly: "только чтение",
     privateCatalogTokenSet: "токен",
     catalogPublishNoToken: "Токен для этого каталога не настроен",
+    tagsLabel: "Теги",
+    tagsPlaceholder: "через запятую",
+    tagsEdit: "Теги",
+    tagsSave: "Сохранить",
     mcpTitle: "MCP",
     mcpEmpty: "Добавленных MCP пока нет.",
     mcpNote:
@@ -1478,6 +1482,10 @@ const STRINGS = {
     privateCatalogReadOnly: "read-only",
     privateCatalogTokenSet: "token",
     catalogPublishNoToken: "No token configured for this catalog",
+    tagsLabel: "Tags",
+    tagsPlaceholder: "comma-separated",
+    tagsEdit: "Tags",
+    tagsSave: "Save",
     mcpTitle: "MCP",
     mcpEmpty: "No added MCP servers yet.",
     mcpNote:

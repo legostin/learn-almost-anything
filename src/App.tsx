@@ -122,6 +122,7 @@ type Course = {
   roadmap_id?: string | null;
   roadmap_skill?: string | null;
   catalog_server_url?: string | null;
+  tags?: string[];
 };
 
 // Localized labels for the agent-assigned subject category. Keep the id set in
@@ -194,6 +195,26 @@ type AppUpdateInfo = {
 function courseTitle(course: Course, fallback: string) {
   if (course.title === undefined) return course.topic || fallback;
   return course.title?.trim() || fallback;
+}
+
+function parseTagInput(value: string) {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const part of value.split(/[,\n]/)) {
+    const tag = part
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/^[#,\s;]+|[#,\s;]+$/g, "")
+      .trim();
+    if (tag.length < 2 || tag.length > 36) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length >= 8) break;
+  }
+  return tags;
 }
 
 type Question = { text: string; options: string[]; multi?: boolean };
@@ -382,6 +403,7 @@ type Roadmap = {
   agent: Agent;
   content: RoadmapContent | null;
   error: string | null;
+  tags?: string[];
   created_at: number;
   updated_at: number;
   /// Skill progress, present for ready roadmaps (computed by list_roadmaps).
@@ -4501,6 +4523,13 @@ function RoadmapsView({
             <li key={r.id} onClick={() => onOpenRoadmap(r.id)}>
               <div className="space-name">{r.title ?? r.topic}</div>
               {r.title && r.title !== r.topic && <div className="space-desc">{r.topic}</div>}
+              {(r.tags ?? []).length > 0 && (
+                <div className="tag-row compact">
+                  {(r.tags ?? []).slice(0, 6).map((tag) => (
+                    <span className="tag-pill" key={tag}>{tag}</span>
+                  ))}
+                </div>
+              )}
               <div className="space-meta">
                 <span className={`roadmap-status-chip ${r.status}`}>
                   {roadmapStatusLabel(r.status, t)}
@@ -4708,6 +4737,9 @@ function RoadmapView({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [creatingLesson, setCreatingLesson] = useState<string | null>(null);
   const [refineOpen, setRefineOpen] = useState(false);
+  const [editingTags, setEditingTags] = useState(false);
+  const [tagText, setTagText] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [openNode, setOpenNode] = useState<{ id: string; tick: number } | null>(null);
   const [highlightSkill, setHighlightSkill] = useState<string | null>(null);
@@ -4736,6 +4768,11 @@ function RoadmapView({
   useEffect(() => {
     reload();
   }, [reload, jobStatus, courses]);
+
+  useEffect(() => {
+    if (!roadmap) return;
+    setTagText((roadmap.tags ?? []).join(", "));
+  }, [roadmap?.id, roadmap?.tags]);
 
   const stageIsDone = useCallback(
     (stage: RoadmapStage) => {
@@ -4846,6 +4883,21 @@ function RoadmapView({
     }
   }
 
+  async function saveRoadmapTags() {
+    if (!roadmap || savingTags) return;
+    setSavingTags(true);
+    try {
+      await invoke("set_roadmap_tags", { roadmapId: roadmap.id, tags: parseTagInput(tagText) });
+      setEditingTags(false);
+      await reload();
+      await onChanged();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
   async function makeLesson(node: RoadmapNode, skill: RoadmapSkill) {
     if (!roadmap || creatingLesson) return;
     setCreatingLesson(skill.id);
@@ -4892,6 +4944,27 @@ function RoadmapView({
         <h2>{roadmap.title ?? roadmap.topic}</h2>
         {roadmap.title && roadmap.title !== roadmap.topic && (
           <p className="spaces-intro">{roadmap.topic}</p>
+        )}
+        <div className="tag-row">
+          {(roadmap.tags ?? []).map((tag) => (
+            <span className="tag-pill" key={tag}>{tag}</span>
+          ))}
+          <button className="meta-action tag-edit-button" onClick={() => setEditingTags((v) => !v)}>
+            {t("tagsEdit")}
+          </button>
+        </div>
+        {editingTags && (
+          <div className="tag-editor-row">
+            <input
+              value={tagText}
+              placeholder={t("tagsPlaceholder")}
+              onChange={(e) => setTagText(e.target.value)}
+              disabled={savingTags}
+            />
+            <button className="meta-action" onClick={saveRoadmapTags} disabled={savingTags}>
+              {savingTags ? t("editorSaving") : t("tagsSave")}
+            </button>
+          </div>
         )}
       </div>
 
@@ -6722,6 +6795,9 @@ function CourseView({
           {categoryLabel(course.category, uiLang) && (
             <span className="category-pill">{categoryLabel(course.category, uiLang)}</span>
           )}
+          {(course.tags ?? []).map((tag) => (
+            <span className="tag-pill" key={tag}>{tag}</span>
+          ))}
           <span className={`status-pill status-${course.status}`}>
             {courseLifecycleStatusLabel(course.status, t)}
           </span>
@@ -8277,6 +8353,7 @@ function StructureEditor({
       })),
     }))
   );
+  const [tagText, setTagText] = useState(() => (course.tags ?? []).join(", "));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -8324,6 +8401,7 @@ function StructureEditor({
             })),
         }));
       await invoke("save_structure", { courseId: course.id, modules });
+      await invoke("set_course_tags", { courseId: course.id, tags: parseTagInput(tagText) });
       await onSaved();
     } catch (e) {
       setError(String(e));
@@ -8342,6 +8420,16 @@ function StructureEditor({
         </button>
       </div>
       {error && <div className="le-error">{error}</div>}
+      <label className="struct-tags-editor">
+        <span>{t("tagsLabel")}</span>
+        <input
+          className="struct-edit-input"
+          value={tagText}
+          placeholder={t("tagsPlaceholder")}
+          onChange={(e) => setTagText(e.target.value)}
+          disabled={saving}
+        />
+      </label>
       <ol className="struct-edit-modules">
         {mods.map((m, i) => (
           <li key={i} className="struct-edit-module">
