@@ -41,6 +41,10 @@ pub struct Settings {
     /// real images only. `None` means the default (enabled).
     #[serde(default)]
     pub image_generation: Option<bool>,
+    /// Which engine generates illustrations: "gemini" or "codex". `None` (or any
+    /// other value) means "auto" — Gemini when a key is set, else Codex.
+    #[serde(default)]
+    pub image_provider: Option<String>,
     /// Global default generation cost/quality profile (tier + knobs). Courses can
     /// override per-course; default == today's behavior.
     #[serde(default)]
@@ -659,6 +663,30 @@ impl SettingsState {
         {
             let mut guard = self.inner.lock().expect("settings lock");
             guard.image_generation = Some(enabled);
+        }
+        self.persist()
+    }
+
+    /// Which engine generates illustrations: "auto" | "gemini" | "codex".
+    pub fn image_provider(&self) -> String {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| s.image_provider.clone())
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| p == "gemini" || p == "codex")
+            .unwrap_or_else(|| "auto".to_string())
+    }
+
+    pub fn set_image_provider(&self, provider: String) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            let p = provider.trim().to_lowercase();
+            // Store only explicit engines; "auto" (the default) is kept as None.
+            guard.image_provider = match p.as_str() {
+                "gemini" | "codex" => Some(p),
+                _ => None,
+            };
         }
         self.persist()
     }

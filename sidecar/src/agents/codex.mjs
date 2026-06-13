@@ -274,6 +274,11 @@ function threadOptions(opts) {
   if (dirs.length) {
     overrides.workingDirectory = dirs[0];
     overrides.sandboxMode = "read-only";
+  } else if (opts?.sandboxMode) {
+    // The built-in image_gen tool saves under $CODEX_HOME; give it write access
+    // when a caller opts in (kept read-only when a space dir is attached, so the
+    // learner's own files can never be modified).
+    overrides.sandboxMode = opts.sandboxMode;
   }
   return { ...baseThreadOptions, ...overrides, ...modelThreadOptions(opts?.modelConfig) };
 }
@@ -284,6 +289,9 @@ async function runOnce(prompt, outputSchema, opts) {
   try {
     const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
     const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
+    if (Array.isArray(opts?.collectImages)) {
+      opts.collectImages.push(...sessionImagePaths(thread.id));
+    }
     rec.end(turn.finalResponse);
     return turn.finalResponse;
   } catch (e) {
@@ -379,6 +387,9 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
       }
     }
     if (!final.trim()) throw new Error("Codex response missing final message");
+    if (Array.isArray(opts?.collectImages)) {
+      opts.collectImages.push(...sessionImagePaths(thread.id));
+    }
     rec.end(final);
     return final;
   } catch (e) {
@@ -463,10 +474,59 @@ function mtimeOf(p) {
   }
 }
 
+const IMAGE_FILE_RE = /\.(?:png|jpe?g|webp)$/i;
+
+// Absolute paths of image files the built-in image_gen tool produced in a given
+// Codex turn. The tool saves to ~/.codex/generated_images/<session-id>/, and the
+// session id === thread.id, so scoping to that subdir yields exactly this turn's
+// output (no cross-talk with concurrent jobs). Newest first.
+function sessionImagePaths(threadId) {
+  if (!threadId) return [];
+  const dir = join(GENERATED_IMAGES_DIR, threadId);
+  return listImages(dir)
+    .filter((f) => IMAGE_FILE_RE.test(f))
+    .map((f) => join(dir, f))
+    .sort((a, b) => mtimeOf(b) - mtimeOf(a));
+}
+
+// Pull absolute image paths out of a dialog's final response: prefer the
+// structured { images: [...] } JSON, fall back to scraping path-like tokens.
+function parseImagePaths(text) {
+  if (typeof text !== "string" || !text.trim()) return [];
+  try {
+    const obj = JSON.parse(text);
+    if (Array.isArray(obj?.images)) {
+      return obj.images.filter((p) => typeof p === "string" && p.trim());
+    }
+  } catch {
+    /* not JSON — scrape paths below */
+  }
+  const matches = text.match(/\/[^\s"'`]+\.(?:png|jpe?g|webp)/gi);
+  return matches ? Array.from(new Set(matches)) : [];
+}
+
+function isReadableFile(p) {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+const generatedImageSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { images: { type: "array", items: { type: "string" } } },
+  required: ["images"],
+};
+
 /**
- * Generate an illustration via Codex's $imagegen skill (gpt-image-2). Output
- * lands in ~/.codex/generated_images/ — we diff the dir to find the new file.
- * Best-effort: returns { path: null } if the skill didn't produce anything.
+ * Generate an illustration via Codex's built-in image_gen tool ($imagegen skill,
+ * gpt-image-2). We pull the saved path straight from the dialog: the agent
+ * reports the absolute path(s) in a structured { images: [...] } final response;
+ * if that is missing we fall back to the newest file in this thread's per-session
+ * image dir (~/.codex/generated_images/<thread.id>/).
+ * Best-effort: returns { path: null } if nothing usable was produced.
  * @param {{ prompt: string }} params
  * @returns {Promise<{ path: string|null }>}
  */
@@ -474,7 +534,6 @@ export async function generateImage({ prompt }, ctx) {
   if (typeof prompt !== "string" || !prompt.trim()) {
     throw new Error("prompt required for image generation");
   }
-  const before = new Set(listImages(GENERATED_IMAGES_DIR));
   ctx?.progress?.({ label: "generating", detail: prompt.slice(0, 100) });
   const thread = getDefaultCodex().startThread({
     skipGitRepoCheck: true,
@@ -482,16 +541,15 @@ export async function generateImage({ prompt }, ctx) {
     networkAccessEnabled: true,
     webSearchEnabled: false,
   });
-  const input = `Generate ONE high-quality educational illustration using the $imagegen skill. Produce only the image — no code, no explanation.\n\nIllustration: ${prompt}`;
-  await thread.run(input);
-  const fresh = listImages(GENERATED_IMAGES_DIR).filter(
-    (f) => !before.has(f) && /\.(png|jpe?g|webp)$/i.test(f)
-  );
-  if (fresh.length === 0) return { path: null };
-  fresh.sort(
-    (a, b) => mtimeOf(join(GENERATED_IMAGES_DIR, b)) - mtimeOf(join(GENERATED_IMAGES_DIR, a))
-  );
-  return { path: join(GENERATED_IMAGES_DIR, fresh[0]) };
+  const input = `Generate ONE high-quality educational illustration using the built-in image_gen tool ($imagegen skill). Produce only the image — no code, no explanation. After it is saved, report the ABSOLUTE filesystem path(s) of the saved image file(s).\n\nIllustration: ${prompt}`;
+  const turn = await thread.run(input, { outputSchema: generatedImageSchema });
+  // 1) Path straight from the dialog's structured final response.
+  for (const p of parseImagePaths(turn.finalResponse)) {
+    if (isReadableFile(p)) return { path: p };
+  }
+  // 2) Fallback: newest image in this thread's per-session image dir.
+  const [newest] = sessionImagePaths(thread.id);
+  return { path: newest && isReadableFile(newest) ? newest : null };
 }
 
 /**
@@ -1110,6 +1168,7 @@ export async function courseAssistant(
     socratic,
     exercise,
     exchangeCount,
+    allowImageGen,
   },
   ctx
 ) {
@@ -1142,7 +1201,13 @@ ${JSON.stringify(structure ?? {}, null, 2)}
 
 ${articleBlock}${fragBlock}${widgetBlock}${histBlock}Learner's question: ${question}
 
-Answer in ${lang}, in Markdown. Be concise but complete; use examples or code where they help.`;
+Answer in ${lang}, in Markdown. Be concise but complete; use examples or code where they help.${
+    allowImageGen
+      ? `
+
+If (and only if) the learner explicitly asks you to draw, sketch, generate, or visualize an image/diagram/illustration, use the built-in image_gen tool to create ONE image, then briefly describe it in your text. For ordinary questions, answer with text only — do not generate images unprompted.`
+      : ""
+  }`;
   // Attached image → send it as a local_image input item so Codex can see it.
   const input =
     imagePath && String(imagePath).trim()
@@ -1154,11 +1219,14 @@ Answer in ${lang}, in Markdown. Be concise but complete; use examples or code wh
           { type: "local_image", path: imagePath },
         ]
       : prompt;
+  const generated = [];
   const text = await runStreamed(input, undefined, ctx?.progress, {
     modelConfig,
     dirs: spaceDirs,
+    collectImages: allowImageGen ? generated : undefined,
+    sandboxMode: allowImageGen ? "workspace-write" : undefined,
   });
-  return { answer: (text || "").trim() };
+  return { answer: (text || "").trim(), generatedImages: generated };
 }
 
 /**
@@ -1845,6 +1913,9 @@ Rules:
 - It is OK if "url" is empty. Put a direct image URL there only when you are
   confident it is a real image file/asset. Always put the public page in
   "source" when available.
+- Prefer large, full-resolution images — at least 800px on the longer side.
+  Skip thumbnails, icons, sprites, avatars, and tiny preview images; when a page
+  offers several sizes, choose the full-size/original asset, not a small preview.
 - Return 0-8 candidates. If nothing credible is found, return [] and provide a
   better refinedQuery.`;
 
@@ -1871,6 +1942,48 @@ Rules:
     candidates,
     refinedQuery: typeof parsed?.refinedQuery === "string" ? parsed.refinedQuery : "",
   };
+}
+
+const imageSearchQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { query: { type: "string" } },
+  required: ["query"],
+};
+
+/**
+ * Derive ONE short, precise web-image search query for a single image/gallery
+ * item. Pure transform (no web), utility model. Used lazily at search time and
+ * cached. Mirrors the claude agent's imageSearchQuery.
+ * @param {{description?:string, prompt?:string, alt?:string, topic:string, language?:string, modelConfig?:object}} params
+ * @returns {Promise<{query:string}>}
+ */
+export async function imageSearchQuery({ description, prompt: intentPrompt, topic, language, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const caption = (description || "").trim();
+  const intent = (intentPrompt || "").trim();
+  const promptText = `Write ONE short web image-search query, in language "${lang}", that will find the EXACT real thing this course image depicts.
+
+Course topic: "${topic}"
+Image caption: "${caption}"${intent && intent !== caption ? `\nSearch intent: "${intent}"` : ""}
+
+Rules:
+- Name the specific entity (proper name of the place/person/object/work) and add only what disambiguates it: its city/country, era, or creator.
+- 3-8 words. No quotes, no boolean operators, no site: filters, no trailing punctuation.
+- Do NOT pad with the course topic or generic words ("photo", "image", "example").
+- Keep it in the most searchable form for this subject (usually the local-language proper name).`;
+  ctx?.progress?.({ label: "query", detail: caption });
+  const text = await runStreamed(promptText, imageSearchQuerySchema, ctx?.progress, {
+    webSearchEnabled: false,
+    modelConfig,
+  });
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    /* leave empty on parse failure */
+  }
+  return { query: typeof parsed?.query === "string" ? parsed.query.trim().slice(0, 160) : "" };
 }
 
 /** Stage 1 — draft a fresh article + initial widgets (images + diagrams). */

@@ -2700,23 +2700,30 @@ fn generate_image_bytes(
         Some(description),
     );
 
-    if let Some(key) = gemini_key {
-        match media::gemini_generate_image(key, &prompt, gemini_image_model) {
-            Ok(bytes) => match media::bytes_to_jpeg(&bytes, 2000) {
-                Ok(jpeg) => return Some(jpeg),
-                Err(e) => eprintln!("[illustrate] gemini decode: {e}"),
-            },
-            Err(e) => eprintln!("[illustrate] gemini generate: {e}"),
+    // Engine choice: "gemini" / "codex" pin one engine; "auto" prefers Gemini
+    // (when a key is set) and falls back to Codex.
+    let provider = app.state::<Arc<SettingsState>>().image_provider();
+
+    if provider != "codex" {
+        if let Some(key) = gemini_key {
+            match media::gemini_generate_image(key, &prompt, gemini_image_model) {
+                // Generated image: no minimum-size floor (we control its size).
+                Ok(bytes) => match media::bytes_to_jpeg(&bytes, 2000, 0) {
+                    Ok(jpeg) => return Some(jpeg),
+                    Err(e) => eprintln!("[illustrate] gemini decode: {e}"),
+                },
+                Err(e) => eprintln!("[illustrate] gemini generate: {e}"),
+            }
         }
     }
 
-    if course.agent == "codex" {
+    if provider != "gemini" && course.agent == "codex" {
         let params = json!({ "backend": "codex", "prompt": prompt });
         match sidecar.call("generate_image", params, Duration::from_secs(3000)) {
             Ok(v) => {
                 if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
                     match std::fs::read(path) {
-                        Ok(bytes) => match media::bytes_to_jpeg(&bytes, 2000) {
+                        Ok(bytes) => match media::bytes_to_jpeg(&bytes, 2000, 0) {
                             Ok(jpeg) => return Some(jpeg),
                             Err(e) => eprintln!("[illustrate] codex img decode: {e}"),
                         },
@@ -2751,7 +2758,15 @@ fn illustrate_widgets(
     // only (no Gemini spend), "off" skips the pass upstream.
     let generate_images =
         illustration_full && app.state::<Arc<SettingsState>>().image_generation();
-    let can_generate = generate_images && (gemini_key.is_some() || course.agent == "codex");
+    // Which engine can actually run depends on the chosen provider: Gemini needs
+    // a key; Codex only works for Codex-agent courses. "auto" accepts either.
+    let provider = app.state::<Arc<SettingsState>>().image_provider();
+    let engine_available = match provider.as_str() {
+        "gemini" => gemini_key.is_some(),
+        "codex" => course.agent == "codex",
+        _ => gemini_key.is_some() || course.agent == "codex",
+    };
+    let can_generate = generate_images && engine_available;
     let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
     if brave_key.is_none() && !can_generate && !can_agent_search {
         return widgets;
@@ -2768,7 +2783,7 @@ fn illustrate_widgets(
     // are treated as separate image jobs but written back into their parent
     // gallery. External URLs from the agent are localized; direct hotlinks can
     // go stale or be rejected by the origin.
-    // (widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source)
+    // (widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source, existing_query)
     type ImageJob = (
         String,
         Option<usize>,
@@ -2776,6 +2791,7 @@ fn illustrate_widgets(
         String,
         String,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
     );
@@ -2818,6 +2834,13 @@ fn illustrate_widgets(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
+            // A short, precise search query the fast model derived on an earlier
+            // search; reused so we don't re-derive on every illustrate run.
+            let existing_query = w
+                .get("query")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             jobs.push((
                 widget_id.to_string(),
                 gallery_index,
@@ -2827,6 +2850,7 @@ fn illustrate_widgets(
                 mode,
                 existing_url,
                 source,
+                existing_query,
             ));
         };
 
@@ -2861,7 +2885,7 @@ fn illustrate_widgets(
         for _ in 0..concurrency {
             s.spawn(|| loop {
                 let job = { queue.lock().unwrap().pop_front() };
-                let Some((widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source)) = job else {
+                let Some((widget_id, gallery_index, image_key, image_prompt, alt, mode, existing_url, source, existing_query)) = job else {
                     break;
                 };
                 if let Some(fill) = illustrate_one_widget(
@@ -2876,6 +2900,7 @@ fn illustrate_widgets(
                     &mode,
                     existing_url.as_deref(),
                     source.as_deref(),
+                    existing_query.as_deref(),
                     brave_key,
                     gemini_key,
                     model_config,
@@ -2909,6 +2934,9 @@ fn illustrate_widgets(
                     if let Some(orig) = fill.original_url {
                         item["original_url"] = json!(orig);
                     }
+                    if let Some(q) = fill.query.filter(|s| !s.is_empty()) {
+                        item["query"] = json!(q);
+                    }
                 }
             } else {
                 w["url"] = json!(fill.url);
@@ -2921,6 +2949,9 @@ fn illustrate_widgets(
                 }
                 if let Some(orig) = fill.original_url {
                     w["original_url"] = json!(orig);
+                }
+                if let Some(q) = fill.query.filter(|s| !s.is_empty()) {
+                    w["query"] = json!(q);
                 }
             }
         }
@@ -2969,6 +3000,9 @@ struct WidgetFill {
     source: Option<String>,
     original_url: Option<String>,
     generated: bool,
+    /// The short search query used (fast-model-derived or cached), so callers
+    /// can persist it on the widget/item and reuse it next time.
+    query: Option<String>,
 }
 
 fn expand_image_hits(
@@ -3081,9 +3115,40 @@ fn agent_image_search(
     (hits, refined)
 }
 
+/// Ask the fast utility model for ONE short, precise image-search query (e.g.
+/// "гостиница Казахстан Алматы") for a widget/gallery item. Returns None if the
+/// call fails or yields nothing, so callers can fall back to a mechanical query.
+fn derive_image_search_query(
+    course: &db::Course,
+    sidecar: &Arc<Sidecar>,
+    description: &str,
+    alt: &str,
+    model_config: &serde_json::Value,
+) -> Option<String> {
+    let params = json!({
+        "backend": course.agent,
+        "language": course.language,
+        "description": description,
+        "prompt": description,
+        "alt": alt,
+        "topic": course.topic,
+        "modelConfig": model_config,
+    });
+    let value = sidecar
+        .call("image_search_query", params, Duration::from_secs(120))
+        .ok()?;
+    let q = value.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.to_string())
+    }
+}
+
 /// Resolve a single image widget: generate (Gemini/Codex) when flagged, else
 /// search Brave or the selected agent across up to 3 refined rounds. Returns
 /// None to leave a placeholder. Safe to call from multiple threads concurrently.
+#[allow(clippy::too_many_arguments)]
 fn illustrate_one_widget(
     app: &AppHandle,
     course: &db::Course,
@@ -3096,6 +3161,7 @@ fn illustrate_one_widget(
     mode: &str,
     existing_url: Option<&str>,
     existing_source: Option<&str>,
+    existing_query: Option<&str>,
     brave_key: &Option<String>,
     gemini_key: &Option<String>,
     model_config: &serde_json::Value,
@@ -3103,16 +3169,23 @@ fn illustrate_one_widget(
 ) -> Option<WidgetFill> {
     if let Some(url) = existing_url.filter(|u| u.starts_with("https://")) {
         let normalized_url = normalize_wikimedia_thumbnail_url(url);
-        match media::download_resize_jpeg(&normalized_url, 2000) {
+        match media::download_resize_jpeg(&normalized_url, 2000, media::MIN_ADDED_IMAGE_DIM) {
             Ok(jpeg) => {
                 let final_path = images_dir.join(format!("{wid}.jpg"));
                 match media::save_bytes(&jpeg, &final_path) {
                     Ok(()) => {
                         return Some(WidgetFill {
                             url: final_path.to_string_lossy().to_string(),
-                            source: existing_source.map(|s| s.to_string()),
+                            // Always keep a source: fall back to the image URL.
+                            source: Some(
+                                existing_source
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or(url)
+                                    .to_string(),
+                            ),
                             original_url: Some(url.to_string()),
                             generated: false,
+                            query: None,
                         });
                     }
                     Err(e) => eprintln!("[illustrate] save external '{wid}': {e}"),
@@ -3136,6 +3209,7 @@ fn illustrate_one_widget(
                         source: None,
                         original_url: None,
                         generated: true,
+                        query: None,
                     });
                 }
                 Err(e) => eprintln!("[illustrate] save generated '{wid}': {e}"),
@@ -3145,7 +3219,14 @@ fn illustrate_one_widget(
 
     // Search path. Brave is preferred when configured; otherwise ask the
     // selected agent to find public source pages, then extract images locally.
-    let mut query = format!("{} {}", description, course.topic);
+    // The search string is a SHORT, precise query (e.g. "гостиница Казахстан
+    // Алматы"): reuse the cached one, else have the fast model derive it from
+    // the caption/prompt; fall back to the raw prompt (never append the topic).
+    let mut query = match existing_query.filter(|q| !q.is_empty()) {
+        Some(q) => q.to_string(),
+        None => derive_image_search_query(course, sidecar, description, alt, model_config)
+            .unwrap_or_else(|| description.trim().to_string()),
+    };
     let mut tried_urls = std::collections::HashSet::<String>::new();
 
     for round in 0..3 {
@@ -3159,7 +3240,7 @@ fn illustrate_one_widget(
         );
         let mut next_query = String::new();
         let hits = if let Some(key) = brave_key.as_deref() {
-            match media::brave_image_search(key, &query, 8) {
+            match media::brave_image_search(key, &query, 12) {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
@@ -3206,7 +3287,7 @@ fn illustrate_one_widget(
                 .map(|(i, c)| {
                     let round_dir = round_dir.clone();
                     s.spawn(move || {
-                        let bytes = match media::download_resize_jpeg(&c.url, 2000) {
+                        let bytes = match media::download_resize_jpeg(&c.url, 2000, media::MIN_ADDED_IMAGE_DIM) {
                             Ok(b) => b,
                             Err(e) => {
                                 eprintln!("[illustrate] download/resize '{wid}' r{round} #{i}: {e}");
@@ -3273,9 +3354,15 @@ fn illustrate_one_widget(
                     }
                     let fill = WidgetFill {
                         url: final_path.to_string_lossy().to_string(),
-                        source: Some(hit.source.clone()),
+                        // Always keep a source: fall back to the image URL.
+                        source: Some(if hit.source.trim().is_empty() {
+                            hit.url.clone()
+                        } else {
+                            hit.source.clone()
+                        }),
                         original_url: Some(hit.url.clone()),
                         generated: false,
+                        query: Some(query.clone()),
                     };
                     let _ = std::fs::remove_dir_all(images_dir.join("_candidates").join(wid));
                     return Some(fill);
@@ -3309,6 +3396,7 @@ struct SettingsStatus {
     gemini_tts_model: String,
     debug_logging: bool,
     image_generation: bool,
+    image_provider: String,
     claude_enabled: bool,
     codex_enabled: bool,
 }
@@ -3457,6 +3545,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         gemini_tts_model: state.gemini_tts_model(),
         debug_logging: state.debug_logging(),
         image_generation: state.image_generation(),
+        image_provider: state.image_provider(),
         claude_enabled: state.agent_enabled("claude"),
         codex_enabled: state.agent_enabled("codex"),
     }
@@ -5856,6 +5945,16 @@ fn set_image_generation(
     Ok(enabled)
 }
 
+/// Choose which engine generates illustrations: "auto" | "gemini" | "codex".
+#[tauri::command]
+fn set_image_provider(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    provider: String,
+) -> Result<String, String> {
+    settings_state.set_image_provider(provider).map_err(|e| e.to_string())?;
+    Ok(settings_state.image_provider())
+}
+
 #[tauri::command]
 fn set_agent_enabled(
     settings_state: tauri::State<'_, Arc<SettingsState>>,
@@ -6516,6 +6615,14 @@ fn translate_course_content(
     );
 }
 
+/// Reply from the course assistant: the markdown answer plus any images the
+/// agent generated in the dialog (saved locally; absolute file paths).
+#[derive(serde::Serialize)]
+struct AssistantReply {
+    answer: String,
+    images: Vec<String>,
+}
+
 /// AI assistant: answer a learner question about the course, grounded in the
 /// course program, the current lesson, an optional highlighted fragment, and the
 /// space sources. Runs off the main thread.
@@ -6537,7 +6644,7 @@ async fn ask_course_assistant(
     socratic: Option<bool>,
     exercise: Option<Value>,
     exchange_count: Option<u32>,
-) -> Result<String, String> {
+) -> Result<AssistantReply, String> {
     let q = question.trim().to_string();
     if q.is_empty() && image_path.is_none() && widget_id.is_none() {
         return Err("вопрос пуст".into());
@@ -6546,7 +6653,7 @@ async fn ask_course_assistant(
     let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
     let settings = settings_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<AssistantReply, String> {
         let (course, structure, space) = {
             let conn = db.0.lock().map_err(|e| e.to_string())?;
             let c = db::get_course(&conn, &course_id)
@@ -6587,6 +6694,13 @@ async fn ask_course_assistant(
             &profile,
             "assistant",
         );
+        // Codex can generate images in the dialog via its built-in image_gen
+        // tool; gate it behind the global toggle. Claude's generateImage is a
+        // stub, so only offer it for Codex courses. Chat generation always goes
+        // through Codex, so skip it when the user pinned the Gemini engine.
+        let allow_image_gen = course.agent == "codex"
+            && settings.image_generation()
+            && settings.image_provider() != "gemini";
         let params = json!({
             "backend": course.agent,
             "language": course.language,
@@ -6607,11 +6721,51 @@ async fn ask_course_assistant(
             "socratic": socratic.unwrap_or(false),
             "exercise": exercise,
             "exchangeCount": exchange_count.unwrap_or(0),
+            "allowImageGen": allow_image_gen,
         });
         let v = sidecar
             .call("course_assistant", params, Duration::from_secs(600))
             .map_err(|e| e.to_string())?;
-        Ok(v.get("answer").and_then(|x| x.as_str()).unwrap_or("").to_string())
+        let answer = v
+            .get("answer")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        // Localize any images the agent generated in the dialog: re-encode as
+        // JPEG and store under the submodule's images dir (or a course-level
+        // fallback when there is no submodule) so they get a stable served path.
+        let mut images = Vec::new();
+        if allow_image_gen {
+            if let Some(srcs) = v.get("generatedImages").and_then(|x| x.as_array()) {
+                let course_dir = paths.course_dir(&course_id);
+                let images_dir = match (&module_id, &submodule_id) {
+                    (Some(m), Some(s)) => media::submodule_images_dir(&course_dir, m, s),
+                    _ => course_dir.join("images"),
+                };
+                for src in srcs.iter().filter_map(|x| x.as_str()) {
+                    let bytes = match std::fs::read(src) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[assistant] read generated image '{src}': {e}");
+                            continue;
+                        }
+                    };
+                    let jpeg = match media::bytes_to_jpeg(&bytes, 2000, 0) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            eprintln!("[assistant] decode generated image '{src}': {e}");
+                            continue;
+                        }
+                    };
+                    let final_path = images_dir.join(format!("chat-{}.jpg", Uuid::new_v4()));
+                    match media::save_bytes(&jpeg, &final_path) {
+                        Ok(()) => images.push(final_path.to_string_lossy().to_string()),
+                        Err(e) => eprintln!("[assistant] save generated image: {e}"),
+                    }
+                }
+            }
+        }
+        Ok(AssistantReply { answer, images })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -6812,6 +6966,15 @@ struct ImageCandidate {
     thumbnail: String,
 }
 
+/// Result of a manual candidate search: the candidates plus the resolved short
+/// query (user override, cached, or freshly derived). The frontend shows/saves
+/// the query so it sticks on the widget/item and is reused next time.
+#[derive(serde::Serialize)]
+struct WidgetSearchResult {
+    query: String,
+    candidates: Vec<ImageCandidate>,
+}
+
 fn widget_query_fields(widget: &serde_json::Value) -> (String, String, String) {
     let field = |k: &str| {
         widget
@@ -6826,15 +6989,6 @@ fn widget_query_fields(widget: &serde_json::Value) -> (String, String, String) {
     let alt = field("alt");
     let query_seed = if !prompt.is_empty() { prompt } else { description.clone() };
     (query_seed, description, alt)
-}
-
-/// A short, search-friendly query (Brave rejects very long `q` with HTTP 422).
-/// Prefer the short caption/description over the long generation prompt.
-fn widget_search_query(widget: &serde_json::Value, topic: &str) -> String {
-    let (seed, description, _alt) = widget_query_fields(widget);
-    let base = if !description.is_empty() { description } else { seed };
-    let query = format!("{base} {topic}");
-    query.chars().take(160).collect::<String>().trim().to_string()
 }
 
 /// Search for image candidates for one placeholder widget, WITHOUT committing —
@@ -6852,12 +7006,14 @@ async fn search_widget_candidates(
     module_id: String,
     submodule_id: String,
     widget_id: String,
-) -> Result<Vec<ImageCandidate>, String> {
+    item_index: Option<usize>,
+    query: Option<String>,
+) -> Result<WidgetSearchResult, String> {
     let db = db_state.inner().clone();
     let paths = paths_state.inner().clone();
     let sidecar = sidecar_state.inner().clone();
     let settings = settings_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<ImageCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<WidgetSearchResult, String> {
         let course = {
             let conn = db.0.lock().map_err(|e| e.to_string())?;
             db::get_course(&conn, &course_id)
@@ -6872,14 +7028,34 @@ async fn search_widget_candidates(
             .get(&widget_id)
             .cloned()
             .ok_or_else(|| format!("widget not found: {widget_id}"))?;
-        let (_seed, description, alt) = widget_query_fields(&widget);
-        let query = widget_search_query(&widget, &course.topic);
-        if query.is_empty() {
-            return Ok(Vec::new());
-        }
+        let target = image_op_target(&widget, item_index)?;
+        let (seed, description, alt) = widget_query_fields(target);
         let model_config = settings.stage_model(&course.agent, "utility");
+        // Resolve the short, clean search query: user override > cached `query`
+        // on the item > freshly derived by the fast model > mechanical fallback.
+        // Never append the course topic — the model includes any needed locality.
+        let refine = query.unwrap_or_default();
+        let refine = refine.trim();
+        let cached = target
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let query = if !refine.is_empty() {
+            refine.chars().take(160).collect::<String>().trim().to_string()
+        } else if !cached.is_empty() {
+            cached.to_string()
+        } else {
+            let target_text = if !seed.is_empty() { &seed } else { &description };
+            derive_image_search_query(&course, &sidecar, target_text, &alt, &model_config)
+                .unwrap_or_else(|| target_text.trim().to_string())
+        };
+        if query.is_empty() {
+            return Ok(WidgetSearchResult { query, candidates: Vec::new() });
+        }
+        // Ask for extra results so enough survive the min-size filter below.
         let hits = if let Some(key) = settings.brave_api_key() {
-            media::brave_image_search(&key, &query, 12).map_err(|e| e.to_string())?
+            media::brave_image_search(&key, &query, 30).map_err(|e| e.to_string())?
         } else {
             agent_image_search(
                 &app,
@@ -6894,9 +7070,15 @@ async fn search_widget_candidates(
             .0
         };
         let mut seen = std::collections::HashSet::<String>::new();
+        // Drop candidates the search engine already reports as too small, so the
+        // user never picks one only to hit the "image too small" floor on commit.
         let candidates = hits
             .into_iter()
-            .filter(|h| !h.url.is_empty() && seen.insert(h.url.clone()))
+            .filter(|h| {
+                !h.url.is_empty()
+                    && media::hit_meets_min_dim(h, media::MIN_ADDED_IMAGE_DIM)
+                    && seen.insert(h.url.clone())
+            })
             .map(|h| ImageCandidate {
                 url: h.url,
                 source: h.source,
@@ -6905,10 +7087,38 @@ async fn search_widget_candidates(
             })
             .take(12)
             .collect();
-        Ok(candidates)
+        Ok(WidgetSearchResult { query, candidates })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Borrow the JSON object an image op targets: a gallery item (when `item_index`
+/// is set) or the widget itself. Used to derive search/generation queries from
+/// the right fields.
+fn image_op_target(
+    widget: &serde_json::Value,
+    item_index: Option<usize>,
+) -> Result<&serde_json::Value, String> {
+    match item_index {
+        None => Ok(widget),
+        Some(idx) => widget
+            .get("items")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.get(idx))
+            .ok_or_else(|| format!("gallery item not found: index {idx}")),
+    }
+}
+
+/// On-disk file name for a stored image. Single-image widgets overwrite the one
+/// `{widget_id}.jpg`; gallery items get a unique suffix so replacing one item
+/// never clobbers a sibling's file (item positions and file names are decoupled
+/// — the item's `url` field is the source of truth).
+fn widget_image_filename(widget_id: &str, item_index: Option<usize>) -> String {
+    match item_index {
+        None => format!("{widget_id}.jpg"),
+        Some(_) => format!("{widget_id}-{}.jpg", Uuid::new_v4()),
+    }
 }
 
 fn update_widget_in_place(
@@ -6917,6 +7127,7 @@ fn update_widget_in_place(
     module_id: &str,
     submodule_id: &str,
     widget_id: &str,
+    item_index: Option<usize>,
     url: &str,
     source: Option<&str>,
     generated: bool,
@@ -6927,15 +7138,23 @@ fn update_widget_in_place(
     let w = widgets
         .get_mut(widget_id)
         .ok_or_else(|| format!("widget not found: {widget_id}"))?;
-    w["url"] = json!(url);
-    w["source"] = match source {
+    let target = match item_index {
+        None => w,
+        Some(idx) => w
+            .get_mut("items")
+            .and_then(|v| v.as_array_mut())
+            .and_then(|items| items.get_mut(idx))
+            .ok_or_else(|| format!("gallery item not found: index {idx}"))?,
+    };
+    target["url"] = json!(url);
+    target["source"] = match source {
         Some(s) if !s.is_empty() => json!(s),
         _ => serde_json::Value::Null,
     };
-    w["generated"] = json!(generated);
+    target["generated"] = json!(generated);
     // A widget with a real image is no longer a placeholder; clear the flag so
     // the reader stops hiding it once a URL is attached (search/generate/upload).
-    w["placeholder"] = json!(false);
+    target["placeholder"] = json!(false);
     courses::write_submodule_widgets(paths, course_id, module_id, submodule_id, &widgets)
         .map_err(|e| e.to_string())
 }
@@ -7045,6 +7264,7 @@ async fn set_widget_image(
     module_id: String,
     submodule_id: String,
     widget_id: String,
+    item_index: Option<usize>,
     url: String,
     source: Option<String>,
 ) -> Result<(), String> {
@@ -7053,18 +7273,28 @@ async fn set_widget_image(
         let images_dir =
             media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
         std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-        let jpeg = media::download_resize_jpeg(&normalize_wikimedia_thumbnail_url(&url), 2000)
-            .map_err(|e| e.to_string())?;
-        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        let jpeg = media::download_resize_jpeg(
+            &normalize_wikimedia_thumbnail_url(&url),
+            2000,
+            media::MIN_ADDED_IMAGE_DIM,
+        )
+        .map_err(|e| e.to_string())?;
+        let final_path = images_dir.join(widget_image_filename(&widget_id, item_index));
         media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
+        // Always record a source: fall back to the original image URL when the
+        // caller (manual URL paste, or a candidate without one) gave none.
+        let source = source
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| url.clone());
         update_widget_in_place(
             &paths,
             &course_id,
             &module_id,
             &submodule_id,
             &widget_id,
+            item_index,
             &final_path.to_string_lossy(),
-            source.as_deref(),
+            Some(source.as_str()),
             false,
         )
     })
@@ -7083,17 +7313,18 @@ async fn import_local_image(
     module_id: String,
     submodule_id: String,
     widget_id: String,
+    item_index: Option<usize>,
     src_path: String,
     source: Option<String>,
 ) -> Result<(), String> {
     let paths = paths_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let bytes = std::fs::read(&src_path).map_err(|e| format!("failed to read image: {e}"))?;
-        let jpeg = media::bytes_to_jpeg(&bytes, 2000).map_err(|e| e.to_string())?;
+        let jpeg = media::bytes_to_jpeg(&bytes, 2000, media::MIN_ADDED_IMAGE_DIM).map_err(|e| e.to_string())?;
         let images_dir =
             media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
         std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        let final_path = images_dir.join(widget_image_filename(&widget_id, item_index));
         media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
         update_widget_in_place(
             &paths,
@@ -7101,6 +7332,7 @@ async fn import_local_image(
             &module_id,
             &submodule_id,
             &widget_id,
+            item_index,
             &final_path.to_string_lossy(),
             source.as_deref(),
             false,
@@ -7123,6 +7355,8 @@ async fn generate_widget_image(
     module_id: String,
     submodule_id: String,
     widget_id: String,
+    item_index: Option<usize>,
+    query: Option<String>,
 ) -> Result<(), String> {
     if !settings_state.image_generation() {
         return Err("генерация изображений отключена в настройках".into());
@@ -7147,8 +7381,18 @@ async fn generate_widget_image(
             .get(&widget_id)
             .cloned()
             .ok_or_else(|| format!("widget not found: {widget_id}"))?;
-        let (seed, description, alt) = widget_query_fields(&widget);
-        let desc = if seed.is_empty() { description } else { seed };
+        let target = image_op_target(&widget, item_index)?;
+        let (seed, description, alt) = widget_query_fields(target);
+        // A user-typed refinement overrides the widget's own description/prompt.
+        let refine = query.unwrap_or_default();
+        let refine = refine.trim();
+        let desc = if !refine.is_empty() {
+            refine.to_string()
+        } else if seed.is_empty() {
+            description
+        } else {
+            seed
+        };
         let jpeg = generate_image_bytes(
             &app,
             &course,
@@ -7163,7 +7407,7 @@ async fn generate_widget_image(
         let images_dir =
             media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
         std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-        let final_path = images_dir.join(format!("{widget_id}.jpg"));
+        let final_path = images_dir.join(widget_image_filename(&widget_id, item_index));
         media::save_bytes(&jpeg, &final_path).map_err(|e| e.to_string())?;
         update_widget_in_place(
             &paths,
@@ -7171,6 +7415,7 @@ async fn generate_widget_image(
             &module_id,
             &submodule_id,
             &widget_id,
+            item_index,
             &final_path.to_string_lossy(),
             None,
             true,
@@ -7189,10 +7434,31 @@ fn remove_widget(
     module_id: String,
     submodule_id: String,
     widget_id: String,
+    item_index: Option<usize>,
 ) -> Result<(), String> {
     let content = courses::read_submodule_content(&paths_state, &course_id, &module_id, &submodule_id)
         .map_err(|e| e.to_string())?;
     let mut widgets = content.widgets;
+    // Gallery item removal: splice just that item out, leave the widget in place.
+    if let Some(idx) = item_index {
+        if let Some(items) = widgets
+            .get_mut(&widget_id)
+            .and_then(|w| w.get_mut("items"))
+            .and_then(|v| v.as_array_mut())
+        {
+            if idx < items.len() {
+                items.remove(idx);
+            }
+        }
+        return courses::write_submodule_widgets(
+            &paths_state,
+            &course_id,
+            &module_id,
+            &submodule_id,
+            &widgets,
+        )
+        .map_err(|e| e.to_string());
+    }
     if let Some(obj) = widgets.as_object_mut() {
         obj.remove(&widget_id);
     }
@@ -8433,6 +8699,7 @@ pub fn run() {
             clear_dev_log,
             set_debug_logging,
             set_image_generation,
+            set_image_provider,
             set_agent_enabled,
             add_custom_mcp,
             delete_custom_mcp,

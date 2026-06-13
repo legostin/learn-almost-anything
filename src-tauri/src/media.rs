@@ -20,6 +20,8 @@ pub enum MediaError {
     Download(String),
     #[error("decode: {0}")]
     Decode(String),
+    #[error("image too small: {0}×{1}px, need ≥{2}px on the longer side")]
+    TooSmall(u32, u32, u32),
     #[error("encode: {0}")]
     Encode(String),
     #[error(transparent)]
@@ -36,9 +38,25 @@ pub struct BraveImageHit {
     pub height: Option<u32>,
 }
 
+/// Whether a search hit is big enough to ADD, by the dimensions the search
+/// engine reported. Hits with unknown size pass (the decode-time floor in
+/// `bytes_to_jpeg` is the backstop) — only hits we KNOW are too small are
+/// dropped, so we never discard a candidate whose real size we haven't seen.
+pub fn hit_meets_min_dim(hit: &BraveImageHit, min_dim: u32) -> bool {
+    match (hit.width, hit.height) {
+        (Some(w), Some(h)) => w.max(h) >= min_dim,
+        _ => true,
+    }
+}
+
 const IMAGE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/images/search";
 const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
+
+/// Minimum acceptable size, in pixels on the longer side, for a real photo we
+/// ADD to a course (search result, pasted URL, or upload). Smaller images look
+/// like low-res thumbnails. Generated images are exempt (we control their size).
+pub const MIN_ADDED_IMAGE_DIM: u32 = 800;
 
 pub fn brave_image_search(
     api_key: &str,
@@ -77,28 +95,43 @@ pub fn brave_image_search(
                 .get("properties")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let url = props
+            // Brave returns the web page in `url`, the direct image in
+            // `properties.url`, and the bare host in `source`.
+            let page = r.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let image = props
                 .get("url")
                 .and_then(|v| v.as_str())
-                .or_else(|| r.get("url").and_then(|v| v.as_str()))?
-                .to_string();
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| page.clone());
+            if image.is_empty() {
+                return None;
+            }
             let thumb = r
                 .pointer("/thumbnail/src")
                 .and_then(|v| v.as_str())
-                .unwrap_or(&url)
+                .unwrap_or(&image)
                 .to_string();
+            // Always carry a usable attribution source: prefer the real page
+            // URL, then the site host (as https://), then the image URL itself —
+            // so a search-added image is never left without a source link.
+            let domain = r.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let source = if !page.is_empty() {
+                page
+            } else if !domain.is_empty() {
+                let host = domain.trim_start_matches("https://").trim_start_matches("http://");
+                format!("https://{host}")
+            } else {
+                image.clone()
+            };
             Some(BraveImageHit {
                 title: r
                     .get("title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                source: r
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                url,
+                source,
+                url: image,
                 thumbnail: thumb,
                 width: props.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
                 height: props.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
@@ -468,8 +501,9 @@ fn push_candidate(
 }
 
 /// Download, decode any common format, resize so the longer side is at most
-/// `max_dim`, re-encode as JPEG quality 85. Returns the JPEG bytes.
-pub fn download_resize_jpeg(url: &str, max_dim: u32) -> Result<Vec<u8>, MediaError> {
+/// `max_dim`, re-encode as JPEG quality 85. Returns the JPEG bytes. Rejects
+/// images whose longer side is below `min_dim` (pass 0 to disable the floor).
+pub fn download_resize_jpeg(url: &str, max_dim: u32, min_dim: u32) -> Result<Vec<u8>, MediaError> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(30))
         .redirects(5)
@@ -491,12 +525,13 @@ pub fn download_resize_jpeg(url: &str, max_dim: u32) -> Result<Vec<u8>, MediaErr
             MAX_DOWNLOAD_BYTES / 1024 / 1024
         )));
     }
-    bytes_to_jpeg(&bytes, max_dim)
+    bytes_to_jpeg(&bytes, max_dim, min_dim)
 }
 
 /// Decode any common image format, resize so the longer side is at most
-/// `max_dim`, re-encode as JPEG quality 85.
-pub fn bytes_to_jpeg(bytes: &[u8], max_dim: u32) -> Result<Vec<u8>, MediaError> {
+/// `max_dim`, re-encode as JPEG quality 85. Rejects images whose longer side is
+/// below `min_dim` (pass 0 to disable the floor — e.g. for generated images).
+pub fn bytes_to_jpeg(bytes: &[u8], max_dim: u32, min_dim: u32) -> Result<Vec<u8>, MediaError> {
     let img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| MediaError::Decode(e.to_string()))?
@@ -504,6 +539,9 @@ pub fn bytes_to_jpeg(bytes: &[u8], max_dim: u32) -> Result<Vec<u8>, MediaError> 
         .map_err(|e| MediaError::Decode(e.to_string()))?;
     let (w, h) = img.dimensions();
     let longer = w.max(h);
+    if min_dim > 0 && longer < min_dim {
+        return Err(MediaError::TooSmall(w, h, min_dim));
+    }
     let resized = if longer > max_dim {
         let ratio = max_dim as f32 / longer as f32;
         let new_w = ((w as f32 * ratio).round() as u32).max(1);

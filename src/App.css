@@ -867,30 +867,214 @@ button {
   max-width: 560px;
   color: var(--text-muted);
 }
-.home-momentum {
+/* ── Experience band (streak / XP / due / weekly activity) ─────── */
+.home-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
-  margin: -2px 0 6px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--home-rule);
+  align-items: stretch;
+  margin: -2px 0 2px;
+  border: 1px solid var(--home-rule);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
 }
-.home-momentum-item {
-  position: relative;
-  padding-left: 14px;
+.home-stat {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 132px;
+  padding: 16px 20px;
+  border-left: 1px solid var(--home-rule);
+}
+.home-stat:first-child {
+  border-left: none;
+}
+.home-stat-num {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--home-ink);
+}
+.home-stat-flame {
+  font-size: 22px;
+  line-height: 1;
+}
+.home-stat--streak .home-stat-num {
+  color: var(--home-accent);
+}
+.home-stat-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--home-muted);
-  font-size: 12px;
-  line-height: 1.35;
 }
-.home-momentum-item::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.48em;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+.home-stat-sub {
+  font-size: 11px;
+  color: var(--home-faint);
+}
+.home-stat-cta {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--home-accent);
+  border-radius: 999px;
+  background: var(--home-accent-soft);
+  color: var(--home-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.home-stat-cta:hover {
+  background: color-mix(in srgb, var(--home-accent) 16%, transparent);
+}
+.home-stat--week {
+  flex: 1.5 1 0;
+  min-width: 180px;
+}
+.home-stat-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 38px;
+}
+.home-stat-spark-bar {
+  flex: 1 1 0;
+  min-width: 6px;
+  border-radius: 3px 3px 0 0;
   background: var(--home-accent);
+  opacity: 0.5;
+}
+.home-stat-spark-bar:last-child {
+  opacity: 0.9;
+}
+
+/* ── Continue learning ─────────────────────────────────────────── */
+.home-continue {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.home-continue-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.home-continue-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--home-rule);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.home-continue-card .home-feature-title {
+  font-size: 23px;
+  line-height: 1.1;
+}
+.home-continue-cta {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 6px 14px;
+  border: 1px solid var(--home-accent);
+  border-radius: 999px;
+  background: var(--home-accent-soft);
+  color: var(--home-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.home-continue-cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--home-accent) 16%, transparent);
+}
+.home-continue-cta:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Library (unified cards) ───────────────────────────────────── */
+.home-library {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+.home-shelf {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.home-shelf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.home-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.home-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--home-rule);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.home-card:hover:not(:disabled) {
+  border-color: var(--home-accent);
+  background: color-mix(in srgb, var(--home-accent) 4%, var(--surface));
+}
+.home-card:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.home-card-title {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.18;
+  color: var(--home-ink);
+}
+.home-card-meta {
+  font-size: 12px;
+  color: var(--home-muted);
+  line-height: 1.4;
+}
+.home-card-tag {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--home-faint);
+}
+.home-card .home-hairline-progress {
+  width: 100%;
+  margin-top: 4px;
+}
+.home-card--new {
+  border-style: dashed;
+  background: transparent;
+}
+.home-card--new .home-card-title {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--home-muted);
 }
 .home-language-filter {
   display: flex;
@@ -9338,6 +9522,26 @@ textarea.le-cap {
 .le-cand:hover {
   border-color: var(--accent);
 }
+.le-image-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.le-query-hint {
+  margin-top: -2px;
+  font-size: 11px;
+  color: var(--text-muted, #78716c);
+  word-break: break-word;
+}
+.le-gallery-items {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.le-gallery-items > .le-image-item + .le-image-item {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
 .le-toggle {
   align-self: flex-start;
 }
@@ -9533,9 +9737,14 @@ textarea.le-cap {
   .home-tagline {
     min-height: 0;
   }
-  /* Momentum stats: one per line — no mid-sentence column wrap. */
-  .home-momentum-item {
+  /* Experience band: let each stat take a full row on narrow screens. */
+  .home-stat {
     flex: 1 1 100%;
+    border-left: none;
+    border-top: 1px solid var(--home-rule);
+  }
+  .home-stat:first-child {
+    border-top: none;
   }
   /* Featured course titles: still display-sized, never wider than the screen. */
   .home-feature-title {

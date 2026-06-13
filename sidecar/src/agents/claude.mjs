@@ -3105,6 +3105,9 @@ Rules:
 - It is OK if "url" is empty. Put a direct image URL there only when you are
   confident it is a real image file/asset. Always put the public page in
   "source" when available.
+- Prefer large, full-resolution images — at least 800px on the longer side.
+  Skip thumbnails, icons, sprites, avatars, and tiny preview images; when a page
+  offers several sizes, choose the full-size/original asset, not a small preview.
 - Return 0-8 candidates. If nothing credible is found, return [] and provide a
   better refinedQuery.
 
@@ -3129,6 +3132,36 @@ Output ONLY single-line JSON:
     candidates,
     refinedQuery: typeof parsed?.refinedQuery === "string" ? parsed.refinedQuery : "",
   };
+}
+
+/**
+ * Derive ONE short, precise web-image search query for a single image/gallery
+ * item. Pure text transform (no web): distills the learner caption / verbose
+ * generation prompt into the simplest query that finds the exact real thing.
+ * Runs on the utility (cheap) model. Used lazily at search time and cached.
+ * @param {{description?:string, prompt?:string, alt?:string, topic:string, language?:string, modelConfig?:object}} params
+ * @returns {Promise<{query:string}>}
+ */
+export async function imageSearchQuery({ description, prompt: intentPrompt, topic, language, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const caption = (description || "").trim();
+  const intent = (intentPrompt || "").trim();
+  const prompt = `Write ONE short web image-search query, in language "${lang}", that will find the EXACT real thing this course image depicts.
+
+Course topic: "${topic}"
+Image caption: "${caption}"${intent && intent !== caption ? `\nSearch intent: "${intent}"` : ""}
+
+Rules:
+- Name the specific entity (proper name of the place/person/object/work) and add only what disambiguates it: its city/country, era, or creator.
+- 3-8 words. No quotes, no boolean operators, no site: filters, no trailing punctuation.
+- Do NOT pad with the course topic or generic words ("photo", "image", "example").
+- Keep it in the most searchable form for this subject (usually the local-language proper name).
+
+Output ONLY single-line JSON: {"query":"..."}`;
+  ctx?.progress?.({ label: "query", detail: caption });
+  const text = await runStreamed(prompt, ctx?.progress, { web: false, modelConfig });
+  const parsed = extractJson(text);
+  return { query: typeof parsed?.query === "string" ? parsed.query.trim().slice(0, 160) : "" };
 }
 
 // One option/text normalizer shared by the adaptive wizard.

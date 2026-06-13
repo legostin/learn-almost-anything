@@ -148,6 +148,12 @@ function categoryLabel(cat: string | null | undefined, lang: Lang): string | nul
   return CATEGORY_LABELS[cat]?.[lang] ?? null;
 }
 
+// Bucket a course's raw category into a known label id; unset/unknown → "general".
+function normalizeCourseCategory(cat: string | null | undefined): string {
+  const value = (cat || "").trim();
+  return value && CATEGORY_LABELS[value] ? value : "general";
+}
+
 type CatalogCourse = {
   id: string;
   origin_id?: string;
@@ -515,6 +521,7 @@ type SettingsStatus = {
   gemini_tts_model: string;
   debug_logging?: boolean;
   image_generation?: boolean;
+  image_provider?: string;
   claude_enabled?: boolean;
   codex_enabled?: boolean;
 };
@@ -1628,15 +1635,6 @@ function App() {
             )}
           </nav>
         )}
-        {view.kind === "empty" && reviewDueTotal > 0 && (
-          <button className="review-banner" onClick={() => setView({ kind: "review" })}>
-            <span className="review-banner-icon">🔁</span>
-            <span className="review-banner-text">
-              {t("reviewBannerBody", { count: reviewDueTotal })}
-            </span>
-            <span className="review-banner-cta">{t("reviewBannerCta")} →</span>
-          </button>
-        )}
         {view.kind === "empty" && (
           <CourseDashboard
             courses={courses}
@@ -1664,6 +1662,7 @@ function App() {
             onStartJob={startJob}
             onOpenSub={openSubmodule}
             onStartSubGen={startSubmoduleGen}
+            onReview={() => setView({ kind: "review" })}
           />
         )}
         {view.kind === "creating" && (
@@ -2365,6 +2364,7 @@ function CourseDashboard({
   onStartJob,
   onOpenSub,
   onStartSubGen,
+  onReview,
 }: {
   courses: Course[];
   jobs: Map<string, JobState>;
@@ -2391,16 +2391,54 @@ function CourseDashboard({
   onStartJob: (courseId: string, kind: JobKind) => void;
   onOpenSub: (courseId: string, moduleId: string, submoduleId: string) => void;
   onStartSubGen: (courseId: string, submoduleId: string) => void | Promise<void>;
+  onReview: () => void;
 }) {
   const t = useT();
   const [uiLang] = useLang();
   const [progressById, setProgressById] = useState<Map<string, CourseProgress>>(new Map());
   const [languageFilter, setLanguageFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [showAllCourses, setShowAllCourses] = useState(false);
+  const [showAllLessons, setShowAllLessons] = useState(false);
   const [spaces, setSpaces] = useState<Space[]>([]);
   useEffect(() => {
     invoke<Space[]>("list_spaces")
       .then(setSpaces)
       .catch(() => {});
+  }, []);
+  // Global learner stats for the experience band (streak / XP / weekly activity)
+  // and the total cards due across all courses. courseId:null = global rollup.
+  const [homeStats, setHomeStats] = useState<{
+    streakDays: number;
+    longestStreak: number;
+    xp: number;
+    reviewedToday: number;
+    dailyNewCap: number;
+    week: number[];
+  } | null>(null);
+  const [dueTotal, setDueTotal] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{
+      streakDays: number;
+      longestStreak: number;
+      xp: number;
+      reviewedToday: number;
+      dailyNewCap: number;
+      week: number[];
+    }>("get_review_stats", { courseId: null, tzOffsetSecs: tzOffsetSecs() })
+      .then((s) => {
+        if (!cancelled) setHomeStats(s);
+      })
+      .catch(() => {});
+    invoke<Record<string, number>>("due_card_counts", { tzOffsetSecs: tzOffsetSecs() })
+      .then((counts) => {
+        if (!cancelled) setDueTotal(Object.values(counts).reduce((a, b) => a + b, 0));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
   const languageOptions = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2426,14 +2464,41 @@ function CourseDashboard({
       setLanguageFilter("all");
     }
   }, [languageFilter, languageOptions]);
+  const categoryOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const course of courses) {
+      const code = normalizeCourseCategory(course.category);
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    const order = Object.keys(CATEGORY_LABELS);
+    return Array.from(counts.entries())
+      .sort(([a], [b]) => {
+        const rankA = order.indexOf(a);
+        const rankB = order.indexOf(b);
+        const safeA = rankA === -1 ? Number.MAX_SAFE_INTEGER : rankA;
+        const safeB = rankB === -1 ? Number.MAX_SAFE_INTEGER : rankB;
+        return safeA - safeB || a.localeCompare(b);
+      })
+      .map(([code, count]) => ({ code, count }));
+  }, [courses]);
+  useEffect(() => {
+    if (
+      categoryFilter !== "all" &&
+      !categoryOptions.some((option) => option.code === categoryFilter)
+    ) {
+      setCategoryFilter("all");
+    }
+  }, [categoryFilter, categoryOptions]);
   const filteredCourses = useMemo(
     () =>
-      languageFilter === "all"
-        ? courses
-        : courses.filter(
-            (course) => (course.language || "").trim().toLowerCase() === languageFilter
-          ),
-    [courses, languageFilter]
+      courses.filter(
+        (course) =>
+          (languageFilter === "all" ||
+            (course.language || "").trim().toLowerCase() === languageFilter) &&
+          (categoryFilter === "all" ||
+            normalizeCourseCategory(course.category) === categoryFilter)
+      ),
+    [courses, languageFilter, categoryFilter]
   );
   const progressKey = filteredCourses.map((c) => `${c.id}:${c.status}:${c.updated_at}`).join("|");
 
@@ -2474,20 +2539,6 @@ function CourseDashboard({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progressKey]);
-
-  const totals = filteredCourses.reduce(
-    (acc, course) => {
-      const progress = progressById.get(course.id);
-      acc.courses += 1;
-      if (progress) {
-        acc.verified += progress.verified;
-        acc.verifiedAt.push(...progress.verifiedAt);
-        if (progress.nextReady) acc.readyToContinue += 1;
-      }
-      return acc;
-    },
-    { courses: 0, verified: 0, verifiedAt: [] as number[], readyToContinue: 0 }
-  );
 
   const summaries = filteredCourses.map((course) => {
     const progress = progressById.get(course.id);
@@ -2593,10 +2644,6 @@ function CourseDashboard({
   recentCourseIds.forEach((courseId) => addFeatured(summariesById.get(courseId)));
   courseSummaries.filter((summary) => summary.progress?.nextReady).forEach(addFeatured);
   courseSummaries.forEach(addFeatured);
-  const featuredIds = new Set(featured.map((summary) => summary.course.id));
-  const courseListSummaries = courseSummaries.filter(
-    (summary) => !featuredIds.has(summary.course.id)
-  );
   const brand = t("brand");
   const almost = "(Almost)";
   const almostIndex = brand.indexOf(almost);
@@ -2604,7 +2651,7 @@ function CourseDashboard({
   const homeHeading = suggestedIdea?.topic || brand;
   const heroAction = onHomeTitleTap;
   const heroTitle = t("homeTitleTapHint");
-  const momentumItems = homeMomentumItems(totals.verifiedAt, totals.verified, 0, uiLang, t);
+  const maxWeek = Math.max(1, ...(homeStats?.week ?? [0]));
 
   return (
     <div className="home-dashboard home-editorial">
@@ -2683,13 +2730,50 @@ function CourseDashboard({
       </div>
 
       {courses.length > 0 && (
-        <div className="home-momentum" aria-label={t("homeMomentumLabel")}>
-          {momentumItems.map((item) => (
-            <span className="home-momentum-item" key={item}>
-              {item}
+        <section className="home-stats" aria-label={t("homeStatsLabel")}>
+          <div className="home-stat home-stat--streak">
+            <span className="home-stat-num">
+              <span className="home-stat-flame" aria-hidden="true">🔥</span>
+              {homeStats?.streakDays ?? 0}
             </span>
-          ))}
-        </div>
+            <span className="home-stat-label">{t("homeStatStreak")}</span>
+            {(homeStats?.longestStreak ?? 0) > 0 && (
+              <span className="home-stat-sub">
+                {t("homeStatBest", { count: homeStats?.longestStreak ?? 0 })}
+              </span>
+            )}
+          </div>
+          <div className="home-stat">
+            <span className="home-stat-num">{homeStats?.xp ?? 0}</span>
+            <span className="home-stat-label">{t("homeStatXp")}</span>
+          </div>
+          <div className="home-stat home-stat--due">
+            <span className="home-stat-num">{dueTotal}</span>
+            <span className="home-stat-label">{t("homeStatDue")}</span>
+            {dueTotal > 0 && (
+              <button className="home-stat-cta" onClick={onReview}>
+                {t("reviewBannerCta")} →
+              </button>
+            )}
+          </div>
+          <div className="home-stat home-stat--week">
+            <div className="home-stat-spark" title={t("masteryWeekChart")} aria-hidden="true">
+              {(homeStats?.week ?? Array(7).fill(0)).map((n, i) => (
+                <span
+                  key={i}
+                  className="home-stat-spark-bar"
+                  style={{ height: `${Math.max(8, (n / maxWeek) * 100)}%` }}
+                />
+              ))}
+            </div>
+            <span className="home-stat-label">
+              {t("homeStatToday", {
+                done: homeStats?.reviewedToday ?? 0,
+                cap: homeStats?.dailyNewCap ?? 0,
+              })}
+            </span>
+          </div>
+        </section>
       )}
 
       {courses.length > 0 && languageOptions.length > 1 && (
@@ -2719,132 +2803,39 @@ function CourseDashboard({
         </div>
       )}
 
-      <div className="home-bands">
-        <section className="home-spaces">
-          <div className="home-spaces-head">
-            <span className="home-section-kicker">{t("spacesTitle")}</span>
-            <button className="home-link-action" onClick={onOpenSpaces}>
-              {t("spacesManage")}
+      {courses.length > 0 && categoryOptions.length > 1 && (
+        <div className="home-language-filter" aria-label={t("homeCategoryFilterLabel")}>
+          <span className="home-language-label">{t("homeCategoryFilterLabel")}</span>
+          <div className="home-language-options">
+            <button
+              className={categoryFilter === "all" ? "active" : ""}
+              onClick={() => setCategoryFilter("all")}
+              aria-pressed={categoryFilter === "all"}
+            >
+              {t("homeCategoryAll")}
+              <span>{courses.length}</span>
             </button>
-          </div>
-          <div className="home-spaces-row">
-            {spaces.slice(0, 4).map((s) => (
-              <button key={s.id} className="home-space-card" onClick={() => onOpenSpace(s.id)}>
-                <span className="home-space-name">{s.name}</span>
-                <span className="home-space-meta">
-                  {t("spaceSourceCount", { count: s.source_count })}
-                </span>
+            {categoryOptions.map((option) => (
+              <button
+                key={option.code}
+                className={categoryFilter === option.code ? "active" : ""}
+                onClick={() => setCategoryFilter(option.code)}
+                aria-pressed={categoryFilter === option.code}
+              >
+                {categoryLabel(option.code, uiLang)}
+                <span>{option.count}</span>
               </button>
             ))}
-            <button className="home-space-card home-space-new" onClick={onOpenSpaces}>
-              <span className="home-space-name">+ {t("spaceCreate")}</span>
-              <span className="home-space-meta">{t("spacesShortHint")}</span>
-            </button>
           </div>
-        </section>
-
-        <section className="home-spaces home-roadmaps">
-          <div className="home-spaces-head">
-            <span className="home-section-kicker">{t("roadmapsTitle")}</span>
-            <button className="home-link-action" onClick={onOpenRoadmaps}>
-              {t("roadmapsManage")}
-            </button>
-          </div>
-          <div className="home-spaces-row">
-            {roadmaps.slice(0, 4).map((r) => (
-              <button key={r.id} className="home-space-card" onClick={() => onOpenRoadmap(r.id)}>
-                <span className="home-space-name">{r.title ?? r.topic}</span>
-                {r.status === "ready" && typeof r.total_skills === "number" ? (
-                  <>
-                    <span className="home-space-meta">
-                      {t("roadmapProgress", {
-                        done: String(r.done_skills ?? 0),
-                        total: String(r.total_skills),
-                      })}
-                    </span>
-                    <span className="home-card-progress" aria-hidden="true">
-                      <span
-                        style={{
-                          width: `${r.total_skills ? Math.round(((r.done_skills ?? 0) / r.total_skills) * 100) : 0}%`,
-                        }}
-                      />
-                    </span>
-                  </>
-                ) : (
-                  <span className="home-space-meta">{roadmapStatusLabel(r.status, t)}</span>
-                )}
-              </button>
-            ))}
-            <button className="home-space-card home-space-new" onClick={onNewRoadmap}>
-              <span className="home-space-name">+ {t("roadmapCreate")}</span>
-              <span className="home-space-meta">{t("roadmapShortHint")}</span>
-            </button>
-          </div>
-        </section>
-      </div>
-
-      {courses.length === 0 ? (
-        <div className="home-empty">
-          <h2>{t("homeEmptyTitle")}</h2>
-          <p>{t("homeEmptyBody")}</p>
-          <button onClick={onNewCourse}>{t("newCourse")}</button>
-        </div>
-      ) : courseSummaries.length === 0 ? null : (
-        <div className="home-paper-grid">
-          <section className="home-featured">
-            <div className="home-section-kicker">{t("homeFocusTitle")}</div>
-            <div className="home-feature-list">
-              {featured.map((summary) => (
-                <article className="home-feature-card" key={summary.course.id}>
-                  <button
-                    className="home-feature-title"
-                    onClick={summary.action}
-                    disabled={summary.actionDisabled}
-                  >
-                    {courseTitle(summary.course, t("courseTitlePending"))}
-                  </button>
-                  <p className="home-card-progress-line">
-                    {courseCardProgressLine(summary, uiLang, t)}
-                  </p>
-                  <div className="home-hairline-progress" aria-hidden="true">
-                    <span style={{ width: `${summary.verifiedPercent}%` }} />
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="home-index">
-            <div className="home-section-kicker">{t("homeCoursesTitle")}</div>
-            <ol className="home-course-list">
-              {courseListSummaries.map((summary) => (
-                <li key={summary.course.id}>
-                  <button onClick={() => onOpenCourse(summary.course.id)}>
-                    {courseTitle(summary.course, t("courseTitlePending"))}
-                  </button>
-                  <span className="home-course-progress">{coursePositionLine(summary, t)}</span>
-                  <span>{courseUnderstandingLine(summary, uiLang, t)}</span>
-                  {courseGenerationLine(summary, t) && (
-                    <span className="home-course-generation">
-                      {courseGenerationLine(summary, t)}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ol>
-            {courseListSummaries.length === 0 && (
-              <p className="home-index-empty">{t("homeNoOtherCourses")}</p>
-            )}
-          </section>
         </div>
       )}
 
-      {lessonSummaries.length > 0 && (
-        <section className="home-lessons">
-          <div className="home-section-kicker">{t("homeLessonsTitle")}</div>
-          <div className="home-lessons-list">
-            {lessonSummaries.map((summary) => (
-              <article className="home-feature-card" key={summary.course.id}>
+      {featured.length > 0 && (
+        <section className="home-continue">
+          <div className="home-section-kicker">{t("homeContinueTitle")}</div>
+          <div className="home-continue-row">
+            {featured.map((summary) => (
+              <article className="home-continue-card" key={summary.course.id}>
                 <button
                   className="home-feature-title"
                   onClick={summary.action}
@@ -2858,11 +2849,179 @@ function CourseDashboard({
                 <div className="home-hairline-progress" aria-hidden="true">
                   <span style={{ width: `${summary.verifiedPercent}%` }} />
                 </div>
+                <button
+                  className="home-continue-cta"
+                  onClick={summary.action}
+                  disabled={summary.actionDisabled}
+                >
+                  {summary.actionLabel} →
+                </button>
               </article>
             ))}
           </div>
         </section>
       )}
+
+      <div className="home-library">
+        {courses.length === 0 && (
+          <div className="home-empty">
+            <h2>{t("homeEmptyTitle")}</h2>
+            <p>{t("homeEmptyBody")}</p>
+            <button onClick={onNewCourse}>{t("newCourse")}</button>
+          </div>
+        )}
+
+        {courseSummaries.length > 0 && (
+          <section className="home-shelf">
+            <div className="home-shelf-head">
+              <span className="home-section-kicker">{t("homeCoursesTitle")}</span>
+              {courseSummaries.length > 8 && (
+                <button
+                  className="home-link-action"
+                  onClick={() => setShowAllCourses((v) => !v)}
+                >
+                  {showAllCourses
+                    ? t("homeShowLess")
+                    : `${t("homeShowAll")} (${courseSummaries.length}) →`}
+                </button>
+              )}
+            </div>
+            <div className="home-card-grid">
+              {(showAllCourses ? courseSummaries : courseSummaries.slice(0, 8)).map((summary) => {
+                const generation = courseGenerationLine(summary, t);
+                return (
+                  <button
+                    className="home-card home-card--course"
+                    key={summary.course.id}
+                    onClick={summary.action}
+                    disabled={summary.actionDisabled}
+                  >
+                    <span className="home-card-title">
+                      {courseTitle(summary.course, t("courseTitlePending"))}
+                    </span>
+                    <span className="home-card-meta">{coursePositionLine(summary, t)}</span>
+                    <span className="home-card-meta">
+                      {courseUnderstandingLine(summary, uiLang, t)}
+                    </span>
+                    {generation && <span className="home-card-tag">{generation}</span>}
+                    <span className="home-hairline-progress" aria-hidden="true">
+                      <span style={{ width: `${summary.verifiedPercent}%` }} />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        <section className="home-shelf">
+          <div className="home-shelf-head">
+            <span className="home-section-kicker">{t("roadmapsTitle")}</span>
+            <button className="home-link-action" onClick={onOpenRoadmaps}>
+              {t("roadmapsManage")}
+            </button>
+          </div>
+          <div className="home-card-grid">
+            {roadmaps.slice(0, 6).map((r) => (
+              <button
+                key={r.id}
+                className="home-card home-card--roadmap"
+                onClick={() => onOpenRoadmap(r.id)}
+              >
+                <span className="home-card-title">{r.title ?? r.topic}</span>
+                {r.status === "ready" && typeof r.total_skills === "number" ? (
+                  <>
+                    <span className="home-card-meta">
+                      {t("roadmapProgress", {
+                        done: String(r.done_skills ?? 0),
+                        total: String(r.total_skills),
+                      })}
+                    </span>
+                    <span className="home-hairline-progress" aria-hidden="true">
+                      <span
+                        style={{
+                          width: `${r.total_skills ? Math.round(((r.done_skills ?? 0) / r.total_skills) * 100) : 0}%`,
+                        }}
+                      />
+                    </span>
+                  </>
+                ) : (
+                  <span className="home-card-meta">{roadmapStatusLabel(r.status, t)}</span>
+                )}
+              </button>
+            ))}
+            <button className="home-card home-card--new" onClick={onNewRoadmap}>
+              <span className="home-card-title">+ {t("roadmapCreate")}</span>
+              <span className="home-card-meta">{t("roadmapShortHint")}</span>
+            </button>
+          </div>
+        </section>
+
+        <section className="home-shelf">
+          <div className="home-shelf-head">
+            <span className="home-section-kicker">{t("spacesTitle")}</span>
+            <button className="home-link-action" onClick={onOpenSpaces}>
+              {t("spacesManage")}
+            </button>
+          </div>
+          <div className="home-card-grid">
+            {spaces.slice(0, 6).map((s) => (
+              <button
+                key={s.id}
+                className="home-card home-card--space"
+                onClick={() => onOpenSpace(s.id)}
+              >
+                <span className="home-card-title">{s.name}</span>
+                <span className="home-card-meta">
+                  {t("spaceSourceCount", { count: s.source_count })}
+                </span>
+              </button>
+            ))}
+            <button className="home-card home-card--new" onClick={onOpenSpaces}>
+              <span className="home-card-title">+ {t("spaceCreate")}</span>
+              <span className="home-card-meta">{t("spacesShortHint")}</span>
+            </button>
+          </div>
+        </section>
+
+        {lessonSummaries.length > 0 && (
+          <section className="home-shelf">
+            <div className="home-shelf-head">
+              <span className="home-section-kicker">{t("homeLessonsTitle")}</span>
+              {lessonSummaries.length > 6 && (
+                <button
+                  className="home-link-action"
+                  onClick={() => setShowAllLessons((v) => !v)}
+                >
+                  {showAllLessons
+                    ? t("homeShowLess")
+                    : `${t("homeShowAll")} (${lessonSummaries.length}) →`}
+                </button>
+              )}
+            </div>
+            <div className="home-card-grid">
+              {(showAllLessons ? lessonSummaries : lessonSummaries.slice(0, 6)).map((summary) => (
+                <button
+                  className="home-card home-card--lesson"
+                  key={summary.course.id}
+                  onClick={summary.action}
+                  disabled={summary.actionDisabled}
+                >
+                  <span className="home-card-title">
+                    {courseTitle(summary.course, t("courseTitlePending"))}
+                  </span>
+                  <span className="home-card-meta">
+                    {courseCardProgressLine(summary, uiLang, t)}
+                  </span>
+                  <span className="home-hairline-progress" aria-hidden="true">
+                    <span style={{ width: `${summary.verifiedPercent}%` }} />
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
 
       <HomeSystemStatus
         agentAvail={agentAvail}
@@ -3051,65 +3210,9 @@ function courseGenerationLine(
   return null;
 }
 
-function homeMomentumItems(
-  verifiedAt: number[],
-  verified: number,
-  reviewDue: number,
-  lang: Lang,
-  t: ReturnType<typeof useT>
-) {
-  const undatedVerified = Math.max(0, verified - verifiedAt.length);
-  const streak = Math.max(studyStreakDays(verifiedAt), undatedVerified > 0 ? 1 : 0);
-  const weekChecks = checksThisWeek(verifiedAt) + undatedVerified;
-  return [
-    streak > 0 ? t("homeMomentumStreak", { count: streak }) : t("homeMomentumStartStreak"),
-    weekChecks > 0
-      ? t("homeMomentumWeekChecks", { tests: testCount(weekChecks, lang) })
-      : t("homeMomentumFirstWeekCheck"),
-    verified > 0
-      ? t("homeMomentumVerified", { topics: topicCount(verified, lang) })
-      : t("homeMomentumFirstVerified"),
-    reviewDue > 0 ? t("homeMomentumReview", { count: reviewDue }) : t("homeMomentumReviewClear"),
-  ];
-}
-
-function checksThisWeek(timestamps: number[]) {
-  const start = new Date();
-  const mondayOffset = (start.getDay() + 6) % 7;
-  start.setDate(start.getDate() - mondayOffset);
-  start.setHours(0, 0, 0, 0);
-  const startMs = start.getTime();
-  return timestamps.filter((ts) => ts * 1000 >= startMs).length;
-}
-
-function studyStreakDays(timestamps: number[]) {
-  if (timestamps.length === 0) return 0;
-  const days = new Set(timestamps.map((ts) => startOfLocalDay(ts * 1000)));
-  const dayMs = 86_400_000;
-  let cursor = startOfLocalDay(Date.now());
-  if (!days.has(cursor)) cursor -= dayMs;
-  let count = 0;
-  while (days.has(cursor)) {
-    count += 1;
-    cursor -= dayMs;
-  }
-  return count;
-}
-
-function startOfLocalDay(ms: number) {
-  const date = new Date(ms);
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
-}
-
 function topicCount(count: number, lang: Lang) {
   if (lang === "ru") return `${count} ${ruPlural(count, "тема", "темы", "тем")}`;
   return `${count} ${count === 1 ? "topic" : "topics"}`;
-}
-
-function testCount(count: number, lang: Lang) {
-  if (lang === "ru") return `${count} ${ruPlural(count, "тест", "теста", "тестов")}`;
-  return `${count} ${count === 1 ? "test" : "tests"}`;
 }
 
 function ruPlural(count: number, one: string, few: string, many: string) {
@@ -3634,6 +3737,7 @@ function SettingsModal({
   const [savingDebug, setSavingDebug] = useState(false);
   const [imageGeneration, setImageGeneration] = useState(true);
   const [savingImageGen, setSavingImageGen] = useState(false);
+  const [imageProvider, setImageProvider] = useState("auto");
   const [claudeEnabled, setClaudeEnabled] = useState(true);
   const [codexEnabled, setCodexEnabled] = useState(true);
   const [savingAgents, setSavingAgents] = useState(false);
@@ -3690,6 +3794,7 @@ function SettingsModal({
     if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
     setDebugLogging(Boolean(s.debug_logging));
     setImageGeneration(s.image_generation !== false);
+    setImageProvider(s.image_provider || "auto");
     setClaudeEnabled(s.claude_enabled !== false);
     setCodexEnabled(s.codex_enabled !== false);
   }
@@ -3715,6 +3820,16 @@ function SettingsModal({
       /* ignore */
     } finally {
       setSavingImageGen(false);
+    }
+  }
+
+  async function saveImageProvider(provider: string) {
+    setImageProvider(provider);
+    try {
+      const saved = await invoke<string>("set_image_provider", { provider });
+      setImageProvider(saved || "auto");
+    } catch {
+      /* ignore */
     }
   }
 
@@ -4147,6 +4262,20 @@ function SettingsModal({
             <span className="setting-label">{t("imageGenerationLabel")}</span>
           </label>
           <div className="setting-note">{t("imageGenerationNote")}</div>
+          {imageGeneration && (
+            <div className="tts-voice-row">
+              <span className="setting-note">{t("imageProviderLabel")}</span>
+              <select
+                className="tts-voice-select"
+                value={imageProvider}
+                onChange={(e) => saveImageProvider(e.target.value)}
+              >
+                <option value="auto">{t("imageProviderAuto")}</option>
+                <option value="gemini">{t("imageProviderGemini")}</option>
+                <option value="codex">{t("imageProviderCodex")}</option>
+              </select>
+            </div>
+          )}
         </div>
 
         <div className="setting-group">
@@ -8557,6 +8686,9 @@ type WidgetImageItem = {
   url?: string;
   source?: string;
   generated?: boolean;
+  // Short, precise web-image search query (fast-model-derived, cached). Distinct
+  // from `prompt` (the verbose generation prompt) and `description` (the caption).
+  query?: string;
 };
 
 type WidgetData =
@@ -8673,6 +8805,8 @@ type AssistantMsg = {
   text: string;
   fragment?: string;
   image?: string;
+  // Images the assistant generated in the dialog (local file paths).
+  images?: string[];
   widgetRef?: { type: string; summary: string };
 };
 
@@ -8934,7 +9068,7 @@ function CourseAssistant({
     const intro = t("socraticAutoIntro");
     setMessages([{ role: "user", text: intro }]);
     setBusy(true);
-    invoke<string>("ask_course_assistant", {
+    invoke<{ answer: string; images: string[] }>("ask_course_assistant", {
       courseId,
       moduleId,
       submoduleId,
@@ -8947,8 +9081,11 @@ function CourseAssistant({
       exercise: seed,
       exchangeCount: 0,
     })
-      .then((answer) =>
-        setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }])
+      .then((r) =>
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", text: r.answer || "…", images: r.images },
+        ])
       )
       .catch((e) => setError(String(e)))
       .finally(() => setBusy(false));
@@ -9003,7 +9140,7 @@ function CourseAssistant({
     setBusy(true);
     setError(null);
     try {
-      const answer = await invoke<string>("ask_course_assistant", {
+      const r = await invoke<{ answer: string; images: string[] }>("ask_course_assistant", {
         courseId,
         moduleId,
         submoduleId,
@@ -9016,7 +9153,10 @@ function CourseAssistant({
         exercise,
         exchangeCount: messages.filter((m) => m.role === "assistant").length,
       });
-      setMessages((prev) => [...prev, { role: "assistant", text: answer || "…" }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: r.answer || "…", images: r.images },
+      ]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -9066,9 +9206,12 @@ function CourseAssistant({
     setError(null);
     setCandidates([]);
     try {
-      const cands = await invoke<ImageCandidate[]>("search_widget_candidates", args);
-      setCandidates(cands);
-      if (!cands.length) note(t("widgetNotFound"));
+      const res = await invoke<{ query: string; candidates: ImageCandidate[] }>(
+        "search_widget_candidates",
+        args
+      );
+      setCandidates(res.candidates);
+      if (!res.candidates.length) note(t("widgetNotFound"));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -9255,6 +9398,14 @@ function CourseAssistant({
                         >
                           {m.text}
                         </ReactMarkdown>
+                        {m.images?.map((src, j) => (
+                          <img
+                            key={j}
+                            className="assistant-msg-img"
+                            src={convertFileSrc(src)}
+                            alt=""
+                          />
+                        ))}
                       </div>
                     ) : (
                       <div className="assistant-text">
@@ -11995,6 +12146,166 @@ function LeTextBlock({
   );
 }
 
+// Image editing controls for one target: a single image widget (no itemIndex)
+// or one gallery item (itemIndex set). Offers a free-text query that refines
+// both search and regeneration, plus upload / search / generate / URL / delete.
+// Each instance owns its own candidates/query/url state so gallery items don't
+// interfere with each other.
+function ImageItemEditor({
+  args,
+  itemIndex,
+  imgSrc,
+  alt,
+  description,
+  onDescriptionChange,
+  cachedQuery,
+  onQueryResolved,
+  canGenerate,
+  busy,
+  runHeavy,
+  onDelete,
+}: {
+  args: { courseId: string; moduleId: string; submoduleId: string; widgetId: string };
+  itemIndex?: number;
+  imgSrc: string;
+  alt?: string;
+  description?: string;
+  onDescriptionChange?: (value: string) => void;
+  cachedQuery?: string;
+  onQueryResolved?: (value: string) => void;
+  canGenerate: boolean;
+  busy: boolean;
+  runHeavy: (op: () => Promise<void>, opts?: { refresh?: boolean }) => Promise<void>;
+  onDelete?: () => void;
+}) {
+  const t = useT();
+  const [cands, setCands] = useState<
+    Array<{ url: string; source?: string; title?: string; thumbnail?: string }>
+  >([]);
+  const [urlInput, setUrlInput] = useState("");
+  const [query, setQuery] = useState("");
+  const callArgs = itemIndex == null ? args : { ...args, itemIndex };
+  const q = () => (query.trim() ? query.trim() : null);
+  return (
+    <div className="le-image-item">
+      {imgSrc ? (
+        <img className="le-widget-img" src={imgSrc} alt={alt || ""} />
+      ) : (
+        <div className="le-img-empty">{t("widgetImageNone")}</div>
+      )}
+      {onDescriptionChange && (
+        <input
+          className="le-cap"
+          placeholder={t("descriptionLabel")}
+          value={description || ""}
+          disabled={busy}
+          onChange={(e) => onDescriptionChange(e.target.value)}
+        />
+      )}
+      <input
+        className="le-cap"
+        placeholder={t("widgetRefineQuery")}
+        value={query}
+        disabled={busy}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {cachedQuery && (
+        <div className="le-query-hint">
+          {t("widgetSearchQueryHint")}: {cachedQuery}
+        </div>
+      )}
+      <div className="le-widget-actions">
+        <button
+          disabled={busy}
+          onClick={() =>
+            runHeavy(async () => {
+              const sel = await openFileDialog({
+                multiple: false,
+                filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+              });
+              const path = typeof sel === "string" ? sel : null;
+              if (path) await invoke("import_local_image", { ...callArgs, srcPath: path });
+            })
+          }
+        >
+          ⤓ {t("widgetImageUpload")}
+        </button>
+        <button
+          disabled={busy}
+          onClick={() =>
+            runHeavy(
+              async () => {
+                const res = await invoke<{
+                  query: string;
+                  candidates: Array<{ url: string; source?: string; title?: string; thumbnail?: string }>;
+                }>("search_widget_candidates", { ...callArgs, query: q() });
+                setCands(res.candidates || []);
+                // Persist the resolved query (override / cached / fast-model-derived)
+                // into editor state so it sticks on save and shows as the hint.
+                if (res.query && res.query !== cachedQuery) onQueryResolved?.(res.query);
+              },
+              { refresh: false }
+            )
+          }
+        >
+          🔍 {t("widgetImageSearch")}
+        </button>
+        {canGenerate && (
+          <button
+            disabled={busy}
+            onClick={() => runHeavy(async () => { await invoke("generate_widget_image", { ...callArgs, query: q() }); })}
+          >
+            ✦ {t("widgetImageGenerate")}
+          </button>
+        )}
+        {onDelete && (
+          <button className="ghost" disabled={busy} onClick={onDelete}>
+            🗑 {t("galleryRemoveItem")}
+          </button>
+        )}
+      </div>
+      <div className="le-url-row">
+        <input
+          placeholder={t("widgetImageUrl")}
+          value={urlInput}
+          disabled={busy}
+          onChange={(e) => setUrlInput(e.target.value)}
+        />
+        <button
+          disabled={busy || !urlInput.trim()}
+          onClick={() =>
+            runHeavy(async () => {
+              await invoke("set_widget_image", { ...callArgs, url: urlInput.trim(), source: null });
+              setUrlInput("");
+            })
+          }
+        >
+          OK
+        </button>
+      </div>
+      {cands.length > 0 && (
+        <div className="le-cands">
+          {cands.map((c, i) => (
+            <button
+              key={i}
+              className="le-cand"
+              disabled={busy}
+              onClick={() =>
+                runHeavy(async () => {
+                  await invoke("set_widget_image", { ...callArgs, url: c.url, source: c.source ?? null });
+                  setCands([]);
+                })
+              }
+            >
+              <img src={c.thumbnail || c.url} alt={c.title || ""} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Per-widget editor. Manual fields go into the editor's widgets map (saved
 // wholesale); heavy ops (upload / search / generate / AI-fix) run via runHeavy,
 // which persists first so the widget exists on disk, then re-reads it back.
@@ -12017,10 +12328,6 @@ function LeWidgetBlock({
 }) {
   const t = useT();
   const type = widget?.type ?? "widget";
-  const [cands, setCands] = useState<
-    Array<{ url: string; source?: string; title?: string; thumbnail?: string }>
-  >([]);
-  const [urlInput, setUrlInput] = useState("");
   const [genDesc, setGenDesc] = useState("");
   const [showCode, setShowCode] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
@@ -12031,93 +12338,17 @@ function LeWidgetBlock({
     return (
       <figure className="le-widget le-widget-image">
         <div className="le-widget-tag">🖼 {t("blockImage")}</div>
-        {imgSrc ? (
-          <img className="le-widget-img" src={imgSrc} alt={widget?.alt || ""} />
-        ) : (
-          <div className="le-img-empty">{t("widgetImageNone")}</div>
-        )}
-        <div className="le-widget-actions">
-          <button
-            disabled={busy}
-            onClick={() =>
-              runHeavy(async () => {
-                const sel = await openFileDialog({
-                  multiple: false,
-                  filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
-                });
-                const path = typeof sel === "string" ? sel : null;
-                if (path) await invoke("import_local_image", { ...args, srcPath: path });
-              })
-            }
-          >
-            ⤓ {t("widgetImageUpload")}
-          </button>
-          <button
-            disabled={busy}
-            onClick={() =>
-              runHeavy(
-                async () => {
-                  const c = await invoke<any[]>("search_widget_candidates", args);
-                  setCands((c as any) || []);
-                },
-                { refresh: false }
-              )
-            }
-          >
-            🔍 {t("widgetImageSearch")}
-          </button>
-          {canGenerate && (
-            <button
-              disabled={busy}
-              onClick={() => runHeavy(async () => { await invoke("generate_widget_image", args); })}
-            >
-              ✦ {t("widgetImageGenerate")}
-            </button>
-          )}
-        </div>
-        <div className="le-url-row">
-          <input
-            placeholder={t("widgetImageUrl")}
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-          />
-          <button
-            disabled={busy || !urlInput.trim()}
-            onClick={() =>
-              runHeavy(async () => {
-                await invoke("set_widget_image", { ...args, url: urlInput.trim(), source: null });
-                setUrlInput("");
-              })
-            }
-          >
-            OK
-          </button>
-        </div>
-        {cands.length > 0 && (
-          <div className="le-cands">
-            {cands.map((c, i) => (
-              <button
-                key={i}
-                className="le-cand"
-                disabled={busy}
-                onClick={() =>
-                  runHeavy(async () => {
-                    await invoke("set_widget_image", { ...args, url: c.url, source: c.source ?? null });
-                    setCands([]);
-                  })
-                }
-              >
-                <img src={c.thumbnail || c.url} alt={c.title || ""} />
-              </button>
-            ))}
-          </div>
-        )}
-        <input
-          className="le-cap"
-          placeholder={t("descriptionLabel")}
-          value={widget?.description || ""}
-          disabled={busy}
-          onChange={(e) => onPatch({ description: e.target.value })}
+        <ImageItemEditor
+          args={args}
+          imgSrc={imgSrc}
+          alt={widget?.alt}
+          description={widget?.description}
+          onDescriptionChange={(v) => onPatch({ description: v })}
+          cachedQuery={widget?.query}
+          onQueryResolved={(query) => onPatch({ query })}
+          canGenerate={canGenerate}
+          busy={busy}
+          runHeavy={runHeavy}
         />
       </figure>
     );
@@ -12290,12 +12521,37 @@ function LeWidgetBlock({
     );
   }
   if (type === "gallery") {
+    const items: any[] = Array.isArray(widget?.items) ? widget.items : [];
     return (
-      <figure className="le-widget">
-        <div className="le-widget-tag">🖼 {t("blockImage")} ×{Array.isArray(widget?.items) ? widget.items.length : 0}</div>
-        <WidgetRenderer id={wid} widget={widget} />
+      <figure className="le-widget le-widget-image">
+        <div className="le-widget-tag">🖼 {t("blockImage")} ×{items.length}</div>
         <input className="le-cap" placeholder={t("captionLabel")} value={widget?.caption || ""} disabled={busy} onChange={(e) => onPatch({ caption: e.target.value })} />
-        <div className="le-note">{t("galleryEditNote")}</div>
+        <div className="le-gallery-items">
+          {items.map((item, i) => {
+            const { imgSrc } = resolveWidgetImage(item?.url, item?.source);
+            return (
+              <ImageItemEditor
+                key={i}
+                args={args}
+                itemIndex={i}
+                imgSrc={imgSrc}
+                alt={item?.alt}
+                description={item?.description}
+                onDescriptionChange={(v) =>
+                  onPatch({ items: items.map((it, j) => (j === i ? { ...it, description: v } : it)) })
+                }
+                cachedQuery={item?.query}
+                onQueryResolved={(query) =>
+                  onPatch({ items: items.map((it, j) => (j === i ? { ...it, query } : it)) })
+                }
+                canGenerate={canGenerate}
+                busy={busy}
+                runHeavy={runHeavy}
+                onDelete={() => runHeavy(async () => { await invoke("remove_widget", { ...args, itemIndex: i }); })}
+              />
+            );
+          })}
+        </div>
       </figure>
     );
   }
@@ -12642,11 +12898,22 @@ function resolveWidgetImage(url?: string, source?: string) {
   return { hasUrl, imgSrc, linkHref };
 }
 
+// Normalize an attribution value into a clickable absolute URL. Sources are
+// sometimes stored as a bare host ("sputnik8.com") with no scheme, which an <a>
+// tag would treat as a relative path (→ localhost:1430/sputnik8.com).
+function externalHref(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith("/") || trimmed.startsWith("file://")) return undefined;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed.replace(/^\/+/, "")}`;
+}
+
 function widgetImageSourceHref(item: WidgetImageItem) {
-  if (item.source) return item.source;
+  if (item.source) return externalHref(item.source);
   if (!item.url || item.generated) return undefined;
   if (item.url.startsWith("/") || item.url.startsWith("file://")) return undefined;
-  return item.url;
+  return externalHref(item.url);
 }
 
 function ImageCaption({
@@ -15114,9 +15381,12 @@ function ImagePlaceholder({
     setPhase("searching");
     setActionError(null);
     try {
-      const cands = await invoke<ImageCandidate[]>("search_widget_candidates", ctxArgs);
-      if (cands.length) {
-        setCandidates(cands);
+      const res = await invoke<{ query: string; candidates: ImageCandidate[] }>(
+        "search_widget_candidates",
+        ctxArgs
+      );
+      if (res.candidates.length) {
+        setCandidates(res.candidates);
         setPhase("picking");
       } else {
         setPhase("notfound");
