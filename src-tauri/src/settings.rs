@@ -45,17 +45,6 @@ pub struct Settings {
     /// other value) means "auto" — Gemini when a key is set, else Codex.
     #[serde(default)]
     pub image_provider: Option<String>,
-    /// Google Programmable Search (Custom Search JSON API) credentials for web
-    /// image search. Both the API key and the search-engine id (cx) are required
-    /// to use the "google" image-search engine.
-    #[serde(default)]
-    pub google_search_api_key: Option<String>,
-    #[serde(default)]
-    pub google_search_cx: Option<String>,
-    /// Which engine finds REAL images (search/illustration): "auto" (Google
-    /// first, Brave fallback) | "google" | "brave". `None`/other == "auto".
-    #[serde(default)]
-    pub image_search_provider: Option<String>,
     /// Global default generation cost/quality profile (tier + knobs). Courses can
     /// override per-course; default == today's behavior.
     #[serde(default)]
@@ -437,38 +426,6 @@ impl SettingsState {
         self.persist()
     }
 
-    pub fn google_search_api_key(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|s| s.google_search_api_key.clone())
-            .filter(|k| !k.trim().is_empty())
-    }
-
-    pub fn google_search_cx(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|s| s.google_search_cx.clone())
-            .filter(|k| !k.trim().is_empty())
-    }
-
-    /// Google image search is usable only when BOTH the API key and the
-    /// search-engine id (cx) are configured.
-    pub fn google_search_configured(&self) -> bool {
-        self.google_search_api_key().is_some() && self.google_search_cx().is_some()
-    }
-
-    pub fn set_google_search(&self, key: Option<String>, cx: Option<String>) -> std::io::Result<()> {
-        {
-            let mut guard = self.inner.lock().expect("settings lock");
-            guard.google_search_api_key =
-                key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-            guard.google_search_cx = cx.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-        }
-        self.persist()
-    }
-
     pub fn share_domains(&self) -> Vec<String> {
         self.inner
             .lock()
@@ -728,31 +685,6 @@ impl SettingsState {
             // Store only explicit engines; "auto" (the default) is kept as None.
             guard.image_provider = match p.as_str() {
                 "gemini" | "codex" => Some(p),
-                _ => None,
-            };
-        }
-        self.persist()
-    }
-
-    /// Which engine finds real images: "auto" (Google first, Brave fallback) |
-    /// "google" | "brave".
-    pub fn image_search_provider(&self) -> String {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|s| s.image_search_provider.clone())
-            .map(|p| p.trim().to_lowercase())
-            .filter(|p| p == "google" || p == "brave")
-            .unwrap_or_else(|| "auto".to_string())
-    }
-
-    pub fn set_image_search_provider(&self, provider: String) -> std::io::Result<()> {
-        {
-            let mut guard = self.inner.lock().expect("settings lock");
-            let p = provider.trim().to_lowercase();
-            // Store only explicit engines; "auto" (the default) is kept as None.
-            guard.image_search_provider = match p.as_str() {
-                "google" | "brave" => Some(p),
                 _ => None,
             };
         }

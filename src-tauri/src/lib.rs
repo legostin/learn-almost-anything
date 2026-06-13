@@ -2739,81 +2739,6 @@ fn generate_image_bytes(
     None
 }
 
-/// Resolved image-search configuration: which engine(s) to use for finding REAL
-/// images and their credentials. "auto" tries Google first (when configured) and
-/// falls back to Brave; "google"/"brave" force one engine.
-struct ImageSearchCfg {
-    provider: String,
-    brave_key: Option<String>,
-    google_key: Option<String>,
-    google_cx: Option<String>,
-}
-
-impl ImageSearchCfg {
-    fn from_settings(settings: &SettingsState, brave_key: Option<String>) -> Self {
-        Self {
-            provider: settings.image_search_provider(),
-            brave_key,
-            google_key: settings.google_search_api_key(),
-            google_cx: settings.google_search_cx(),
-        }
-    }
-
-    fn any_configured(&self) -> bool {
-        self.brave_key.is_some() || (self.google_key.is_some() && self.google_cx.is_some())
-    }
-
-    /// Run a web image search honoring the provider preference. In "auto" mode
-    /// Google is tried first and Brave is the fallback (on error, no results, or
-    /// when Google isn't configured). Returns the shared BraveImageHit shape.
-    fn search(&self, query: &str, count: u32) -> Result<Vec<media::BraveImageHit>, media::MediaError> {
-        let google_ready = self.google_key.is_some() && self.google_cx.is_some();
-        let run_google = || {
-            media::google_image_search(
-                self.google_key.as_deref().unwrap_or(""),
-                self.google_cx.as_deref().unwrap_or(""),
-                query,
-                count,
-            )
-        };
-        let run_brave =
-            || media::brave_image_search(self.brave_key.as_deref().unwrap_or(""), query, count);
-        match self.provider.as_str() {
-            "google" => {
-                if google_ready {
-                    run_google()
-                } else {
-                    Ok(Vec::new())
-                }
-            }
-            "brave" => {
-                if self.brave_key.is_some() {
-                    run_brave()
-                } else {
-                    Ok(Vec::new())
-                }
-            }
-            _ => {
-                // auto: prefer Google, fall back to Brave on error/empty/unconfigured.
-                if google_ready {
-                    match run_google() {
-                        Ok(hits) if !hits.is_empty() => return Ok(hits),
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("[image-search] google failed, falling back to brave: {e}")
-                        }
-                    }
-                }
-                if self.brave_key.is_some() {
-                    run_brave()
-                } else {
-                    Ok(Vec::new())
-                }
-            }
-        }
-    }
-}
-
 fn illustrate_widgets(
     app: &AppHandle,
     course: &db::Course,
@@ -2831,11 +2756,11 @@ fn illustrate_widgets(
     // AI image generation requires BOTH the global Settings toggle and the
     // course's illustration tier being "full"; "search" tiers find real images
     // only (no Gemini spend), "off" skips the pass upstream.
-    let settings = app.state::<Arc<SettingsState>>();
-    let generate_images = illustration_full && settings.image_generation();
+    let generate_images =
+        illustration_full && app.state::<Arc<SettingsState>>().image_generation();
     // Which engine can actually run depends on the chosen provider: Gemini needs
     // a key; Codex only works for Codex-agent courses. "auto" accepts either.
-    let provider = settings.image_provider();
+    let provider = app.state::<Arc<SettingsState>>().image_provider();
     let engine_available = match provider.as_str() {
         "gemini" => gemini_key.is_some(),
         "codex" => course.agent == "codex",
@@ -2843,9 +2768,7 @@ fn illustrate_widgets(
     };
     let can_generate = generate_images && engine_available;
     let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
-    // Real-image search engine(s): Google and/or Brave, per the Settings choice.
-    let search_cfg = ImageSearchCfg::from_settings(&settings, brave_key.clone());
-    if !search_cfg.any_configured() && !can_generate && !can_agent_search {
+    if brave_key.is_none() && !can_generate && !can_agent_search {
         return widgets;
     }
     let mut widgets_map = match widgets.as_object() {
@@ -2978,7 +2901,7 @@ fn illustrate_widgets(
                     existing_url.as_deref(),
                     source.as_deref(),
                     existing_query.as_deref(),
-                    &search_cfg,
+                    brave_key,
                     gemini_key,
                     model_config,
                     gemini_image_model,
@@ -3239,7 +3162,7 @@ fn illustrate_one_widget(
     existing_url: Option<&str>,
     existing_source: Option<&str>,
     existing_query: Option<&str>,
-    search_cfg: &ImageSearchCfg,
+    brave_key: &Option<String>,
     gemini_key: &Option<String>,
     model_config: &serde_json::Value,
     gemini_image_model: &str,
@@ -3316,11 +3239,11 @@ fn illustrate_one_widget(
             Some(&format!("{} (round {}/3)", query, round + 1)),
         );
         let mut next_query = String::new();
-        let hits = if search_cfg.any_configured() {
-            match search_cfg.search(&query, 12) {
+        let hits = if let Some(key) = brave_key.as_deref() {
+            match media::brave_image_search(key, &query, 12) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("[illustrate] image search '{wid}' round {round}: {e}");
+                    eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
                     break;
                 }
             }
@@ -3474,8 +3397,6 @@ struct SettingsStatus {
     debug_logging: bool,
     image_generation: bool,
     image_provider: String,
-    google_search_configured: bool,
-    image_search_provider: String,
     claude_enabled: bool,
     codex_enabled: bool,
 }
@@ -3625,8 +3546,6 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         debug_logging: state.debug_logging(),
         image_generation: state.image_generation(),
         image_provider: state.image_provider(),
-        google_search_configured: state.google_search_configured(),
-        image_search_provider: state.image_search_provider(),
         claude_enabled: state.agent_enabled("claude"),
         codex_enabled: state.agent_enabled("codex"),
     }
@@ -3843,27 +3762,6 @@ fn set_gemini_key(
 ) -> Result<SettingsStatus, String> {
     state.set_gemini_api_key(key).map_err(|e| e.to_string())?;
     Ok(settings_status(&state))
-}
-
-#[tauri::command]
-fn set_google_search(
-    state: tauri::State<'_, Arc<SettingsState>>,
-    key: Option<String>,
-    cx: Option<String>,
-) -> Result<SettingsStatus, String> {
-    state.set_google_search(key, cx).map_err(|e| e.to_string())?;
-    Ok(settings_status(&state))
-}
-
-#[tauri::command]
-fn set_image_search_provider(
-    settings_state: tauri::State<'_, Arc<SettingsState>>,
-    provider: String,
-) -> Result<String, String> {
-    settings_state
-        .set_image_search_provider(provider)
-        .map_err(|e| e.to_string())?;
-    Ok(settings_state.image_search_provider())
 }
 
 #[tauri::command]
@@ -7156,10 +7054,8 @@ async fn search_widget_candidates(
             return Ok(WidgetSearchResult { query, candidates: Vec::new() });
         }
         // Ask for extra results so enough survive the min-size filter below.
-        // Google/Brave per the Settings choice (auto = Google first, Brave next).
-        let search_cfg = ImageSearchCfg::from_settings(&settings, settings.brave_api_key());
-        let hits = if search_cfg.any_configured() {
-            search_cfg.search(&query, 30).map_err(|e| e.to_string())?
+        let hits = if let Some(key) = settings.brave_api_key() {
+            media::brave_image_search(&key, &query, 30).map_err(|e| e.to_string())?
         } else {
             agent_image_search(
                 &app,
@@ -8777,8 +8673,6 @@ pub fn run() {
             get_settings_status,
             set_brave_key,
             set_gemini_key,
-            set_google_search,
-            set_image_search_provider,
             set_catalog_upload_token,
             add_catalog_server,
             delete_catalog_server,
