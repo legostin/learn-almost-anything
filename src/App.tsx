@@ -522,6 +522,8 @@ type SettingsStatus = {
   debug_logging?: boolean;
   image_generation?: boolean;
   image_provider?: string;
+  google_search_configured?: boolean;
+  image_search_provider?: string;
   claude_enabled?: boolean;
   codex_enabled?: boolean;
 };
@@ -1037,16 +1039,20 @@ function App() {
   const refreshCapabilities = useCallback(async () => {
     const [aa, ss, ms, rt] = await Promise.allSettled([
       invoke<AgentAvailability>("check_agent_availability"),
-      invoke<{ brave_configured: boolean; gemini_configured?: boolean; debug_logging?: boolean }>(
-        "get_settings_status"
-      ),
+      invoke<{
+        brave_configured: boolean;
+        google_search_configured?: boolean;
+        gemini_configured?: boolean;
+        debug_logging?: boolean;
+      }>("get_settings_status"),
       invoke<ModelConfig>("get_model_settings"),
       invoke<string | null>("sidecar_status"),
     ]);
     if (aa.status === "fulfilled") setAgentAvail(aa.value);
     if (rt.status === "fulfilled") setRuntimeError(rt.value ?? null);
     if (ss.status === "fulfilled") {
-      setBraveConfigured(ss.value.brave_configured);
+      // "Search configured" is satisfied by EITHER engine (Google or Brave).
+      setBraveConfigured(ss.value.brave_configured || Boolean(ss.value.google_search_configured));
       setGeminiConfigured(Boolean(ss.value.gemini_configured));
       setDebugLogging(Boolean(ss.value.debug_logging));
     }
@@ -3744,6 +3750,11 @@ function SettingsModal({
   const [braveKey, setBraveKey] = useState("");
   const [braveConfigured, setBraveConfigured] = useState(false);
   const [savingBrave, setSavingBrave] = useState(false);
+  const [googleKey, setGoogleKey] = useState("");
+  const [googleCx, setGoogleCx] = useState("");
+  const [googleSearchConfigured, setGoogleSearchConfigured] = useState(false);
+  const [savingGoogle, setSavingGoogle] = useState(false);
+  const [imageSearchProvider, setImageSearchProvider] = useState("auto");
   const [geminiKey, setGeminiKey] = useState("");
   const [geminiConfigured, setGeminiConfigured] = useState(false);
   const [savingGemini, setSavingGemini] = useState(false);
@@ -3795,6 +3806,8 @@ function SettingsModal({
     setDebugLogging(Boolean(s.debug_logging));
     setImageGeneration(s.image_generation !== false);
     setImageProvider(s.image_provider || "auto");
+    setGoogleSearchConfigured(Boolean(s.google_search_configured));
+    setImageSearchProvider(s.image_search_provider || "auto");
     setClaudeEnabled(s.claude_enabled !== false);
     setCodexEnabled(s.codex_enabled !== false);
   }
@@ -3830,6 +3843,33 @@ function SettingsModal({
       setImageProvider(saved || "auto");
     } catch {
       /* ignore */
+    }
+  }
+
+  async function saveImageSearchProvider(provider: string) {
+    setImageSearchProvider(provider);
+    try {
+      const saved = await invoke<string>("set_image_search_provider", { provider });
+      setImageSearchProvider(saved || "auto");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function saveGoogleSearch() {
+    setSavingGoogle(true);
+    try {
+      const s = await invoke<SettingsStatus>("set_google_search", {
+        key: googleKey.trim() || null,
+        cx: googleCx.trim() || null,
+      });
+      applySettingsStatus(s);
+      setGoogleKey("");
+      setGoogleCx("");
+    } catch {
+      /* ignore */
+    } finally {
+      setSavingGoogle(false);
     }
   }
 
@@ -4132,6 +4172,65 @@ function SettingsModal({
             <div className="setting-note success-note">✓ {t("braveConfigured")}</div>
           )}
           <div className="setting-note">{t("braveNote")}</div>
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("googleSearchTitle")}</div>
+          <div className="brave-row">
+            <input
+              type="password"
+              className="custom-answer"
+              value={googleKey}
+              placeholder={googleSearchConfigured ? "•••••••••" : t("googleKeyPlaceholder")}
+              onChange={(e) => setGoogleKey(e.target.value)}
+              disabled={savingGoogle}
+            />
+          </div>
+          <div className="brave-row">
+            <input
+              type="text"
+              className="custom-answer"
+              value={googleCx}
+              placeholder={googleSearchConfigured ? "•••••••••" : t("googleCxPlaceholder")}
+              onChange={(e) => setGoogleCx(e.target.value)}
+              disabled={savingGoogle}
+            />
+            <button
+              onClick={saveGoogleSearch}
+              disabled={!googleKey.trim() || !googleCx.trim() || savingGoogle}
+            >
+              {t("braveSave")}
+            </button>
+            {googleSearchConfigured && (
+              <button
+                className="ghost"
+                onClick={() =>
+                  invoke<SettingsStatus>("set_google_search", { key: null, cx: null })
+                    .then(applySettingsStatus)
+                    .catch(() => {})
+                }
+                disabled={savingGoogle}
+              >
+                {t("braveClear")}
+              </button>
+            )}
+          </div>
+          {googleSearchConfigured && !googleKey && !googleCx && (
+            <div className="setting-note success-note">✓ {t("googleSearchConfigured")}</div>
+          )}
+          <div className="tts-voice-row">
+            <span className="setting-note">{t("imageSearchProviderLabel")}</span>
+            <select
+              className="tts-voice-select"
+              value={imageSearchProvider}
+              onChange={(e) => saveImageSearchProvider(e.target.value)}
+            >
+              <option value="auto">{t("imageSearchProviderAuto")}</option>
+              <option value="google">{t("imageSearchProviderGoogle")}</option>
+              <option value="brave">{t("imageSearchProviderBrave")}</option>
+            </select>
+          </div>
+          <div className="setting-note">{t("googleSearchNote")}</div>
         </div>
 
         <div className="setting-group">

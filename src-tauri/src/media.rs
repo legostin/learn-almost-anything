@@ -141,6 +141,82 @@ pub fn brave_image_search(
     Ok(out)
 }
 
+const GOOGLE_IMAGE_ENDPOINT: &str = "https://www.googleapis.com/customsearch/v1";
+
+/// Image search via the Google Programmable Search (Custom Search JSON API),
+/// `searchType=image`. Returns the same `BraveImageHit` shape as Brave so the
+/// rest of the pipeline is provider-agnostic. The API caps `num` at 10 per
+/// request; we issue one request. `cx` is the Programmable Search Engine id.
+pub fn google_image_search(
+    api_key: &str,
+    cx: &str,
+    query: &str,
+    count: u32,
+) -> Result<Vec<BraveImageHit>, MediaError> {
+    if api_key.is_empty() || cx.is_empty() {
+        return Err(MediaError::MissingKey);
+    }
+    let q = urlencoding::encode(query);
+    let n = count.clamp(1, 10);
+    let url = format!(
+        "{GOOGLE_IMAGE_ENDPOINT}?key={key}&cx={cx}&searchType=image&safe=active&num={n}&q={q}",
+        key = urlencoding::encode(api_key),
+        cx = urlencoding::encode(cx),
+    );
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
+    let resp = agent
+        .get(&url)
+        .set("Accept", "application/json")
+        .set("Accept-Encoding", "identity")
+        .call()
+        .map_err(|e| MediaError::BraveHttp(e.to_string()))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| MediaError::BraveParse(format!("status {status}: {e}")))?;
+    let arr = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let out = arr
+        .into_iter()
+        .filter_map(|r| {
+            // `link` is the direct image; `image.contextLink` is the hosting page.
+            let image = r.get("link").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if image.is_empty() {
+                return None;
+            }
+            let meta = r.get("image").cloned().unwrap_or(serde_json::Value::Null);
+            let page = meta
+                .get("contextLink")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let thumb = meta
+                .get("thumbnailLink")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&image)
+                .to_string();
+            // Always carry a usable attribution source: the hosting page, else
+            // the image URL itself.
+            let source = if page.is_empty() { image.clone() } else { page };
+            Some(BraveImageHit {
+                title: r.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                source,
+                url: image,
+                thumbnail: thumb,
+                width: meta.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                height: meta.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 struct ExtractedImage {
     url: String,

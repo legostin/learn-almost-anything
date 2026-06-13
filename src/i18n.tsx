@@ -642,6 +642,16 @@ const STRINGS = {
     braveConfigured: "Ключ сохранён",
     braveSave: "Сохранить",
     braveClear: "Очистить",
+    googleSearchTitle: "Google Image Search",
+    googleKeyPlaceholder: "Google API key (AIza…)",
+    googleCxPlaceholder: "ID поисковой системы (cx)",
+    googleSearchConfigured: "Ключ и cx сохранены",
+    googleSearchNote:
+      "Поиск картинок через Google Programmable Search (Custom Search JSON API). Нужны API-ключ и ID поисковой системы (cx) с включённым поиском по изображениям. Хранятся локально в settings.json.",
+    imageSearchProviderLabel: "Система поиска картинок",
+    imageSearchProviderAuto: "Авто (Google → Brave)",
+    imageSearchProviderGoogle: "Google",
+    imageSearchProviderBrave: "Brave",
     catalogTitle: "Публичный каталог",
     catalogSubtitle:
       "Готовые курсы можно открыть в браузере или скачать в приложение. На витрине нет генерации и проверки ИИ.",
@@ -1475,6 +1485,16 @@ const STRINGS = {
     braveConfigured: "Key saved",
     braveSave: "Save",
     braveClear: "Clear",
+    googleSearchTitle: "Google Image Search",
+    googleKeyPlaceholder: "Google API key (AIza…)",
+    googleCxPlaceholder: "Search engine ID (cx)",
+    googleSearchConfigured: "Key and cx saved",
+    googleSearchNote:
+      "Image search via Google Programmable Search (Custom Search JSON API). Requires an API key and a Search Engine ID (cx) with image search enabled. Stored locally in settings.json.",
+    imageSearchProviderLabel: "Image search engine",
+    imageSearchProviderAuto: "Auto (Google → Brave)",
+    imageSearchProviderGoogle: "Google",
+    imageSearchProviderBrave: "Brave",
     catalogTitle: "Public catalog",
     catalogSubtitle:
       "Ready courses can be opened in the browser or downloaded into the app. The catalog has no AI generation or review actions.",
