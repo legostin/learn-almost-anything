@@ -144,6 +144,22 @@ function normalizeCourseFormat(value) {
     : "academic_course";
 }
 
+// Module/submodule count bounds per format — must match courseFormatGuide().
+// Used to size the structured-output schema so a short format (mini/single)
+// is never forced to pad with filler "NOT USED" modules to hit a minimum.
+function structureBounds(courseFormat) {
+  switch (normalizeCourseFormat(courseFormat)) {
+    case "mini_module":
+      return { modMin: 1, modMax: 1, subMin: 3, subMax: 6 };
+    case "single_lesson":
+      return { modMin: 1, modMax: 1, subMin: 1, subMax: 2 };
+    case "podcast_series":
+      return { modMin: 3, modMax: 6, subMin: 2, subMax: 5 };
+    default: // academic_course (roadmap uses a separate path)
+      return { modMin: 4, modMax: 10, subMin: 2, subMax: 6 };
+  }
+}
+
 function courseFormatGuide(courseFormat, lang) {
   const format = normalizeCourseFormat(courseFormat);
   if (format === "mini_module") {
@@ -3382,6 +3398,10 @@ Keep the whole pack under ~2500 words — it is injected into every lesson promp
 as pre-verified grounding.
 ${customMcpBlock(customMcp)}`;
 
+  // Size the schema to the chosen format so short formats (mini/single) aren't
+  // forced to pad with filler "NOT USED" modules just to satisfy a minimum.
+  const { modMin, modMax, subMin, subMax } = structureBounds(courseFormat);
+
   const submoduleSchema = {
     type: "object",
     additionalProperties: false,
@@ -3411,8 +3431,8 @@ ${customMcpBlock(customMcp)}`;
       },
       modules: {
         type: "array",
-        minItems: 4,
-        maxItems: 10,
+        minItems: modMin,
+        maxItems: modMax,
         items: {
           type: "object",
           additionalProperties: false,
@@ -3421,8 +3441,8 @@ ${customMcpBlock(customMcp)}`;
             summary: { type: "string" },
             submodules: {
               type: "array",
-              minItems: 2,
-              maxItems: 6,
+              minItems: subMin,
+              maxItems: subMax,
               items: submoduleSchema,
             },
           },
