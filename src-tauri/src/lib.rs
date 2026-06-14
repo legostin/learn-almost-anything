@@ -4265,11 +4265,6 @@ async fn publish_course_to_catalog(
                         return Err("imported courses cannot be published".to_string());
                     }
                 }
-                // Documentation uses an arbitrarily-nested tree; catalog packaging is
-                // still 2-level, so block publishing it until that supports nesting.
-                if course.course_format == "documentation" {
-                    return Err("documentation courses cannot be published yet".to_string());
-                }
                 (catalog::build_package(&conn, &paths, &course_id)?, course)
             };
             // Explicit target wins; otherwise the server the course is bound to.

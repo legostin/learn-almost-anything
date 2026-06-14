@@ -116,6 +116,64 @@ pub struct CatalogUpdateStatus {
     pub available: bool,
 }
 
+// Recursively insert a (possibly nested) module tree into the DB, preserving
+// each node's generation_state and parent_id chain.
+fn insert_pkg_modules(
+    conn: &rusqlite::Connection,
+    course_id: &str,
+    parent_id: Option<&str>,
+    nodes: &[courses::ModuleNode],
+) -> Result<(), String> {
+    for (position, node) in nodes.iter().enumerate() {
+        db::insert_module(
+            conn,
+            &node.id,
+            course_id,
+            parent_id,
+            position as i64,
+            &node.title,
+            optional_text(&node.summary),
+            &node.generation_state,
+        )
+        .map_err(|e| e.to_string())?;
+        insert_pkg_modules(conn, course_id, Some(&node.id), &node.submodules)?;
+    }
+    Ok(())
+}
+
+// Depth-first collect content for a documentation tree: every node is an article
+// addressed as ("_doc", node_id). Mirrors the 2-level packaging in build_package.
+fn collect_doc_submodules(
+    paths: &AppPaths,
+    course_id: &str,
+    course_root: &std::path::Path,
+    nodes: &[courses::ModuleNode],
+    files: &mut BTreeMap<String, CatalogFilePackage>,
+    out: &mut Vec<CatalogSubmodulePackage>,
+) -> Result<(), String> {
+    for node in nodes {
+        if let Ok(content) = courses::read_submodule_content(paths, course_id, "_doc", &node.id) {
+            let mut widgets = content.widgets;
+            rewrite_local_file_refs(&mut widgets, course_root, files)?;
+            let assignments =
+                courses::read_submodule_assignments(paths, course_id, "_doc", &node.id);
+            out.push(CatalogSubmodulePackage {
+                module_id: "_doc".to_string(),
+                submodule_id: node.id.clone(),
+                article: content.article,
+                widgets,
+                sources: content.sources,
+                test: content.test,
+                review_notes: content.review_notes,
+                assignments,
+                flashcards: content.flashcards,
+            });
+        }
+        collect_doc_submodules(paths, course_id, course_root, &node.submodules, files, out)?;
+    }
+    Ok(())
+}
+
 pub fn build_package(
     conn: &rusqlite::Connection,
     paths: &AppPaths,
@@ -137,32 +195,50 @@ pub fn build_package(
     let mut files = BTreeMap::<String, CatalogFilePackage>::new();
     let mut submodules = Vec::new();
 
-    for module in &structure.modules {
-        for submodule in &module.submodules {
-            let content = match courses::read_submodule_content(
-                paths,
-                course_id,
-                &module.id,
-                &submodule.id,
-            ) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            let mut widgets = content.widgets;
-            rewrite_local_file_refs(&mut widgets, &course_root, &mut files)?;
-            let assignments =
-                courses::read_submodule_assignments(paths, course_id, &module.id, &submodule.id);
-            submodules.push(CatalogSubmodulePackage {
-                module_id: module.id.clone(),
-                submodule_id: submodule.id.clone(),
-                article: content.article,
-                widgets,
-                sources: content.sources,
-                test: content.test,
-                review_notes: content.review_notes,
-                assignments,
-                flashcards: content.flashcards,
-            });
+    if course.course_format == "documentation" {
+        // Documentation is an arbitrarily-nested tree; every node is an article
+        // whose content lives under ("_doc", node_id). Walk it depth-first so the
+        // packaged order matches the structure (and thus the catalog lesson index).
+        collect_doc_submodules(
+            paths,
+            course_id,
+            &course_root,
+            &structure.modules,
+            &mut files,
+            &mut submodules,
+        )?;
+    } else {
+        for module in &structure.modules {
+            for submodule in &module.submodules {
+                let content = match courses::read_submodule_content(
+                    paths,
+                    course_id,
+                    &module.id,
+                    &submodule.id,
+                ) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                };
+                let mut widgets = content.widgets;
+                rewrite_local_file_refs(&mut widgets, &course_root, &mut files)?;
+                let assignments = courses::read_submodule_assignments(
+                    paths,
+                    course_id,
+                    &module.id,
+                    &submodule.id,
+                );
+                submodules.push(CatalogSubmodulePackage {
+                    module_id: module.id.clone(),
+                    submodule_id: submodule.id.clone(),
+                    article: content.article,
+                    widgets,
+                    sources: content.sources,
+                    test: content.test,
+                    review_notes: content.review_notes,
+                    assignments,
+                    flashcards: content.flashcards,
+                });
+            }
         }
     }
 
@@ -400,32 +476,9 @@ fn write_package_to_course(
     fs::write(course_dir.join("structure.json"), structure_json).map_err(|e| e.to_string())?;
 
     db::delete_modules_for_course(conn, course_id).map_err(|e| e.to_string())?;
-    for (position, module) in structure.modules.iter().enumerate() {
-        db::insert_module(
-            conn,
-            &module.id,
-            &course_id,
-            None,
-            position as i64,
-            &module.title,
-            optional_text(&module.summary),
-            &module.generation_state,
-        )
-        .map_err(|e| e.to_string())?;
-        for (sub_position, submodule) in module.submodules.iter().enumerate() {
-            db::insert_module(
-                conn,
-                &submodule.id,
-                &course_id,
-                Some(&module.id),
-                sub_position as i64,
-                &submodule.title,
-                optional_text(&submodule.summary),
-                &submodule.generation_state,
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
+    // Recursive so a documentation package's nested tree persists fully in the DB
+    // (the package's structure.json already carries it); other formats are 2-level.
+    insert_pkg_modules(conn, course_id, None, &structure.modules)?;
 
     for sub in &package.submodules {
         let module_id = sub.module_id.clone();
