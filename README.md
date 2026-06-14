@@ -8,7 +8,7 @@
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
 [![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-7c3aed)](#your-subscription-is-the-engine)
 
-<p align="center"><img src="screens/2.png" alt="A generated lesson with sourced images and a multilingual course sidebar" width="900"></p>
+<p align="center"><img src="screens/main.png" alt="A generated lesson with sourced images and a multilingual course sidebar" width="900"></p>
 
 ## Why this exists
 
