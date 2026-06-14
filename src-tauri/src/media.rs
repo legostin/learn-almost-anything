@@ -714,7 +714,7 @@ pub fn gemini_tts(
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(120))
         .build();
-    let resp = agent
+    let resp = match agent
         .post(&gemini_endpoint(model))
         .set("x-goog-api-key", api_key)
         .set("Content-Type", "application/json")
@@ -726,15 +726,53 @@ pub fn gemini_tts(
                     "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": voice } }
                 }
             }
-        }))
-        .map_err(|e| MediaError::BraveHttp(e.to_string()))?;
+        })) {
+        Ok(r) => r,
+        // Surface the API's error body (bad model / quota / invalid arg) instead
+        // of a bare status code, so the failure is diagnosable.
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return Err(MediaError::BraveHttp(format!(
+                "TTS status {code}: {}",
+                body.chars().take(400).collect::<String>()
+            )));
+        }
+        Err(e) => return Err(MediaError::BraveHttp(e.to_string())),
+    };
     let body: serde_json::Value = resp
         .into_json()
         .map_err(|e| MediaError::BraveParse(e.to_string()))?;
-    let inline = body
-        .pointer("/candidates/0/content/parts/0/inlineData")
-        .or_else(|| body.pointer("/candidates/0/content/parts/0/inline_data"))
-        .ok_or_else(|| MediaError::BraveParse("no audio inlineData".into()))?;
+    // Scan ALL parts for the inline audio: Gemini 2.5 TTS may emit a thought/text
+    // part before the audio, so it is not always parts[0]. (gemini_generate_image
+    // already scans all parts; this mirrors that.)
+    let parts = body.pointer("/candidates/0/content/parts").and_then(|v| v.as_array());
+    let inline = parts.and_then(|arr| {
+        arr.iter().find_map(|p| {
+            let d = p.get("inlineData").or_else(|| p.get("inline_data"))?;
+            let has_data = d
+                .get("data")
+                .and_then(|x| x.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            has_data.then_some(d)
+        })
+    });
+    let inline = match inline {
+        Some(i) => i,
+        None => {
+            let finish = body
+                .pointer("/candidates/0/finishReason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = parts
+                .and_then(|arr| arr.iter().find_map(|p| p.get("text").and_then(|t| t.as_str())))
+                .unwrap_or("");
+            return Err(MediaError::BraveParse(format!(
+                "no audio in TTS response (finishReason={finish}; text={})",
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+    };
     let b64 = inline
         .get("data")
         .and_then(|d| d.as_str())
@@ -748,6 +786,9 @@ pub fn gemini_tts(
     let pcm = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|e| MediaError::Decode(e.to_string()))?;
+    if pcm.is_empty() {
+        return Err(MediaError::BraveParse("TTS returned empty audio".into()));
+    }
     let rate = parse_pcm_rate(mime).unwrap_or(24000);
     Ok(wav_wrap(&pcm, rate, 1, 16))
 }

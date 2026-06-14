@@ -10254,7 +10254,12 @@ function AudioPlayerProvider({ children }: { children: ReactNode }) {
       let b64: string;
       try {
         b64 = await cur;
-      } catch {
+      } catch (e) {
+        // Don't fail silently (the old behavior looked like "generated" but was
+        // mute). Log the real error and evict the rejected promise so a retry
+        // actually re-requests instead of replaying the cached rejection.
+        console.error("[tts] synthesize_speech failed:", e);
+        cacheRef.current.delete(i);
         setMode("idle");
         setPreparing(false);
         return;
