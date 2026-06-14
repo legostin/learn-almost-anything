@@ -6296,6 +6296,100 @@ fn translate_course(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Repoint a widget/item's LOCAL image `url` at `images_dir/<basename>` when the
+/// file exists there but the url points elsewhere (e.g. a translated course whose
+/// copied url still references the source course's path). Returns whether it
+/// changed. Remote urls (http/https) and remote `source`/`original_url` are left
+/// untouched. Shared by translation and the one-time repair.
+fn repoint_local_image_url(w: &mut serde_json::Value, images_dir: &std::path::Path) -> bool {
+    let Some(u) = w.get("url").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let p = u.strip_prefix("file://").unwrap_or(u);
+    if !p.starts_with('/') {
+        return false;
+    }
+    let Some(name) = std::path::Path::new(p).file_name() else {
+        return false;
+    };
+    let np = images_dir.join(name);
+    if np.exists() && std::path::Path::new(p) != np.as_path() {
+        w["url"] = json!(np.to_string_lossy());
+        true
+    } else {
+        false
+    }
+}
+
+/// One-time, idempotent repair (guarded by an `app_meta` flag): older translated
+/// courses kept image `url`s pointing at the SOURCE course's absolute path even
+/// though the files were copied into each translated submodule's own images/ dir.
+/// Repoint every local image url at the local file. Walks submodules from the DB.
+fn repair_translated_image_paths(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+) -> Result<usize, rusqlite::Error> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = 'image_paths_repaired_v1'",
+            [],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    if done.is_some() {
+        return Ok(0);
+    }
+    let subs: Vec<(String, String, String)> = conn
+        .prepare("SELECT course_id, parent_id, id FROM modules WHERE parent_id IS NOT NULL")?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut fixed = 0usize;
+    for (course_id, module_id, submodule_id) in subs {
+        let dir = courses::submodule_dir(paths, &course_id, &module_id, &submodule_id);
+        let widgets_path = dir.join("widgets.json");
+        let Ok(text) = std::fs::read_to_string(&widgets_path) else {
+            continue;
+        };
+        let Ok(mut widgets) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let images_dir = dir.join("images");
+        let mut changed = false;
+        if let Some(obj) = widgets.as_object_mut() {
+            for (_k, w) in obj.iter_mut() {
+                changed |= repoint_local_image_url(w, &images_dir);
+                if let Some(items) = w.get_mut("items").and_then(|v| v.as_array_mut()) {
+                    for it in items.iter_mut() {
+                        changed |= repoint_local_image_url(it, &images_dir);
+                    }
+                }
+            }
+        }
+        if changed {
+            let pretty = serde_json::to_string_pretty(&widgets).unwrap_or(text);
+            if std::fs::write(&widgets_path, pretty).is_ok() {
+                fixed += 1;
+            }
+        }
+    }
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('image_paths_repaired_v1', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = ?1",
+        ["1"],
+    )?;
+    Ok(fixed)
+}
+
 fn translate_course_content(
     app: &AppHandle,
     db: &Arc<Db>,
@@ -6611,24 +6705,11 @@ fn translate_course_content(
                     // packager can relativize them — otherwise a foreign absolute
                     // path leaks into the package and breaks in the web catalog.
                     let images_dir = dir.join("images");
-                    let repoint = |w: &mut serde_json::Value| {
-                        if let Some(u) = w.get("url").and_then(|v| v.as_str()) {
-                            let p = u.strip_prefix("file://").unwrap_or(u);
-                            if p.starts_with('/') {
-                                if let Some(name) = std::path::Path::new(p).file_name() {
-                                    let np = images_dir.join(name);
-                                    if np.exists() {
-                                        w["url"] = json!(np.to_string_lossy());
-                                    }
-                                }
-                            }
-                        }
-                    };
                     for (_k, w) in obj.iter_mut() {
-                        repoint(w);
+                        repoint_local_image_url(w, &images_dir);
                         if let Some(items) = w.get_mut("items").and_then(|v| v.as_array_mut()) {
                             for it in items.iter_mut() {
-                                repoint(it);
+                                repoint_local_image_url(it, &images_dir);
                             }
                         }
                     }
@@ -8826,6 +8907,18 @@ pub fn run() {
                     Ok(n) if n > 0 => eprintln!("[startup] backfilled {n} SRS cards"),
                     Ok(_) => {}
                     Err(e) => eprintln!("[startup] card backfill failed: {e}"),
+                }
+            }
+            {
+                // One-time repair: older translated courses kept image urls
+                // pointing at the source course; repoint them to local files.
+                let conn = db.0.lock().expect("db lock");
+                match repair_translated_image_paths(&conn, &app_paths) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[startup] repaired image paths in {n} submodule(s)")
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[startup] image-path repair failed: {e}"),
                 }
             }
             app.manage(Arc::new(db));
