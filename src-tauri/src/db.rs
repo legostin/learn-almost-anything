@@ -71,6 +71,7 @@ pub fn normalize_course_format(value: Option<&str>) -> &'static str {
         Some("mini_module") => "mini_module",
         Some("podcast_series") => "podcast_series",
         Some("single_lesson") => "single_lesson",
+        Some("encyclopedia") => "encyclopedia",
         Some("academic_course") | _ => DEFAULT_COURSE_FORMAT,
     }
 }

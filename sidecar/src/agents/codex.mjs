@@ -137,9 +137,14 @@ function languageStyleGuide(lang) {
 }
 
 function normalizeCourseFormat(value) {
-  return ["academic_course", "mini_module", "podcast_series", "single_lesson", "roadmap"].includes(
-    value
-  )
+  return [
+    "academic_course",
+    "mini_module",
+    "podcast_series",
+    "single_lesson",
+    "encyclopedia",
+    "roadmap",
+  ].includes(value)
     ? value
     : "academic_course";
 }
@@ -155,6 +160,8 @@ function structureBounds(courseFormat) {
       return { modMin: 1, modMax: 1, subMin: 1, subMax: 2 };
     case "podcast_series":
       return { modMin: 3, modMax: 6, subMin: 2, subMax: 5 };
+    case "encyclopedia":
+      return { modMin: 2, modMax: 8, subMin: 2, subMax: 8 };
     default: // academic_course (roadmap uses a separate path)
       return { modMin: 4, modMax: 10, subMin: 2, subMax: 6 };
   }
@@ -193,6 +200,15 @@ function courseFormatGuide(courseFormat, lang) {
 - Focus on: current level, the concrete end goal (job/project/exam), and any
   deadline or known sub-areas to include or skip.`;
   }
+  if (format === "encyclopedia") {
+    return `Generation format: ENCYCLOPEDIA.
+- This is a reference encyclopedia: SECTIONS (top-level modules), each holding several self-contained reference ARTICLES (submodules) — an interlinked wiki, NOT a linear course.
+- Structure: 2-8 sections, each with 2-8 articles. Group articles by theme; order is for browsing, not strict progression.
+- Each article must be COMPLETE and stand on its own: overview/definition, key facts, details, context, and a closing "See also" with references. Never write "as we saw earlier" or "in the next lesson".
+- Completeness and factual accuracy are paramount: research thoroughly and cite MORE sources than usual; prefer authoritative references.
+- CROSS-LINK related articles: when you mention another article that exists in this encyclopedia (see the curriculum outline above), link it as a markdown link with this exact scheme: [Article Title](course://article/<Article Title>) — use the article's exact title; the app resolves it to in-app navigation. Link generously, but ONLY to titles that actually appear in the outline.
+- Do NOT generate tests or homework assignments for encyclopedia material.`;
+  }
   return `Generation format: full academic course.
 - Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
 - Build a serious, progressive curriculum with research-backed sequencing.
@@ -214,6 +230,9 @@ function wizardQuestionGuide(courseFormat, lang) {
   }
   if (format === "roadmap") {
     return `For the roadmap wizard, ask at most a couple of laser-focused questions: the learner's current level and the precise target outcome (job, project, exam). Do NOT ask about lesson formats, weekly schedules, tests, or visual assets.`;
+  }
+  if (format === "encyclopedia") {
+    return `For the encyclopedia wizard, ask only what defines the scope of the reference work: the subject's boundaries (what to include/exclude), the depth and the target reader, and any key sub-areas or entries that must be covered. Do NOT ask about tests, homework, weekly schedules, or pacing.`;
   }
   return "";
 }
@@ -1714,7 +1733,7 @@ function normalizeReview(parsed) {
 
 /** Design a short chain of practical homework assignments for a submodule. */
 export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, learnerProfile }, ctx) {
-  if (normalizeCourseFormat(courseFormat) === "podcast_series") {
+  if (["podcast_series", "encyclopedia"].includes(normalizeCourseFormat(courseFormat))) {
     return { assignments: [] };
   }
   if (typeof article !== "string" || !article.trim()) {

@@ -307,6 +307,9 @@ const STRINGS = {
     courseFormatLessonTitle: "Урок",
     courseFormatLessonDesc:
       "Одна самостоятельная статья-урок по теме. 1–3 уточняющих вопроса — и сразу генерация.",
+    courseFormatEncyclopediaTitle: "Энциклопедия",
+    courseFormatEncyclopediaDesc:
+      "Связанные между собой статьи-справки по разделам, как вики. Упор на полноту и источники, без тестов и домашки.",
     courseFormatRoadmapTitle: "Роудмап",
     courseFormatRoadmapDesc:
       "Маршрут обучения от цели: этапы, навыки и материалы. Из каждого навыка генерируется урок или курс.",
@@ -1143,6 +1146,9 @@ const STRINGS = {
     courseFormatLessonTitle: "Single lesson",
     courseFormatLessonDesc:
       "One standalone lesson article. 1–3 quick questions, then generation starts immediately.",
+    courseFormatEncyclopediaTitle: "Encyclopedia",
+    courseFormatEncyclopediaDesc:
+      "Interlinked reference articles grouped into sections, like a wiki. Emphasis on completeness and sources; no tests or homework.",
     courseFormatRoadmapTitle: "Roadmap",
     courseFormatRoadmapDesc:
       "A learning route from a goal: stages, skills, and materials. Each skill spawns a lesson or a course.",

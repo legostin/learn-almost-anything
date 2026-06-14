@@ -50,7 +50,12 @@ import appMark from "./assets/app-mark.png";
 import "./App.css";
 
 type Agent = "claude" | "codex";
-type CourseFormat = "academic_course" | "mini_module" | "podcast_series" | "single_lesson";
+type CourseFormat =
+  | "academic_course"
+  | "mini_module"
+  | "podcast_series"
+  | "single_lesson"
+  | "encyclopedia";
 
 const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
 
@@ -75,18 +80,25 @@ const COURSE_FORMATS = [
     titleKey: "courseFormatLessonTitle",
     descKey: "courseFormatLessonDesc",
   },
+  {
+    value: "encyclopedia",
+    titleKey: "courseFormatEncyclopediaTitle",
+    descKey: "courseFormatEncyclopediaDesc",
+  },
 ] as const satisfies ReadonlyArray<{
   value: CourseFormat;
   titleKey:
     | "courseFormatAcademicTitle"
     | "courseFormatMiniTitle"
     | "courseFormatPodcastTitle"
-    | "courseFormatLessonTitle";
+    | "courseFormatLessonTitle"
+    | "courseFormatEncyclopediaTitle";
   descKey:
     | "courseFormatAcademicDesc"
     | "courseFormatMiniDesc"
     | "courseFormatPodcastDesc"
-    | "courseFormatLessonDesc";
+    | "courseFormatLessonDesc"
+    | "courseFormatEncyclopediaDesc";
 }>;
 
 // Generation cost/quality tier chosen at course creation; mirrors the Rust
@@ -9733,7 +9745,21 @@ function SubmoduleView({
   const subIdx =
     tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
   const isPodcast = course.course_format === "podcast_series";
+  // Encyclopedia: reference articles, no tests/homework; articles cross-link by title.
+  const isEncyclopedia = course.course_format === "encyclopedia";
   const unresolvedImages = !isPodcast && content ? countUnresolvedImageWidgets(content.widgets) : 0;
+  // Resolve a wiki-link (course://article/<title>) to its submodule by title and navigate.
+  const openArticleByTitle = (title: string) => {
+    const norm = title.trim().toLowerCase();
+    for (const m of tree!.modules) {
+      for (const s of m.submodules) {
+        if (s.title.trim().toLowerCase() === norm) {
+          onOpenSubmodule(m.id, s.id);
+          return;
+        }
+      }
+    }
+  };
   // Soft prerequisites (non-linear courses): unmet earlier submodules, matched by
   // title across the tree. Non-blocking — a hint with links, never a hard lock.
   const prereqLinks = (sub.prereqs ?? [])
@@ -9977,6 +10003,7 @@ function SubmoduleView({
                 article={isPodcast ? stripArticleWidgetMarkers(content.article) : content.article}
                 widgets={isPodcast ? {} : content.widgets}
                 fontPx={fontPx}
+                onWikiLink={openArticleByTitle}
                 widgetCtx={
                   course && !isPodcast
                     ? {
@@ -9995,7 +10022,7 @@ function SubmoduleView({
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
               )}
-              {content.test?.length > 0 && (
+              {content.test?.length > 0 && !isEncyclopedia && (
                 <TestSection
                   questions={content.test}
                   alreadyPassed={!!sub.test_passed}
@@ -10048,7 +10075,7 @@ function SubmoduleView({
                   </div>
                 )
               )}
-              {!isPodcast && (
+              {!isPodcast && !isEncyclopedia && (
                 <AssignmentsSection
                   courseId={course.id}
                   moduleId={moduleId}
@@ -11653,11 +11680,13 @@ function ArticleReader({
   widgets,
   fontPx,
   widgetCtx,
+  onWikiLink,
 }: {
   article: string;
   widgets: Record<string, WidgetData>;
   fontPx: number;
   widgetCtx?: WidgetCtx;
+  onWikiLink?: (title: string) => void;
 }) {
   const t = useT();
   // Assistant-appended deep-dive sections live after `<!-- la:deepdive -->`
@@ -11710,7 +11739,34 @@ function ArticleReader({
         key={key}
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-        components={{ pre: CodeBlock }}
+        components={{
+          pre: CodeBlock,
+          // Encyclopedia cross-links use the scheme course://article/<title>;
+          // resolve them to in-app navigation. Other links stay normal anchors.
+          a({ href, children }) {
+            const m = /^course:\/\/article\/(.+)$/i.exec(href || "");
+            if (m && onWikiLink) {
+              const title = decodeURIComponent(m[1]);
+              return (
+                <a
+                  href="#"
+                  className="wiki-link"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onWikiLink(title);
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            return (
+              <a href={href} target="_blank" rel="noreferrer">
+                {children}
+              </a>
+            );
+          },
+        }}
       >
         {p.text}
       </ReactMarkdown>
