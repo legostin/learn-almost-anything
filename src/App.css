@@ -9729,6 +9729,10 @@ textarea.le-cap {
   flex-direction: column;
   gap: 4px;
 }
+/* Recursive documentation editor: a guide line per nesting level. */
+.doc-edit-children {
+  border-left: 2px solid var(--accent-soft, rgba(127, 127, 127, 0.2));
+}
 .struct-edit-row,
 .struct-edit-sub {
   display: flex;

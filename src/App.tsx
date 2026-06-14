@@ -6871,10 +6871,22 @@ function CourseView({
       startLesson();
       return;
     }
+    if (course.course_format === "documentation") {
+      // Documentation is authored by hand: skip the AI plan agent, install an
+      // empty structure (→ status "ready"), and the structure view opens the
+      // recursive editor for the learner to build the tree themselves.
+      autoStartedStructuring.current = course.id;
+      invoke("save_structure", { courseId: course.id, modules: [] })
+        .then(() => onChanged())
+        .catch(() => {
+          autoStartedStructuring.current = null;
+        });
+      return;
+    }
     if (jobs.has(jobKey(course.id, "build_structure"))) return;
     autoStartedStructuring.current = course.id;
     onStartJob("build_structure");
-  }, [course, jobs, onStartJob, isLesson, startLesson]);
+  }, [course, jobs, onStartJob, isLesson, startLesson, onChanged]);
 
   const loadCatalogUpdate = useCallback(async () => {
     if (!course || course.status !== "ready") {
@@ -7159,6 +7171,15 @@ function CourseView({
               </div>
             </div>
           )
+        ) : course.course_format === "documentation" ? (
+          // Manual authoring: no AI plan agent. The autoStartedStructuring effect
+          // installs an empty structure and flips to "ready" (editor opens).
+          <div className="wizard wizard-loading" aria-busy="true">
+            <div className="wizard-loader-head">
+              <span className="wizard-loader-orb" />
+              <span className="wizard-loader-label">{t("loadingStructure")}</span>
+            </div>
+          </div>
         ) : (
           <StructureBuilder
             job={jobs.get(jobKey(course.id, "build_structure"))}
@@ -8228,6 +8249,10 @@ function Structure({
   const isLesson = course.course_format === "single_lesson";
   const canStartFull =
     progress.pending > 0 || (progress.queued > 0 && progress.generating === 0);
+  // Documentation: the structure is authored by hand in a recursive editor.
+  // Open it for a brand-new (empty) doc and whenever the user toggles editing.
+  const isDoc = course.course_format === "documentation";
+  const showDocEditor = isDoc && (editStruct || tree.modules.length === 0);
 
   async function startFullGeneration() {
     if (startingFull || !canStartFull) return;
@@ -8244,7 +8269,17 @@ function Structure({
 
   return (
     <div className="structure">
-      {tree.modules.length === 0 ? (
+      {showDocEditor ? (
+        <DocStructureEditor
+          course={course}
+          tree={tree}
+          onSaved={async () => {
+            setEditStruct(false);
+            await reloadTree();
+          }}
+          onCancel={() => setEditStruct(false)}
+        />
+      ) : tree.modules.length === 0 ? (
         <div className="placeholder">{t("emptyStructure")}</div>
       ) : (
         <>
@@ -8260,14 +8295,16 @@ function Structure({
                     ? t("generateFullCourseBusy")
                     : t("generateFullCourse")}
                 </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => setShowRefine((v) => !v)}
-                  aria-expanded={showRefine}
-                >
-                  {showRefine ? t("closeRefine") : t("refinePlanButton")}
-                </button>
+                {!isDoc && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setShowRefine((v) => !v)}
+                    aria-expanded={showRefine}
+                  >
+                    {showRefine ? t("closeRefine") : t("refinePlanButton")}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="ghost struct-edit-toggle"
@@ -8698,6 +8735,171 @@ function StructureEditor({
       </ol>
       <button className="struct-add" onClick={addMod}>＋ {t(isEnc ? "structAddSection" : "structAddModule")}</button>
       <div className="struct-edit-note">{t("structEditNote")}</div>
+    </div>
+  );
+}
+
+// Recursive structure editor for the "documentation" format: an arbitrarily
+// nested tree where every node is an article that may also hold child nodes.
+// Persists via the (recursive) save_structure command — same diff/cleanup
+// semantics as StructureEditor (empty id = add, omitted = delete).
+type DocNode = { id: string; title: string; summary: string; state: string; children: DocNode[] };
+function DocStructureEditor({
+  course,
+  tree,
+  onSaved,
+  onCancel,
+}: {
+  course: Course;
+  tree: StructureFile;
+  onSaved: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  const toDoc = (m: ModuleNode): DocNode => ({
+    id: m.id,
+    title: m.title,
+    summary: m.summary || "",
+    state: m.generation_state,
+    children: (m.submodules || []).map(toDoc),
+  });
+  const [nodes, setNodes] = useState<DocNode[]>(() => tree.modules.map(toDoc));
+  const [tagText, setTagText] = useState(() => (course.tags ?? []).join(", "));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const newNode = (): DocNode => ({ id: "", title: "", summary: "", state: "pending", children: [] });
+  const edit = (fn: (draft: DocNode[]) => void) =>
+    setNodes((prev) => {
+      const next: DocNode[] = JSON.parse(JSON.stringify(prev));
+      fn(next);
+      return next;
+    });
+  // The array that holds the node at `path` (the root array for a length-1 path).
+  const siblingsAt = (draft: DocNode[], path: number[]): DocNode[] => {
+    let arr = draft;
+    for (let i = 0; i < path.length - 1; i++) arr = arr[path[i]].children;
+    return arr;
+  };
+  const nodeAt = (draft: DocNode[], path: number[]): DocNode => {
+    let arr = draft;
+    let node = draft[path[0]];
+    for (const idx of path) {
+      node = arr[idx];
+      arr = node.children;
+    }
+    return node;
+  };
+  const last = (path: number[]) => path[path.length - 1];
+  const rename = (path: number[], title: string) =>
+    edit((d) => {
+      siblingsAt(d, path)[last(path)].title = title;
+    });
+  const addChild = (path: number[]) =>
+    edit((d) => {
+      nodeAt(d, path).children.push(newNode());
+    });
+  const addRoot = () => edit((d) => d.push(newNode()));
+  const move = (path: number[], dir: number) =>
+    edit((d) => {
+      const arr = siblingsAt(d, path);
+      const i = last(path);
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return;
+      const [x] = arr.splice(i, 1);
+      arr.splice(j, 0, x);
+    });
+  const del = (path: number[]) => {
+    // Don't delete a node whose generation is in flight — the job would recreate
+    // its dir right after save_structure removes it.
+    if (siblingsAt(nodes, path)[last(path)]?.state === "generating") return;
+    if (!window.confirm(t("structDeleteConfirm"))) return;
+    edit((d) => {
+      siblingsAt(d, path).splice(last(path), 1);
+    });
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const toUpdate = (n: DocNode): unknown => ({
+        id: n.id,
+        title: n.title.trim(),
+        summary: n.summary,
+        prereqs: [] as string[],
+        submodules: n.children.filter((c) => c.title.trim()).map(toUpdate),
+      });
+      const modules = nodes.filter((n) => n.title.trim()).map(toUpdate);
+      await invoke("save_structure", { courseId: course.id, modules });
+      await invoke("set_course_tags", { courseId: course.id, tags: parseTagInput(tagText) });
+      await onSaved();
+    } catch (e) {
+      setError(String(e));
+      setSaving(false);
+    }
+  };
+
+  const renderNode = (node: DocNode, path: number[], num: string) => {
+    const arr = siblingsAt(nodes, path);
+    const idx = last(path);
+    return (
+      <li key={path.join("-")} className={`struct-edit-module doc-edit-node state-${node.state}`}>
+        <div className="struct-edit-row">
+          <span className="num">{num}</span>
+          <input
+            className="struct-edit-input"
+            placeholder={t("docNodeTitle")}
+            value={node.title}
+            onChange={(e) => rename(path, e.target.value)}
+            disabled={saving}
+          />
+          {node.id === "" && <span className="struct-new-badge">{t("structNew")}</span>}
+          <button title={t("blockUp")} disabled={saving || idx === 0} onClick={() => move(path, -1)}>↑</button>
+          <button title={t("blockDown")} disabled={saving || idx === arr.length - 1} onClick={() => move(path, 1)}>↓</button>
+          <button title={t("structAddArticle")} disabled={saving} onClick={() => addChild(path)}>＋</button>
+          <button
+            className="le-del"
+            title={t("blockDelete")}
+            disabled={saving || node.state === "generating"}
+            onClick={() => del(path)}
+          >
+            ✕
+          </button>
+        </div>
+        {node.children.length > 0 && (
+          <ol className="struct-edit-subs doc-edit-children">
+            {node.children.map((c, i) => renderNode(c, [...path, i], `${num}${i + 1}.`))}
+          </ol>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <div className="struct-editor doc-struct-editor">
+      <div className="struct-editor-head">
+        <span className="struct-editor-title">✎ {t("editStructure")}</span>
+        <span className="sub-actions-spacer" />
+        <button className="ghost" onClick={onCancel} disabled={saving}>{t("structCancel")}</button>
+        <button className="le-save" onClick={save} disabled={saving}>
+          {saving ? t("editorSaving") : t("structSave")}
+        </button>
+      </div>
+      {error && <div className="le-error">{error}</div>}
+      <div className="struct-edit-note">{t("docEditorHint")}</div>
+      <label className="struct-tags-editor">
+        <span>{t("tagsLabel")}</span>
+        <input
+          className="struct-edit-input"
+          value={tagText}
+          placeholder={t("tagsPlaceholder")}
+          onChange={(e) => setTagText(e.target.value)}
+          disabled={saving}
+        />
+      </label>
+      <ol className="struct-edit-modules">{nodes.map((n, i) => renderNode(n, [i], `${i + 1}.`))}</ol>
+      <button className="struct-add" onClick={addRoot} disabled={saving}>＋ {t("structAddSection")}</button>
     </div>
   );
 }
