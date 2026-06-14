@@ -1,6 +1,6 @@
 [package]
 name = "learn-almost-anything"
-version = "0.3.9"
+version = "0.3.10"
 description = "Learn (Almost) Anything — local AI tutor"
 authors = ["you"]
 edition = "2021"
