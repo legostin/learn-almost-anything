@@ -598,9 +598,21 @@ async fn wizard_next_question(
             let conn = db.0.lock().map_err(|e| e.to_string())?;
             course_space_context(&paths, &conn, &course)
         };
-        // A wizard question is a small adaptive call — utility bucket (cheap
-        // model + low reasoning), not the heavy planning one.
-        let model_config = settings.stage_model(&course.agent, "utility");
+        // When reuse_thread_per_topic is on, the wizard and the structure build
+        // share ONE agent session per course (prompt-cache friendly). A session
+        // is pinned to one model, so the wizard runs on the planning model to
+        // match the structure stage; otherwise it stays a cheap utility call.
+        let profile = resolve_course_profile(&settings, &course);
+        let reuse = profile.reuse_thread_per_topic();
+        let model_config = if reuse {
+            apply_tier_reasoning(
+                settings.stage_model(&course.agent, "planning"),
+                &profile,
+                "planning",
+            )
+        } else {
+            settings.stage_model(&course.agent, "utility")
+        };
         let params = json!({
             "backend": course.agent,
             "topic": course.topic,
@@ -612,6 +624,8 @@ async fn wizard_next_question(
             "spaceLinks": space_links,
             "spaceDirs": space_dirs,
             "spaceStrict": space_strict,
+            "reuseThreadPerTopic": reuse,
+            "reuseSessionKey": course_id.clone(),
         });
         let step = sidecar
             .call_with_progress(
@@ -688,6 +702,8 @@ fn start_build_structure(
     let agent = course.agent.clone();
     let gen_profile = gen_profile_json(&profile, course.category.as_deref());
     let custom_mcp = course_custom_mcp(&settings_state, &course);
+    // LEG-36: reuse the wizard's agent session for the structure build (cache).
+    let reuse_topic = profile.reuse_thread_per_topic();
 
     thread::spawn(move || {
         let params = json!({
@@ -704,6 +720,8 @@ fn start_build_structure(
             "genProfile": gen_profile,
             "learnerProfile": course.learner_profile,
             "customMcp": custom_mcp,
+            "reuseThreadPerTopic": reuse_topic,
+            "reuseSessionKey": cid.clone(),
         });
         // Durability: the planning agent can fail (timeout, bad JSON, transient
         // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the

@@ -332,18 +332,42 @@ function threadOptions(opts) {
   return { ...baseThreadOptions, ...overrides, ...modelThreadOptions(opts?.modelConfig) };
 }
 
+// LEG-36: reuse one Codex thread per course across the wizard questions and the
+// structure build so the shared topic prefix is prompt-cached. Keyed by
+// opts.reuseKey (=courseId, set only when reuse_thread_per_topic is on). The
+// structure stage evicts on success; any failed turn evicts so the next attempt
+// (retry / next question) starts on a clean thread. In-memory only — a sidecar
+// restart simply falls back to a fresh thread.
+const reuseThreads = new Map();
+function openThread(opts) {
+  const codex = makeCodex(opts?.braveApiKey, opts);
+  const key = opts?.reuseKey;
+  const priorId = key ? reuseThreads.get(key) : null;
+  return priorId
+    ? codex.resumeThread(priorId, threadOptions(opts))
+    : codex.startThread(threadOptions(opts));
+}
+function rememberThread(opts, thread) {
+  if (opts?.reuseKey && thread?.id) reuseThreads.set(opts.reuseKey, thread.id);
+}
+export function evictReuseThread(key) {
+  if (key) reuseThreads.delete(key);
+}
+
 async function runOnce(prompt, outputSchema, opts) {
   opts = { ...opts, modelConfig: await resolveModelConfig(opts?.modelConfig) };
   const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
   try {
-    const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
+    const thread = openThread(opts);
     const turn = await thread.run(prompt, outputSchema ? { outputSchema } : undefined);
+    rememberThread(opts, thread);
     if (Array.isArray(opts?.collectImages)) {
       opts.collectImages.push(...sessionImagePaths(thread.id));
     }
     rec.end(turn.finalResponse);
     return turn.finalResponse;
   } catch (e) {
+    evictReuseThread(opts?.reuseKey);
     rec.error(e);
     throw e;
   }
@@ -355,7 +379,7 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
   const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
   const idleTimeoutMs = opts?.idleTimeoutMs ?? 0;
   const totalTimeoutMs = opts?.totalTimeoutMs ?? 0;
-  const thread = makeCodex(opts?.braveApiKey, opts).startThread(threadOptions(opts));
+  const thread = openThread(opts);
   const controller = new AbortController();
   let timeoutReason = "";
   let idleTimer = null;
@@ -439,9 +463,11 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
     if (Array.isArray(opts?.collectImages)) {
       opts.collectImages.push(...sessionImagePaths(thread.id));
     }
+    rememberThread(opts, thread);
     rec.end(final);
     return final;
   } catch (e) {
+    evictReuseThread(opts?.reuseKey);
     rec.error(e);
     if (timeoutReason) throw new Error(timeoutReason);
     throw e;
@@ -639,7 +665,7 @@ function answeredBlock(answered) {
  * @returns {Promise<{title?:string, done:boolean, question?:{text:string,options:string[],multi:boolean}}>}
  */
 export async function wizardNextQuestion(
-  { topic, language, courseFormat, answered, modelConfig, spaceSources, spaceLinks, spaceDirs, spaceStrict },
+  { topic, language, courseFormat, answered, modelConfig, spaceSources, spaceLinks, spaceDirs, spaceStrict, reuseThreadPerTopic, reuseSessionKey },
   ctx
 ) {
   if (typeof topic !== "string" || !topic.trim()) {
@@ -735,6 +761,8 @@ ${languageStyleGuide(lang)}`;
   const text = await runStreamed(prompt, schema, ctx?.progress, {
     modelConfig,
     dirs: spaceDirs,
+    // LEG-36: reuse one thread across the topic's questions (+ structure) for cache.
+    reuseKey: reuseThreadPerTopic ? reuseSessionKey : undefined,
     // Space-dir inspection can pause the stream for a while; the Rust-side
     // ceiling for wizard_next_question is 600s.
     idleTimeoutMs: 300_000,
@@ -3377,6 +3405,8 @@ export async function buildStructure(
     spaceStrict,
     learnerProfile,
     customMcp,
+    reuseThreadPerTopic,
+    reuseSessionKey,
   },
   ctx
 ) {
@@ -3513,6 +3543,8 @@ ${customMcpBlock(customMcp)}`;
     totalTimeoutMs: 3_600_000,
     stage: "structure",
     customMcp,
+    // LEG-36: continue the wizard's session so the topic prefix stays cached.
+    reuseKey: reuseThreadPerTopic ? reuseSessionKey : undefined,
   });
   const parsed = JSON.parse(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
@@ -3542,6 +3574,8 @@ ${customMcpBlock(customMcp)}`;
   if (modules.length === 0) {
     throw new Error("response had no modules with a title");
   }
+  // LEG-36: structure is the last stage of the reused topic session — release it.
+  if (reuseThreadPerTopic) evictReuseThread(reuseSessionKey);
   return {
     title: normalizeCourseTitle(parsed?.title),
     modules,

@@ -263,6 +263,7 @@ function buildClaudeOptions({
   category,
   stage,
   customMcp,
+  resume,
 } = {}) {
   const readDirs = Array.isArray(dirs) ? dirs.filter(Boolean) : [];
   const customServers = Array.isArray(customMcp)
@@ -339,12 +340,25 @@ function buildClaudeOptions({
     ];
   }
   if (allowedTools.length) options.allowedTools = allowedTools;
+  // LEG-36: resume a prior session (same course) so its cached prefix is reused.
+  if (resume) options.resume = resume;
   return options;
+}
+
+// LEG-36: reuse one Claude session per course across the wizard questions and
+// the structure build so the shared topic prefix is prompt-cached. Keyed by
+// opts.reuseKey (=courseId); the structure stage evicts on success and any
+// failed call evicts so the next attempt starts clean. In-memory only.
+const resumeSessions = new Map();
+export function evictReuseSession(key) {
+  if (key) resumeSessions.delete(key);
 }
 
 async function runStreamed(prompt, onProgress, opts) {
   let text = "";
   const modelConfig = await resolveModelConfig(opts?.modelConfig);
+  const reuseKey = opts?.reuseKey;
+  const priorSession = reuseKey ? resumeSessions.get(reuseKey) : undefined;
   // With web/Brave tools the agent may take several turns (search, read,
   // write); buildClaudeOptions picks the turn budget from the enabled tools.
   const options = buildClaudeOptions({
@@ -356,6 +370,7 @@ async function runStreamed(prompt, onProgress, opts) {
     category: opts?.category,
     stage: opts?.stage,
     customMcp: opts?.customMcp,
+    resume: priorSession,
   });
   const rec = devlog.startCall({ backend: "claude", prompt, model: modelConfig?.model });
   try {
@@ -408,9 +423,12 @@ async function runStreamed(prompt, onProgress, opts) {
       }
     } else if (message.type === "result" && message.subtype === "success") {
       text = message.result;
+      // LEG-36: remember this session id so the next call in the topic resumes it.
+      if (reuseKey && message.session_id) resumeSessions.set(reuseKey, message.session_id);
     }
   }
   } catch (e) {
+    evictReuseSession(reuseKey);
     rec.error(e);
     throw e;
   }
@@ -1649,6 +1667,8 @@ export async function buildStructure(
     genProfile,
     learnerProfile,
     customMcp,
+    reuseThreadPerTopic,
+    reuseSessionKey,
   },
   ctx
 ) {
@@ -1732,6 +1752,8 @@ Shape:
     maxTurns: genProfile?.researchMaxTurns,
     stage: "structure",
     customMcp,
+    // LEG-36: continue the wizard's session so the topic prefix stays cached.
+    reuseKey: reuseThreadPerTopic ? reuseSessionKey : undefined,
   });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.modules) || parsed.modules.length === 0) {
@@ -1761,6 +1783,8 @@ Shape:
   if (modules.length === 0) {
     throw new Error("response had no modules with a title");
   }
+  // LEG-36: structure is the last stage of the reused topic session — release it.
+  if (reuseThreadPerTopic) evictReuseSession(reuseSessionKey);
   return {
     title: normalizeCourseTitle(parsed?.title),
     modules,
@@ -3241,7 +3265,7 @@ function answeredBlock(answered) {
  * @returns {Promise<{title?:string, done:boolean, question?:{text:string,options:string[],multi:boolean}}>}
  */
 export async function wizardNextQuestion(
-  { topic, language, courseFormat, answered, modelConfig, spaceSources, spaceLinks, spaceDirs, spaceStrict },
+  { topic, language, courseFormat, answered, modelConfig, spaceSources, spaceLinks, spaceDirs, spaceStrict, reuseThreadPerTopic, reuseSessionKey },
   ctx
 ) {
   if (typeof topic !== "string" || !topic.trim()) {
@@ -3320,7 +3344,12 @@ Shape when asking: {${isFirst ? `"title":"...",` : ""}"done":false,"question":{"
 Shape when finished: {"done":true}`;
   // dirs grants the agent read access to the space's attached directories so it
   // can actually inspect them when forming questions (no dirs -> single turn).
-  const text = await runStreamed(prompt, ctx?.progress, { modelConfig, dirs: spaceDirs });
+  const text = await runStreamed(prompt, ctx?.progress, {
+    modelConfig,
+    dirs: spaceDirs,
+    // LEG-36: reuse one session across the topic's questions (+ structure).
+    reuseKey: reuseThreadPerTopic ? reuseSessionKey : undefined,
+  });
   const parsed = extractJson(text) || {};
   // Honor an explicit done; otherwise a missing/invalid question also means done.
   const question = parsed.done === true ? null : normalizeWizardQuestion(parsed.question);
