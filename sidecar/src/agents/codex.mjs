@@ -143,6 +143,7 @@ function normalizeCourseFormat(value) {
     "podcast_series",
     "single_lesson",
     "encyclopedia",
+    "documentation",
     "roadmap",
   ].includes(value)
     ? value
@@ -161,6 +162,7 @@ function structureBounds(courseFormat) {
     case "podcast_series":
       return { modMin: 3, modMax: 6, subMin: 2, subMax: 5 };
     case "encyclopedia":
+    case "documentation":
       return { modMin: 2, modMax: 8, subMin: 2, subMax: 8 };
     default: // academic_course (roadmap uses a separate path)
       return { modMin: 4, modMax: 10, subMin: 2, subMax: 6 };
@@ -209,6 +211,15 @@ function courseFormatGuide(courseFormat, lang) {
 - CROSS-LINK related articles: when you mention another article that exists in this encyclopedia (see the curriculum outline above), link it as a markdown link with this exact scheme: [Article Title](course://article/<Article Title>) — use the article's exact title; the app resolves it to in-app navigation. Link generously, but ONLY to titles that actually appear in the outline.
 - Do NOT generate tests or homework assignments for encyclopedia material.`;
   }
+  if (format === "documentation") {
+    return `Generation format: DOCUMENTATION.
+- This is reference DOCUMENTATION for how something works (a tool, system, API, library, product or process): SECTIONS (top-level modules) holding self-contained reference ARTICLES (submodules) — an interlinked docs site, NOT a linear course.
+- Structure: 2-8 sections, each with 2-8 articles. Organise like real product docs: overview / getting started, concepts & how it works, components / reference, configuration & usage, troubleshooting / FAQ. Order is for navigation, not strict progression.
+- Each article must be COMPLETE and stand on its own: what it is, HOW IT WORKS step by step, concrete usage with examples, the relevant options/parameters, and common gotchas. Never write "as we saw earlier" or "in the next lesson".
+- Accuracy is paramount: document the ACTUAL behaviour of the thing. Research thoroughly and cite authoritative/primary sources (official docs, specs, source). Do NOT invent options, flags, or APIs that do not exist.
+- CROSS-LINK related articles: when you mention another article that exists in this documentation (see the curriculum outline above), link it as a markdown link with this exact scheme: [Article Title](course://article/<Article Title>) — use the article's exact title; the app resolves it to in-app navigation. Link generously, but ONLY to titles that actually appear in the outline.
+- Do NOT generate tests or homework assignments for documentation material.`;
+  }
   return `Generation format: full academic course.
 - Do not ask whether the learner wants a full course, mini-course, or podcast series; this has already been chosen.
 - Build a serious, progressive curriculum with research-backed sequencing.
@@ -233,6 +244,9 @@ function wizardQuestionGuide(courseFormat, lang) {
   }
   if (format === "encyclopedia") {
     return `For the encyclopedia wizard, ask only what defines the scope of the reference work: the subject's boundaries (what to include/exclude), the depth and the target reader, and any key sub-areas or entries that must be covered. Do NOT ask about tests, homework, weekly schedules, or pacing.`;
+  }
+  if (format === "documentation") {
+    return `For the documentation wizard, ask only what defines the scope of the docs: exactly WHAT is being documented (the specific tool/system/library and its version if relevant), its boundaries (what to include/exclude), the target reader and their level, and which areas must be covered (setup, concepts, configuration, API/reference, troubleshooting). Do NOT ask about tests, homework, weekly schedules, or pacing.`;
   }
   return "";
 }
@@ -1749,7 +1763,7 @@ function normalizeReview(parsed) {
 
 /** Design a short chain of practical homework assignments for a submodule. */
 export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, braveApiKey, modelConfig, category, genProfile, learnerProfile }, ctx) {
-  if (["podcast_series", "encyclopedia"].includes(normalizeCourseFormat(courseFormat))) {
+  if (["podcast_series", "encyclopedia", "documentation"].includes(normalizeCourseFormat(courseFormat))) {
     return { assignments: [] };
   }
   if (typeof article !== "string" || !article.trim()) {

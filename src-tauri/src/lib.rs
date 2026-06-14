@@ -1758,8 +1758,9 @@ fn spawn_generate_submodule(
 
     thread::spawn(move || {
         let is_podcast = course.course_format == "podcast_series";
-        // Encyclopedia: reference articles, no tests and no homework.
-        let is_encyclopedia = course.course_format == "encyclopedia";
+        // Encyclopedia & documentation: reference articles, no tests and no homework.
+        let is_reference = course.course_format == "encyclopedia"
+            || course.course_format == "documentation";
         // Resolved generation profile (per-course override else balanced default).
         // Drives stage gating + is passed to the sidecar for depth/pedagogy.
         let profile: GenerationProfile = course
@@ -2051,7 +2052,7 @@ fn spawn_generate_submodule(
         // Both soft-fail; the submodule is already readable. Podcasts DO get a
         // recall quiz (episode recall) so spaced review is available to them too;
         // only assignments + illustration stay podcast-off.
-        let test_handle = if skip_tests || is_encyclopedia {
+        let test_handle = if skip_tests || is_reference {
             None
         } else {
             let sidecar = sidecar.clone();
@@ -2107,7 +2108,7 @@ fn spawn_generate_submodule(
         };
 
         // Background — design the homework assignment chain for this submodule.
-        let assignments_handle = if is_podcast || is_encyclopedia || skip_assignments {
+        let assignments_handle = if is_podcast || is_reference || skip_assignments {
             None
         } else {
             let sidecar = sidecar.clone();

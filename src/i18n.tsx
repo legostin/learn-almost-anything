@@ -310,6 +310,9 @@ const STRINGS = {
     courseFormatEncyclopediaTitle: "Энциклопедия",
     courseFormatEncyclopediaDesc:
       "Связанные между собой статьи-справки по разделам, как вики. Упор на полноту и источники, без тестов и домашки.",
+    courseFormatDocumentationTitle: "Документация",
+    courseFormatDocumentationDesc:
+      "Связанные статьи-справки по разделам, как docs-сайт. Упор на то, как что-то работает: настройка, концепции, справка, траблшутинг. Без тестов и домашки.",
     courseFormatRoadmapTitle: "Роудмап",
     courseFormatRoadmapDesc:
       "Маршрут обучения от цели: этапы, навыки и материалы. Из каждого навыка генерируется урок или курс.",
@@ -1158,6 +1161,9 @@ const STRINGS = {
     courseFormatEncyclopediaTitle: "Encyclopedia",
     courseFormatEncyclopediaDesc:
       "Interlinked reference articles grouped into sections, like a wiki. Emphasis on completeness and sources; no tests or homework.",
+    courseFormatDocumentationTitle: "Documentation",
+    courseFormatDocumentationDesc:
+      "Interlinked reference articles grouped into sections, like a docs site. Focused on how something works: setup, concepts, reference, troubleshooting. No tests or homework.",
     courseFormatRoadmapTitle: "Roadmap",
     courseFormatRoadmapDesc:
       "A learning route from a goal: stages, skills, and materials. Each skill spawns a lesson or a course.",

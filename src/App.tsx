@@ -56,9 +56,15 @@ type CourseFormat =
   | "mini_module"
   | "podcast_series"
   | "single_lesson"
-  | "encyclopedia";
+  | "encyclopedia"
+  | "documentation";
 
 const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
+
+// Reference formats (encyclopedia + documentation): interlinked articles with
+// no tests/homework and progress measured by generated articles, not tests.
+const isReferenceFormat = (format?: string | null): boolean =>
+  format === "encyclopedia" || format === "documentation";
 
 const COURSE_FORMATS = [
   {
@@ -86,6 +92,11 @@ const COURSE_FORMATS = [
     titleKey: "courseFormatEncyclopediaTitle",
     descKey: "courseFormatEncyclopediaDesc",
   },
+  {
+    value: "documentation",
+    titleKey: "courseFormatDocumentationTitle",
+    descKey: "courseFormatDocumentationDesc",
+  },
 ] as const satisfies ReadonlyArray<{
   value: CourseFormat;
   titleKey:
@@ -93,13 +104,15 @@ const COURSE_FORMATS = [
     | "courseFormatMiniTitle"
     | "courseFormatPodcastTitle"
     | "courseFormatLessonTitle"
-    | "courseFormatEncyclopediaTitle";
+    | "courseFormatEncyclopediaTitle"
+    | "courseFormatDocumentationTitle";
   descKey:
     | "courseFormatAcademicDesc"
     | "courseFormatMiniDesc"
     | "courseFormatPodcastDesc"
     | "courseFormatLessonDesc"
-    | "courseFormatEncyclopediaDesc";
+    | "courseFormatEncyclopediaDesc"
+    | "courseFormatDocumentationDesc";
 }>;
 
 // Generation cost/quality tier chosen at course creation; mirrors the Rust
@@ -2566,7 +2579,7 @@ function CourseDashboard({
     // articles (ready) rather than passed tests (verified) — otherwise the bar
     // is stuck at 0% even when every article is generated.
     const progressDone =
-      course.course_format === "encyclopedia" ? progress?.ready : progress?.verified;
+      isReferenceFormat(course.course_format) ? progress?.ready : progress?.verified;
     const verifiedPercent =
       progress && progress.total > 0
         ? Math.round(((progressDone ?? 0) / progress.total) * 100)
@@ -8278,7 +8291,7 @@ function Structure({
           ) : (
             <StructureTree
               tree={tree}
-              hideCompletion={course.course_format === "encyclopedia"}
+              hideCompletion={isReferenceFormat(course.course_format)}
               onOpenSub={onOpenSub}
               onStartSubGen={async (subId) => {
                 // Start (re)generation in the background — stay on the plan and
@@ -8370,7 +8383,7 @@ function RefineChat({
                   <div className="proposal-header">{t("proposal")}</div>
                   <StructureTree
                     tree={{ course_id: course.id, modules: msg.modules }}
-                    hideCompletion={course.course_format === "encyclopedia"}
+                    hideCompletion={isReferenceFormat(course.course_format)}
                   />
                   {isPending && (
                     <div className="proposal-actions">
@@ -8499,7 +8512,7 @@ function StructureEditor({
 }) {
   const t = useT();
   // Encyclopedia speaks in "articles" and "sections" rather than lessons/modules.
-  const isEnc = course.course_format === "encyclopedia";
+  const isEnc = isReferenceFormat(course.course_format);
   type ESub = { id: string; title: string; summary: string; prereqs: string[]; state: string };
   type EMod = { id: string; title: string; summary: string; subs: ESub[] };
   const [mods, setMods] = useState<EMod[]>(() =>
@@ -9793,7 +9806,7 @@ function SubmoduleView({
     tree!.modules[moduleIdx]?.submodules.findIndex((s) => s.id === submoduleId) ?? 0;
   const isPodcast = course.course_format === "podcast_series";
   // Encyclopedia: reference articles, no tests/homework; articles cross-link by title.
-  const isEncyclopedia = course.course_format === "encyclopedia";
+  const isEncyclopedia = isReferenceFormat(course.course_format);
   const unresolvedImages = !isPodcast && content ? countUnresolvedImageWidgets(content.widgets) : 0;
   // Resolve a wiki-link (course://article/<title>) to its submodule by title and navigate.
   const openArticleByTitle = (title: string) => {
