@@ -307,36 +307,35 @@ pub fn install_structure(
     let json = serde_json::to_string_pretty(&file).expect("serialize structure");
     fs::write(dir.join("structure.json"), json)?;
 
-    // 2. replace modules in DB (deterministic from file)
+    // 2. replace modules in DB (deterministic from file). Recursive so
+    // documentation trees of arbitrary depth are persisted via parent_id chains.
     db::delete_modules_for_course(conn, course_id)?;
-    for (mod_pos, m) in file.modules.iter().enumerate() {
-        db::insert_module(
-            conn,
-            &m.id,
-            course_id,
-            None,
-            mod_pos as i64,
-            &m.title,
-            if m.summary.is_empty() { None } else { Some(&m.summary) },
-            "pending",
-        )?;
-        for (sub_pos, s) in m.submodules.iter().enumerate() {
+    fn insert_nodes(
+        conn: &rusqlite::Connection,
+        course_id: &str,
+        parent_id: Option<&str>,
+        nodes: &[ModuleNode],
+    ) -> Result<(), CourseError> {
+        for (pos, n) in nodes.iter().enumerate() {
             db::insert_module(
                 conn,
-                &s.id,
+                &n.id,
                 course_id,
-                Some(&m.id),
-                sub_pos as i64,
-                &s.title,
-                if s.summary.is_empty() { None } else { Some(&s.summary) },
+                parent_id,
+                pos as i64,
+                &n.title,
+                if n.summary.is_empty() { None } else { Some(n.summary.as_str()) },
                 "pending",
             )?;
-            if !s.prereqs.is_empty() {
-                let json = serde_json::to_string(&s.prereqs).unwrap_or_default();
-                db::set_module_prereqs(conn, &s.id, Some(&json))?;
+            if !n.prereqs.is_empty() {
+                let json = serde_json::to_string(&n.prereqs).unwrap_or_default();
+                db::set_module_prereqs(conn, &n.id, Some(&json))?;
             }
+            insert_nodes(conn, course_id, Some(&n.id), &n.submodules)?;
         }
+        Ok(())
     }
+    insert_nodes(conn, course_id, None, &file.modules)?;
 
     db::set_course_status(conn, course_id, "ready", now_secs()?)?;
     Ok(file)
@@ -366,118 +365,78 @@ pub fn save_structure(
     let existing = db::list_modules(conn, course_id)?;
     let existing_ids: HashSet<String> = existing.iter().map(|m| m.id.clone()).collect();
     let mut kept_ids: HashSet<String> = HashSet::new();
+    // Documentation stores every node's content under a single ("_doc", id) dir
+    // regardless of tree depth, so orphan-cleanup below must resolve dirs there.
+    let is_doc = db::get_course(conn, course_id)?
+        .map(|c| c.course_format == "documentation")
+        .unwrap_or(false);
 
     let tx = conn.transaction()?;
     tx.execute("PRAGMA defer_foreign_keys = TRUE", [])?;
 
-    let mut out_modules: Vec<ModuleNode> = Vec::with_capacity(incoming.len());
-    for (mod_pos, m) in incoming.into_iter().enumerate() {
-        let title = m.title.trim().to_string();
-        if title.is_empty() {
-            continue; // silently skip empty-title modules
-        }
-        let summary = m.summary.trim().to_string();
-        let summary_db = if summary.is_empty() { None } else { Some(summary.as_str()) };
-
-        let (mod_id, is_existing) = if !m.id.is_empty() && existing_ids.contains(&m.id) {
-            (m.id.clone(), true)
-        } else {
-            (Uuid::new_v4().to_string(), false)
-        };
-        kept_ids.insert(mod_id.clone());
-
-        if is_existing {
-            db::update_module(&tx, &mod_id, None, mod_pos as i64, &title, summary_db)?;
-        } else {
-            db::insert_module(
-                &tx,
-                &mod_id,
-                course_id,
-                None,
-                mod_pos as i64,
-                &title,
-                summary_db,
-                "pending",
-            )?;
-        }
-
-        let mut out_subs: Vec<ModuleNode> = Vec::with_capacity(m.submodules.len());
-        for (sub_pos, s) in m.submodules.into_iter().enumerate() {
-            let sub_title = s.title.trim().to_string();
-            if sub_title.is_empty() {
-                continue;
+    // Recursively upsert the incoming tree (arbitrary depth). Reuses an existing
+    // node's id when provided (preserving its generated content), else mints a
+    // fresh one. Tracks kept ids so removed nodes can be pruned afterwards.
+    fn process_nodes(
+        tx: &rusqlite::Transaction,
+        course_id: &str,
+        parent_id: Option<&str>,
+        existing_ids: &HashSet<String>,
+        kept_ids: &mut HashSet<String>,
+        incoming: Vec<ModuleUpdate>,
+    ) -> Result<Vec<ModuleNode>, CourseError> {
+        let mut out = Vec::with_capacity(incoming.len());
+        for (pos, n) in incoming.into_iter().enumerate() {
+            let title = n.title.trim().to_string();
+            if title.is_empty() {
+                continue; // silently skip empty-title nodes
             }
-            let sub_summary = s.summary.trim().to_string();
-            let sub_summary_db = if sub_summary.is_empty() {
-                None
-            } else {
-                Some(sub_summary.as_str())
-            };
-
-            let sub_prereqs: Vec<String> = s
+            let summary = n.summary.trim().to_string();
+            let summary_db = if summary.is_empty() { None } else { Some(summary.as_str()) };
+            let prereqs: Vec<String> = n
                 .prereqs
                 .iter()
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
                 .collect();
 
-            let (sub_id, sub_is_existing) = if !s.id.is_empty() && existing_ids.contains(&s.id) {
-                (s.id.clone(), true)
+            let (id, is_existing) = if !n.id.is_empty() && existing_ids.contains(&n.id) {
+                (n.id.clone(), true)
             } else {
                 (Uuid::new_v4().to_string(), false)
             };
-            kept_ids.insert(sub_id.clone());
+            kept_ids.insert(id.clone());
 
-            if sub_is_existing {
-                db::update_module(
-                    &tx,
-                    &sub_id,
-                    Some(&mod_id),
-                    sub_pos as i64,
-                    &sub_title,
-                    sub_summary_db,
-                )?;
+            if is_existing {
+                db::update_module(tx, &id, parent_id, pos as i64, &title, summary_db)?;
             } else {
-                db::insert_module(
-                    &tx,
-                    &sub_id,
-                    course_id,
-                    Some(&mod_id),
-                    sub_pos as i64,
-                    &sub_title,
-                    sub_summary_db,
-                    "pending",
-                )?;
+                db::insert_module(tx, &id, course_id, parent_id, pos as i64, &title, summary_db, "pending")?;
             }
             // Persist prereqs (clear when none, so an edit that removes them sticks).
-            let prereqs_json = if sub_prereqs.is_empty() {
+            let prereqs_json = if prereqs.is_empty() {
                 None
             } else {
-                Some(serde_json::to_string(&sub_prereqs).unwrap_or_default())
+                Some(serde_json::to_string(&prereqs).unwrap_or_default())
             };
-            db::set_module_prereqs(&tx, &sub_id, prereqs_json.as_deref())?;
-            out_subs.push(ModuleNode {
-                id: sub_id,
-                title: sub_title,
-                summary: sub_summary,
+            db::set_module_prereqs(tx, &id, prereqs_json.as_deref())?;
+
+            let submodules =
+                process_nodes(tx, course_id, Some(&id), existing_ids, kept_ids, n.submodules)?;
+            out.push(ModuleNode {
+                id,
+                title,
+                summary,
                 generation_state: default_pending(),
                 test_passed: false,
                 test_passed_at: None,
-                prereqs: sub_prereqs,
-                submodules: vec![],
+                prereqs,
+                submodules,
             });
         }
-        out_modules.push(ModuleNode {
-            id: mod_id,
-            title,
-            summary,
-            generation_state: default_pending(),
-            test_passed: false,
-            test_passed_at: None,
-            prereqs: vec![],
-            submodules: out_subs,
-        });
+        Ok(out)
     }
+    let out_modules =
+        process_nodes(&tx, course_id, None, &existing_ids, &mut kept_ids, incoming)?;
 
     // Delete removed nodes from the DB and collect their on-disk dirs so we don't
     // orphan generated content (article.md, widgets, images, …). Reordered/renamed
@@ -487,9 +446,13 @@ pub fn save_structure(
     for id in existing_ids.difference(&kept_ids) {
         db::delete_module(&tx, id)?;
         if let Some(m) = existing.iter().find(|m| &m.id == id) {
-            let dir = match m.parent_id.as_deref() {
-                Some(mod_id) => submodule_dir(paths, course_id, mod_id, id),
-                None => paths.course_dir(course_id).join("modules").join(id),
+            let dir = if is_doc {
+                submodule_dir(paths, course_id, "_doc", id)
+            } else {
+                match m.parent_id.as_deref() {
+                    Some(mod_id) => submodule_dir(paths, course_id, mod_id, id),
+                    None => paths.course_dir(course_id).join("modules").join(id),
+                }
             };
             dirs_to_remove.push(dir);
         }
@@ -1185,14 +1148,25 @@ pub fn find_submodule_path<'a>(
     file: &'a StructureFile,
     sub_id: &str,
 ) -> Option<(&'a ModuleNode, &'a ModuleNode)> {
-    for m in &file.modules {
-        for s in &m.submodules {
-            if s.id == sub_id {
-                return Some((m, s));
+    // Recursive so arbitrarily-nested documentation nodes resolve. Returns the
+    // node together with its immediate parent (used for prompt context); a
+    // top-level node has no parent, so it stands in as its own parent.
+    fn walk<'a>(
+        parent: Option<&'a ModuleNode>,
+        nodes: &'a [ModuleNode],
+        sub_id: &str,
+    ) -> Option<(Option<&'a ModuleNode>, &'a ModuleNode)> {
+        for n in nodes {
+            if n.id == sub_id {
+                return Some((parent, n));
+            }
+            if let Some(found) = walk(Some(n), &n.submodules, sub_id) {
+                return Some(found);
             }
         }
+        None
     }
-    None
+    walk(None, &file.modules, sub_id).map(|(parent, node)| (parent.unwrap_or(node), node))
 }
 
 /// Convert ModuleNode tree → ModuleUpdate list (fresh, no ids preserved).

@@ -604,13 +604,16 @@ pub fn queue_pending_submodules(
 ) -> Result<usize, rusqlite::Error> {
     // Queue submodules that still need work: never generated ('pending') and
     // previously failed ('failed'). Already-generated ('ready') and in-flight
-    // ('generating'/'queued') ones are left untouched.
+    // ('generating'/'queued') ones are left untouched. Normally only leaf
+    // submodules (parent_id NOT NULL) carry content; for 'documentation' every
+    // node is an article (content allowed at any depth), so queue those too.
     conn.execute(
         "UPDATE modules \
          SET generation_state = 'queued' \
          WHERE course_id = ?1 \
-           AND parent_id IS NOT NULL \
-           AND generation_state IN ('pending', 'failed')",
+           AND generation_state IN ('pending', 'failed') \
+           AND ( parent_id IS NOT NULL \
+                 OR (SELECT course_format FROM courses WHERE id = ?1) = 'documentation' )",
         [course_id],
     )
 }

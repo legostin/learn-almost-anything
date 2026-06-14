@@ -1771,7 +1771,15 @@ fn spawn_generate_submodule(
 
     let app2 = app.clone();
     let cid = course.id.clone();
-    let mid = module_id.clone();
+    // Documentation addresses every node's content under a single ("_doc", id)
+    // dir, so arbitrarily-nested nodes get a stable, depth-independent location.
+    // `module_id` above stays the real parent — it is used only for prompt
+    // context (titles/outline), never for content storage.
+    let mid = if course.course_format == "documentation" {
+        "_doc".to_string()
+    } else {
+        module_id.clone()
+    };
     let sid = submodule_id.clone();
 
     thread::spawn(move || {
@@ -4256,6 +4264,11 @@ async fn publish_course_to_catalog(
                     if origin != course.id {
                         return Err("imported courses cannot be published".to_string());
                     }
+                }
+                // Documentation uses an arbitrarily-nested tree; catalog packaging is
+                // still 2-level, so block publishing it until that supports nesting.
+                if course.course_format == "documentation" {
+                    return Err("documentation courses cannot be published yet".to_string());
                 }
                 (catalog::build_package(&conn, &paths, &course_id)?, course)
             };
