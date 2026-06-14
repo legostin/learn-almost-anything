@@ -1,5 +1,6 @@
 import {
   createContext,
+  Fragment,
   useCallback,
   useContext,
   useEffect,
@@ -8877,6 +8878,8 @@ function CourseAssistant({
   onTargetConsumed,
   socraticSeed,
   onSocraticConsumed,
+  deepenSeed,
+  onDeepenConsumed,
   onChanged,
   onOpenSubmodule,
 }: {
@@ -8887,6 +8890,8 @@ function CourseAssistant({
   onTargetConsumed?: () => void;
   socraticSeed?: SocraticSeed | null;
   onSocraticConsumed?: () => void;
+  deepenSeed?: number | null;
+  onDeepenConsumed?: () => void;
   onChanged?: () => void | Promise<void>;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
@@ -8908,6 +8913,9 @@ function CourseAssistant({
   const [currentNoteId, setCurrentNoteId] = useState<string | null>(null);
   const [socratic, setSocratic] = useState(false);
   const [exercise, setExercise] = useState<SocraticSeed | null>(null);
+  // "Go deeper" flow: the next chat message is treated as the deepen direction
+  // (no LLM round-trip for the prompt itself) and routed to extend_submodule.
+  const [pendingDeepen, setPendingDeepen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   function newChat() {
@@ -8920,6 +8928,7 @@ function CourseAssistant({
     setError(null);
     setCurrentNoteId(null);
     setExercise(null);
+    setPendingDeepen(false);
     setMode("chat");
   }
 
@@ -9139,6 +9148,19 @@ function CourseAssistant({
     onTargetConsumed?.();
   }, [target, onTargetConsumed]);
 
+  // Consume a "go deeper" trigger from the end-of-article button: open the
+  // panel and ask — without an LLM call — which direction to expand. The
+  // learner's next chat message becomes the deepen instruction (see `send`).
+  useEffect(() => {
+    if (!deepenSeed) return;
+    setMode("chat");
+    setOpen(true);
+    setPendingDeepen(true);
+    setMessages((prev) => [...prev, { role: "assistant", text: t("deepenAsk") }]);
+    onDeepenConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepenSeed]);
+
   async function attachImage() {
     try {
       const selFile = await openFileDialog({
@@ -9153,6 +9175,14 @@ function CourseAssistant({
 
   async function send(overrideQ?: string) {
     const q = (overrideQ ?? input).trim();
+    // "Go deeper": the learner's reply is the deepen direction, not a chat turn.
+    if (pendingDeepen) {
+      if (!q || busy || actionBusy) return;
+      setMessages((prev) => [...prev, { role: "user", text: q }]);
+      setInput("");
+      await runDeepen(q);
+      return;
+    }
     if ((!q && !image && !widgetTarget) || busy || actionBusy) return;
     const userMsg: AssistantMsg = {
       role: "user",
@@ -9282,25 +9312,27 @@ function CourseAssistant({
       setActionBusy(null);
     }
   }
-  // Assistant-proposed deep-dive: append extra sections to the current lesson.
-  async function goDeeper() {
-    if (actionBusy || busy) return;
-    setActionBusy("deepen");
+  // Assistant-proposed deep-dive: write a new block (appended, or spliced in
+  // place when the instruction targets a specific part) and reload the lesson.
+  async function runDeepen(instruction: string) {
+    if (busy) return;
+    setPendingDeepen(false);
+    setBusy(true);
     setError(null);
+    setMessages((prev) => [...prev, { role: "assistant", text: t("deepenWorking") }]);
     try {
       await invoke("extend_submodule", {
         courseId,
         moduleId,
         submoduleId,
-        instruction: input.trim() || null,
+        instruction: instruction.trim() || null,
       });
-      setInput("");
-      note(t("assistantDeepenDone"));
+      setMessages((prev) => [...prev, { role: "assistant", text: t("deepenUpdated") }]);
       await onChanged?.();
     } catch (e) {
       setError(String(e));
     } finally {
-      setActionBusy(null);
+      setBusy(false);
     }
   }
 
@@ -9517,13 +9549,6 @@ function CourseAssistant({
                   ))}
                 </div>
               )}
-              {!widgetTarget && (
-                <div className="assistant-actions">
-                  <button disabled={!!actionBusy || busy} onClick={goDeeper} title={t("assistantDeepenHint")}>
-                    {actionBusy === "deepen" ? `… ${t("assistantThinking")}` : `✦ ${t("assistantDeepen")}`}
-                  </button>
-                </div>
-              )}
               {image && (
                 <div className="assistant-img-chip">
                   <img src={convertFileSrc(image)} alt="" />
@@ -9621,6 +9646,7 @@ function SubmoduleView({
   editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
   const [socraticSeed, setSocraticSeed] = useState<SocraticSeed | null>(null);
+  const [deepenSeed, setDeepenSeed] = useState<number | null>(null);
   const [recallCards, setRecallCards] = useState<Record<string, SubCard>>({});
   const [canGenerate, setCanGenerate] = useState(false);
   useEffect(() => {
@@ -9841,6 +9867,8 @@ function SubmoduleView({
           onTargetConsumed={() => setAssistantTarget(null)}
           socraticSeed={socraticSeed}
           onSocraticConsumed={() => setSocraticSeed(null)}
+          deepenSeed={deepenSeed}
+          onDeepenConsumed={() => setDeepenSeed(null)}
           onChanged={reloadContent}
           onOpenSubmodule={onOpenSubmodule}
         />
@@ -10045,6 +10073,17 @@ function SubmoduleView({
                     : undefined
                 }
               />
+              {!isPodcast && state === "ready" && (
+                <div className="article-deepen">
+                  <button
+                    className="article-deepen-btn"
+                    onClick={() => setDeepenSeed(Date.now())}
+                    title={t("deepenCtaHint")}
+                  >
+                    ✦ {t("deepenCta")}
+                  </button>
+                </div>
+              )}
               {content.sources?.length > 0 && (
                 <SourcesList sources={content.sources} />
               )}
@@ -10127,6 +10166,33 @@ function stripArticleWidgetMarkers(md: string): string {
 /** Drop internal `<!-- la:... -->` plumbing comments before rendering. */
 function stripInternalMarkers(md: string): string {
   return (md || "").replace(/<!--\s*la:[a-z-]+\s*-->/g, "");
+}
+
+type ReaderPart =
+  | { kind: "md"; text: string; isNew?: boolean }
+  | { kind: "widget"; id: string; isNew?: boolean };
+
+// Split a lesson segment into render parts, flagging runs wrapped in the
+// `la:new` … `la:newend` markers (just-added "go deeper" blocks) so the reader
+// can highlight them. Everything else is processed exactly as before.
+function buildReaderParts(text: string): ReaderPart[] {
+  const out: ReaderPart[] = [];
+  const re = /<!--\s*la:new\s*-->([\s\S]*?)<!--\s*la:newend\s*-->/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const pushRun = (chunk: string, isNew: boolean) => {
+    if (!chunk) return;
+    for (const part of splitWidgetMarkers(stripInternalMarkers(chunk))) {
+      out.push({ ...part, isNew });
+    }
+  };
+  while ((m = re.exec(text))) {
+    pushRun(text.slice(last, m.index), false);
+    pushRun(m[1], true);
+    last = m.index + m[0].length;
+  }
+  pushRun(text.slice(last), false);
+  return out;
 }
 
 function articleToSpeechText(md: string): string {
@@ -11723,8 +11789,8 @@ function ArticleReader({
     const main = segments[0] ?? "";
     const extra = segments.slice(1).join("\n\n").trim();
     return {
-      mainParts: splitWidgetMarkers(stripInternalMarkers(main)),
-      extraParts: extra ? splitWidgetMarkers(stripInternalMarkers(extra)) : [],
+      mainParts: buildReaderParts(main),
+      extraParts: extra ? buildReaderParts(extra) : [],
     };
   }, [article]);
   const parts = useMemo(() => [...mainParts, ...extraParts], [mainParts, extraParts]);
@@ -11756,55 +11822,60 @@ function ArticleReader({
     }
   }, [lightboxImages.length, lightboxIndex]);
 
-  const renderPart = (
-    p: { kind: "md"; text: string } | { kind: "widget"; id: string },
-    key: number
-  ) =>
-    p.kind === "md" ? (
-      <ReactMarkdown
-        key={key}
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-        components={{
-          pre: CodeBlock,
-          // Encyclopedia cross-links use the scheme course://article/<title>;
-          // resolve them to in-app navigation. Other links stay normal anchors.
-          a({ href, children }) {
-            const m = /^course:\/\/article\/(.+)$/i.exec(href || "");
-            if (m && onWikiLink) {
-              const title = decodeURIComponent(m[1]);
+  const renderPart = (p: ReaderPart, key: number) => {
+    const inner =
+      p.kind === "md" ? (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+          components={{
+            pre: CodeBlock,
+            // Encyclopedia cross-links use the scheme course://article/<title>;
+            // resolve them to in-app navigation. Other links stay normal anchors.
+            a({ href, children }) {
+              const m = /^course:\/\/article\/(.+)$/i.exec(href || "");
+              if (m && onWikiLink) {
+                const title = decodeURIComponent(m[1]);
+                return (
+                  <a
+                    href="#"
+                    className="wiki-link"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onWikiLink(title);
+                    }}
+                  >
+                    {children}
+                  </a>
+                );
+              }
               return (
-                <a
-                  href="#"
-                  className="wiki-link"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onWikiLink(title);
-                  }}
-                >
+                <a href={href} target="_blank" rel="noreferrer">
                   {children}
                 </a>
               );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer">
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {p.text}
-      </ReactMarkdown>
+            },
+          }}
+        >
+          {p.text}
+        </ReactMarkdown>
+      ) : (
+        <WidgetRenderer
+          id={p.id}
+          widget={widgets[p.id]}
+          onOpenImage={openLightboxImage}
+          widgetCtx={widgetCtx}
+        />
+      );
+    // Just-added "go deeper" blocks render on a soft yellow background.
+    return p.isNew ? (
+      <div className="reader-new" key={key}>
+        {inner}
+      </div>
     ) : (
-      <WidgetRenderer
-        key={key}
-        id={p.id}
-        widget={widgets[p.id]}
-        onOpenImage={openLightboxImage}
-        widgetCtx={widgetCtx}
-      />
+      <Fragment key={key}>{inner}</Fragment>
     );
+  };
 
   return (
     <article className="reader" style={{ ["--reader-font" as string]: `${fontPx}px` }}>

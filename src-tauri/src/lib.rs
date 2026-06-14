@@ -5491,6 +5491,57 @@ fn start_generate_flashcards(
     Ok(())
 }
 
+/// Strip the highlight markers left by a previous "go deeper" so only the
+/// just-added block stays yellow. The reader pairs `la:new` … `la:newend`.
+fn strip_new_markers(article: &str) -> String {
+    article
+        .replace("<!-- la:new -->", "")
+        .replace("<!-- la:newend -->", "")
+}
+
+/// Splice a freshly-written deep-dive block into a lesson. When `anchor` is a
+/// verbatim line found in the lesson body (before any `la:deepdive` section),
+/// the block is inserted right after that paragraph; otherwise it is appended
+/// as a deep-dive addition. The block is wrapped in `la:new` … `la:newend` so
+/// the reader can highlight it.
+fn splice_deepdive(base: &str, anchor: &str, md: &str) -> String {
+    let base = strip_new_markers(base);
+    let wrapped = format!("<!-- la:new -->\n\n{}\n\n<!-- la:newend -->", md.trim());
+    let append = |b: &str| format!("{}\n\n<!-- la:deepdive -->\n\n{}\n", b.trim_end(), wrapped);
+    let anchor = anchor.trim();
+    if anchor.is_empty() {
+        return append(&base);
+    }
+    // Only splice into the main body, never inside an existing additions block.
+    let (main, rest) = match base.find("<!-- la:deepdive -->") {
+        Some(i) => (base[..i].to_string(), base[i..].to_string()),
+        None => (base.clone(), String::new()),
+    };
+    let Some(pos) = main.find(anchor) else {
+        return append(&base); // anchor not found → safe fallback
+    };
+    // Insert after the end of the paragraph that contains the anchor.
+    let after = pos + anchor.len();
+    let rel = main[after..]
+        .find("\n\n")
+        .map(|p| after + p)
+        .unwrap_or(main.len());
+    let head = main[..rel].trim_end();
+    let tail = main[rel..].trim();
+    let mut out = format!("{head}\n\n{wrapped}");
+    if !tail.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(tail);
+    }
+    let rest = rest.trim();
+    if !rest.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(rest);
+    }
+    out.push('\n');
+    out
+}
+
 /// Append assistant-proposed deep-dive sections to a lesson's article. Async +
 /// spawn_blocking (LLM call). Sharing is governed by course authorship at publish
 /// time, so additions on an imported course simply never get published.
@@ -5550,8 +5601,9 @@ async fn extend_submodule(
         if md.is_empty() {
             return Err("no additional sections were produced".into());
         }
-        let appended = format!("{}\n\n<!-- la:deepdive -->\n\n{}\n", content.article.trim_end(), md);
-        courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &appended)
+        let anchor = v.get("anchor").and_then(|x| x.as_str()).unwrap_or("");
+        let updated = splice_deepdive(&content.article, anchor, &md);
+        courses::write_submodule_article(&paths, &course_id, &module_id, &submodule_id, &updated)
             .map_err(|e| e.to_string())?;
         emit_enrich_event(&app2, &course_id, &submodule_id);
         Ok(())

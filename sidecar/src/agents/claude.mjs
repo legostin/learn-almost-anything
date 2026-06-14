@@ -2336,8 +2336,11 @@ Answer in ${lang}, in Markdown. Be concise but complete; use examples or code wh
 }
 
 /**
- * Deepen a lesson: write additional Markdown "##" sections to append after the
- * existing article (prose + inline code; no widgets). Returns { markdown }.
+ * Deepen a lesson: write an additional Markdown "##" block. When the learner
+ * targets a specific part, also return `anchor` — a verbatim line from the
+ * lesson after which the new block should be spliced in place (the Rust side
+ * does the splice and falls back to appending if the anchor is not found).
+ * Returns { markdown, anchor }.
  */
 export async function extendArticle(
   { language, topic, article, instruction, spaceSources, spaceLinks, spaceDirs, spaceStrict, modelConfig },
@@ -2352,21 +2355,34 @@ The lesson so far:
 ${article}
 </lesson>
 
-Write ADDITIONAL deep-dive sections to append AFTER this lesson — go beyond what
-is already covered: edge cases, advanced techniques, worked examples, common
-pitfalls, deeper theory or context${instr ? `. Focus especially on: ${instr}` : ""}.
-Rules:
-- Begin each section with a Markdown "## " heading. Do NOT repeat anything already
-  in the lesson; assume the learner has read it.
-- Use prose and inline fenced code blocks where they help. Do NOT add any
-  ::widget markers, images, or galleries.
+Write ONE focused ADDITIONAL block that goes beyond what is already covered${instr ? `. The learner asked specifically: "${instr}"` : " (edge cases, advanced techniques, worked examples, common pitfalls, deeper theory or context)"}.
+
+Placement ("anchor"):
+- If the request is about a SPECIFIC existing part of the lesson, set "anchor" to an EXACT, verbatim line copied from the lesson above (a "##"/"###" heading line, or the full first sentence of the relevant paragraph) AFTER which the new block belongs. Copy it character-for-character — do NOT paraphrase or shorten it.
+- Otherwise (a general "go deeper"), set "anchor" to "" — the block will be appended at the end.
+
+Rules for the new block ("markdown"):
+- Begin with a Markdown "## " heading. Do NOT repeat anything already in the lesson; assume the learner has read it.
+- Use prose and inline fenced code blocks where they help. Do NOT add any ::widget markers, images, or galleries.
 - Write everything in language "${lang}".
 
 ${languageStyleGuide(lang)}
 
-Output ONLY the new Markdown sections — no preamble, no surrounding code fence.`;
+Output ONLY a single-line JSON object — no preamble, no surrounding code fence:
+{"anchor":"<verbatim line from the lesson, or empty>","markdown":"<the new Markdown block>"}`;
   const text = await runStreamed(prompt, ctx?.progress, { web: true, modelConfig, dirs: spaceDirs });
-  return { markdown: (text || "").trim() };
+  let parsed = null;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    /* fall through to raw-text fallback below */
+  }
+  const markdown = (parsed?.markdown ?? "").toString().trim();
+  if (!markdown) {
+    // Model ignored the JSON contract — treat the whole reply as the block.
+    return { markdown: (text || "").trim(), anchor: "" };
+  }
+  return { markdown, anchor: (parsed?.anchor ?? "").toString().trim() };
 }
 
 // Rewrite a selected text fragment per an instruction (the course editor's

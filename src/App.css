@@ -8448,6 +8448,38 @@ button.domain-chip {
   padding-top: 18px;
   border-top: 2px solid var(--accent-soft, rgba(127, 127, 127, 0.2));
 }
+/* "Go deeper" call-to-action at the end of the article body. */
+.article-deepen {
+  display: flex;
+  justify-content: center;
+  margin: 28px 0 8px;
+}
+.article-deepen-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  background: transparent;
+  border: 1px dashed var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.article-deepen-btn:hover {
+  background: var(--accent-soft);
+  border-style: solid;
+}
+/* Just-added "go deeper" blocks glow until the next deepen replaces them. */
+.reader-new {
+  background: #fff8dc;
+  border-radius: 8px;
+  margin: 10px -14px;
+  padding: 2px 14px;
+  box-shadow: inset 3px 0 0 #e6b800;
+}
 .deepdive-kicker {
   display: inline-flex;
   align-items: center;
