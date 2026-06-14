@@ -6603,6 +6603,35 @@ fn translate_course_content(
                             _ => {}
                         }
                     }
+
+                    // Image files were copied into THIS (translated) submodule's
+                    // images/ dir, but the copied widget `url`s still point at the
+                    // SOURCE course's absolute path. Repoint each local url at the
+                    // new dir (same filename) so the app finds them and the catalog
+                    // packager can relativize them — otherwise a foreign absolute
+                    // path leaks into the package and breaks in the web catalog.
+                    let images_dir = dir.join("images");
+                    let repoint = |w: &mut serde_json::Value| {
+                        if let Some(u) = w.get("url").and_then(|v| v.as_str()) {
+                            let p = u.strip_prefix("file://").unwrap_or(u);
+                            if p.starts_with('/') {
+                                if let Some(name) = std::path::Path::new(p).file_name() {
+                                    let np = images_dir.join(name);
+                                    if np.exists() {
+                                        w["url"] = json!(np.to_string_lossy());
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    for (_k, w) in obj.iter_mut() {
+                        repoint(w);
+                        if let Some(items) = w.get_mut("items").and_then(|v| v.as_array_mut()) {
+                            for it in items.iter_mut() {
+                                repoint(it);
+                            }
+                        }
+                    }
                 }
                 let _ = std::fs::write(
                     &widgets_path,
