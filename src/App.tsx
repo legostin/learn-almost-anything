@@ -8478,6 +8478,8 @@ function StructureEditor({
   onCancel: () => void;
 }) {
   const t = useT();
+  // Encyclopedia speaks in "articles" and "sections" rather than lessons/modules.
+  const isEnc = course.course_format === "encyclopedia";
   type ESub = { id: string; title: string; summary: string; prereqs: string[]; state: string };
   type EMod = { id: string; title: string; summary: string; subs: ESub[] };
   const [mods, setMods] = useState<EMod[]>(() =>
@@ -8594,13 +8596,13 @@ function StructureEditor({
                 </li>
               ))}
               <li>
-                <button className="struct-add" onClick={() => addSub(i)}>＋ {t("structAddLesson")}</button>
+                <button className="struct-add" onClick={() => addSub(i)}>＋ {t(isEnc ? "structAddArticle" : "structAddLesson")}</button>
               </li>
             </ol>
           </li>
         ))}
       </ol>
-      <button className="struct-add" onClick={addMod}>＋ {t("structAddModule")}</button>
+      <button className="struct-add" onClick={addMod}>＋ {t(isEnc ? "structAddSection" : "structAddModule")}</button>
       <div className="struct-edit-note">{t("structEditNote")}</div>
     </div>
   );
@@ -9856,6 +9858,11 @@ function SubmoduleView({
           initialWidgets={(content?.widgets as Record<string, WidgetData>) ?? {}}
           canGenerate={canGenerate}
           wasPending={state !== "ready"}
+          articleTitles={
+            tree?.modules.flatMap((m) =>
+              m.submodules.filter((s) => s.id !== submoduleId).map((s) => s.title)
+            ) ?? []
+          }
           onClose={async () => {
             setEditing(false);
             await reloadTree();
@@ -12001,16 +12008,19 @@ function LeTextBlock({
   onFocus,
   onChange,
   courseId,
+  articleTitles = [],
 }: {
   text: string;
   focused: boolean;
   onFocus: () => void;
   onChange: (t: string) => void;
   courseId: string;
+  articleTitles?: string[];
 }) {
   const t = useT();
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [sel, setSel] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
+  const [linkPick, setLinkPick] = useState(false);
   const [ai, setAi] = useState<null | {
     start: number;
     end: number;
@@ -12061,6 +12071,12 @@ function LeTextBlock({
     });
   };
   const hasSel = sel.end > sel.start;
+  // Insert an encyclopedia cross-link to another article. Wraps the selection as
+  // the link text, or uses the article title when nothing is selected.
+  const insertWikiLink = (title: string) => {
+    insertAtCursor("[", `](course://article/${title})`, title);
+    setLinkPick(false);
+  };
 
   const runAi = async () => {
     if (!ai || !ai.instruction.trim()) return;
@@ -12107,6 +12123,31 @@ function LeTextBlock({
         <button title={t("fmtItalic")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("*", "*", t("fmtItalic"))}><i>I</i></button>
         <button title={t("fmtH2")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("## ", "", "")}>H</button>
         <button title={t("fmtLink")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("[", "](https://)", t("fmtLink"))}>🔗</button>
+        {articleTitles.length > 0 && (
+          <div className="le-wikilink-wrap">
+            <button
+              title={t("fmtWikiLink")}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setLinkPick((v) => !v)}
+            >
+              📑
+            </button>
+            {linkPick && (
+              <div className="le-wikilink-menu">
+                {articleTitles.map((title, i) => (
+                  <button
+                    key={i}
+                    className="le-wikilink-item"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => insertWikiLink(title)}
+                  >
+                    {title}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <button title={t("fmtCode")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("\n```\n", "\n```\n", "")}>{"</>"}</button>
         <button title={t("fmtTable")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor(TABLE_TEMPLATE, "", "")}>▦</button>
         <button title={t("fmtFormula")} onMouseDown={(e) => e.preventDefault()} onClick={() => insertAtCursor("$$\n", "\n$$", "")}>∑</button>
@@ -12673,6 +12714,7 @@ function LessonEditor({
   initialWidgets,
   canGenerate,
   wasPending,
+  articleTitles = [],
   onClose,
 }: {
   courseId: string;
@@ -12682,6 +12724,7 @@ function LessonEditor({
   initialWidgets: Record<string, WidgetData>;
   canGenerate: boolean;
   wasPending: boolean;
+  articleTitles?: string[];
   onClose: (saved: boolean) => void | Promise<void>;
 }) {
   const t = useT();
@@ -12839,6 +12882,7 @@ function LessonEditor({
                 onFocus={() => setFocusedBid(b.bid)}
                 onChange={(text) => setBlockText(b.bid, text)}
                 courseId={courseId}
+                articleTitles={articleTitles}
               />
             ) : (
               <LeWidgetBlock

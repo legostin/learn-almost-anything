@@ -9297,6 +9297,38 @@ button.domain-chip {
   gap: 4px;
   margin-bottom: 6px;
 }
+/* Cross-link (course article) picker in the text toolbar. */
+.le-wikilink-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.le-wikilink-menu {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.le-wikilink-item {
+  text-align: left;
+  width: 100%;
+  height: auto !important;
+  min-height: 26px;
+  padding: 5px 8px !important;
+  white-space: normal;
+  font-size: 12px;
+}
 .le-toolbar button {
   min-width: 28px;
   height: 26px;
