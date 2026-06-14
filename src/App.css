@@ -112,6 +112,18 @@ button {
 }
 .brand-name {
   flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.brand-name:hover {
+  color: var(--accent);
 }
 .brand-soft {
   font-style: italic;

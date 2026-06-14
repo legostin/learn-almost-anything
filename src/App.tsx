@@ -1441,7 +1441,13 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-mark" src={appMark} alt="" aria-hidden="true" />
-          <span className="brand-name">
+          <button
+            type="button"
+            className="brand-name"
+            onClick={() => setView({ kind: "empty" })}
+            title={t("reviewBackHome")}
+            aria-label={t("reviewBackHome")}
+          >
             {appAlmostIndex >= 0 ? (
               <>
                 {appBrand.slice(0, appAlmostIndex)}
@@ -1451,7 +1457,7 @@ function App() {
             ) : (
               appBrand
             )}
-          </span>
+          </button>
           <button
             className="brand-settings"
             onClick={() => setSettingsOpen(true)}
