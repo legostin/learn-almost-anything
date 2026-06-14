@@ -332,10 +332,13 @@ impl GenerationProfile {
         let full = self.research_max_turns(category);
         if has_pack {
             // The pack covers fact research, but the draft still spends turns
-            // hunting widgets (videos with quality signals, real screenshots),
-            // so the halved budget needs a floor — 5 turns was hitting the
-            // "maximum number of turns" error on balanced tier.
-            (full / 2).max(8).min(full)
+            // hunting widgets (videos with quality signals, real screenshots)
+            // AND running the editor fact-check pass (more web). A floor of 8
+            // still hit the "maximum number of turns" error on balanced tier
+            // (the SDK aborts with no article instead of returning partial work).
+            // Never give a pack draft LESS than the known-good non-pack budget
+            // (normal = 10, which has no reported failures), so floor at 10.
+            (full / 2).max(10).min(full)
         } else {
             full
         }
