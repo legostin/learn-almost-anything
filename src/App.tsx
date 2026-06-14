@@ -8264,6 +8264,7 @@ function Structure({
           ) : (
             <StructureTree
               tree={tree}
+              hideCompletion={course.course_format === "encyclopedia"}
               onOpenSub={onOpenSub}
               onStartSubGen={async (subId) => {
                 // Start (re)generation in the background — stay on the plan and
@@ -8355,6 +8356,7 @@ function RefineChat({
                   <div className="proposal-header">{t("proposal")}</div>
                   <StructureTree
                     tree={{ course_id: course.id, modules: msg.modules }}
+                    hideCompletion={course.course_format === "encyclopedia"}
                   />
                   {isPending && (
                     <div className="proposal-actions">
@@ -8401,10 +8403,14 @@ function StructureTree({
   tree,
   onOpenSub,
   onStartSubGen,
+  hideCompletion = false,
 }: {
   tree: StructureFile;
   onOpenSub?: (moduleId: string, submoduleId: string) => void;
   onStartSubGen?: (submoduleId: string) => void;
+  // Encyclopedia has no tests/homework, so suppress the "passed"/"ready"
+  // completion checkmarks (keep generating/queued/failed indicators).
+  hideCompletion?: boolean;
 }) {
   const t = useT();
   return (
@@ -8429,12 +8435,12 @@ function StructureTree({
                         {i + 1}.{j + 1}
                       </span>
                       {s.title}
-                      {s.test_passed ? (
+                      {s.test_passed && !hideCompletion ? (
                         <span className="learned-dot" title={t("subLearned")}>
                           ✓
                         </span>
                       ) : (
-                        <SubmoduleStateIcon state={s.generation_state} />
+                        <SubmoduleStateIcon state={s.generation_state} hideReady={hideCompletion} />
                       )}
                     </div>
                     {onOpenSub && onStartSubGen && (
@@ -15905,7 +15911,7 @@ function DiagramWidget({
   );
 }
 
-function SubmoduleStateIcon({ state }: { state: GenState }) {
+function SubmoduleStateIcon({ state, hideReady = false }: { state: GenState; hideReady?: boolean }) {
   const t = useT();
   if (state === "generating") {
     return <span className="state-icon generating" title={t("generatingTitle")} />;
@@ -15918,6 +15924,8 @@ function SubmoduleStateIcon({ state }: { state: GenState }) {
     );
   }
   if (state === "ready") {
+    // Encyclopedia: a ready reference article shows no completion checkmark.
+    if (hideReady) return null;
     return (
       <span className="state-icon ready" title={t("stateReady")} aria-label={t("stateReady")}>
         ✓
