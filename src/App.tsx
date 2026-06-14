@@ -12217,6 +12217,13 @@ function ImageItemEditor({
       <div className="le-widget-actions">
         <button
           disabled={busy}
+          title={t("widgetAutoFindHint")}
+          onClick={() => runHeavy(async () => { await invoke("auto_resolve_widget_image", callArgs); })}
+        >
+          ✨ {t("widgetAutoFind")}
+        </button>
+        <button
+          disabled={busy}
           onClick={() =>
             runHeavy(async () => {
               const sel = await openFileDialog({
@@ -15396,6 +15403,18 @@ function ImagePlaceholder({
       setPhase("notfound");
     }
   }
+  async function autoFind() {
+    if (!ctxArgs) return;
+    setPhase("busy");
+    setActionError(null);
+    try {
+      await invoke("auto_resolve_widget_image", ctxArgs);
+      await widgetCtx?.onChanged();
+    } catch (e) {
+      setActionError(String(e));
+      setPhase("notfound");
+    }
+  }
   async function pick(c: ImageCandidate) {
     if (!ctxArgs) return;
     setPhase("busy");
@@ -15515,6 +15534,9 @@ function ImagePlaceholder({
                 <div className="widget-notfound">
                   <span>{t("widgetNotFound")}</span>
                   <span className="widget-action-row">
+                    <button type="button" className="widget-action-link" onClick={autoFind}>
+                      ✨ {t("widgetAutoFind")}
+                    </button>
                     <button type="button" className="widget-action-link" onClick={retry}>
                       {t("widgetRetry")}
                     </button>
@@ -15526,9 +15548,14 @@ function ImagePlaceholder({
                   </span>
                 </div>
               ) : (
-                <button type="button" className="widget-action-link" onClick={retry}>
-                  {t("widgetRetry")}
-                </button>
+                <span className="widget-action-row">
+                  <button type="button" className="widget-action-link" onClick={autoFind}>
+                    ✨ {t("widgetAutoFind")}
+                  </button>
+                  <button type="button" className="widget-action-link" onClick={retry}>
+                    {t("widgetRetry")}
+                  </button>
+                </span>
               )}
               {actionError && <span className="widget-action-error">{actionError}</span>}
             </div>

@@ -3047,7 +3047,7 @@ fn agent_image_search(
     let value = match sidecar.call_with_progress(
         "search_image_candidates",
         params,
-        Duration::from_secs(300),
+        Duration::from_secs(120),
         |p| {
             emit_progress_event(
                 app,
@@ -3135,13 +3135,185 @@ fn derive_image_search_query(
         "modelConfig": model_config,
     });
     let value = sidecar
-        .call("image_search_query", params, Duration::from_secs(120))
+        .call("image_search_query", params, Duration::from_secs(30))
         .ok()?;
     let q = value.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
     if q.is_empty() {
         None
     } else {
         Some(q.to_string())
+    }
+}
+
+/// Add raw strategy hits to a candidate pool with URL-dedup (via `seen`) and the
+/// known-size floor. Used for source-scrape and Commons output.
+fn pool_push(
+    pool: &mut Vec<media::BraveImageHit>,
+    seen: &mut std::collections::HashSet<String>,
+    hits: Vec<media::BraveImageHit>,
+) {
+    for h in hits {
+        if h.url.is_empty() || !seen.insert(h.url.clone()) {
+            continue;
+        }
+        if media::hit_meets_min_dim(&h, media::MIN_ADDED_IMAGE_DIM) {
+            pool.push(h);
+        }
+    }
+}
+
+const IMAGE_POOL_CAP: usize = 12;
+
+/// Multi-strategy candidate pool for one image slot, keyless strategies first:
+/// (1) scrape the item's own `source` page, (2) Wikimedia Commons, (3) web search
+/// by `query`, (4) web search by `alt`. Deduped, size-filtered, capped. Returns
+/// the pool plus a refined query (from the web search) for an optional retry.
+#[allow(clippy::too_many_arguments)]
+fn gather_image_candidates(
+    app: &AppHandle,
+    course: &db::Course,
+    sub_id: &str,
+    sidecar: &Arc<Sidecar>,
+    source: Option<&str>,
+    description: &str,
+    query: &str,
+    alt: &str,
+    brave_key: &Option<String>,
+    model_config: &serde_json::Value,
+) -> (Vec<media::BraveImageHit>, String) {
+    let mut pool: Vec<media::BraveImageHit> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    // (1) Scrape the item's known source page — keyless, fast, no model.
+    if let Some(src) = source.filter(|s| s.starts_with("http")) {
+        emit_progress_event(app, &course.id, sub_id, "illustrate", "scraping", Some(src));
+        let synthetic = media::BraveImageHit {
+            title: String::new(),
+            source: src.to_string(),
+            url: String::new(),
+            thumbnail: String::new(),
+            width: None,
+            height: None,
+        };
+        pool_push(&mut pool, &mut seen, media::expanded_image_candidates(&synthetic, 6));
+    }
+
+    // (2) Wikimedia Commons — keyless.
+    if pool.len() < IMAGE_POOL_CAP && !query.trim().is_empty() {
+        if let Ok(hits) = media::commons_image_search(query, 6) {
+            pool_push(&mut pool, &mut seen, hits);
+        }
+    }
+
+    // expand_image_hits already dedups against `seen`; only size-filter + push.
+    let push_web = |pool: &mut Vec<media::BraveImageHit>, expanded: Vec<media::BraveImageHit>| {
+        for h in expanded {
+            if media::hit_meets_min_dim(&h, media::MIN_ADDED_IMAGE_DIM) {
+                pool.push(h);
+            }
+        }
+    };
+
+    // (3) Web search by query — Brave if configured, else the agent (slow). Skip
+    // the slow agent path entirely once the keyless strategies have candidates.
+    let mut refined = String::new();
+    if pool.len() < IMAGE_POOL_CAP && !query.trim().is_empty() {
+        if let Some(key) = brave_key.as_deref() {
+            if let Ok(hits) = media::brave_image_search(key, query, 10) {
+                push_web(&mut pool, expand_image_hits(hits, &mut seen));
+            }
+        } else if pool.is_empty() {
+            let (hits, r) =
+                agent_image_search(app, course, sub_id, sidecar, description, alt, query, model_config);
+            refined = r;
+            push_web(&mut pool, expand_image_hits(hits, &mut seen));
+        }
+    }
+
+    // (4) Web search by alt — Brave only (cheap), a second angle.
+    if pool.len() < IMAGE_POOL_CAP {
+        if let Some(key) = brave_key.as_deref() {
+            let alt_q = alt.trim();
+            if !alt_q.is_empty() && alt_q != query.trim() {
+                if let Ok(hits) = media::brave_image_search(key, alt_q, 8) {
+                    push_web(&mut pool, expand_image_hits(hits, &mut seen));
+                }
+            }
+        }
+    }
+
+    pool.truncate(IMAGE_POOL_CAP);
+    (pool, refined)
+}
+
+/// Download candidates in parallel into `dir`, preserving order for the pick
+/// index; drops anything that fails to download or is below the size floor.
+fn download_candidates(
+    dir: &std::path::Path,
+    candidates: &[media::BraveImageHit],
+) -> Vec<(std::path::PathBuf, media::BraveImageHit)> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let dir = dir.to_path_buf();
+                s.spawn(move || {
+                    let bytes =
+                        media::download_resize_jpeg(&c.url, 2000, media::MIN_ADDED_IMAGE_DIM).ok()?;
+                    let p = dir.join(format!("{i}.jpg"));
+                    media::save_bytes(&bytes, &p).ok()?;
+                    Some((p, c.clone()))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap_or(None))
+            .collect()
+    })
+}
+
+/// LLM vision review over downloaded candidates → (picked index, refined query).
+fn review_pick(
+    sidecar: &Arc<Sidecar>,
+    course: &db::Course,
+    description: &str,
+    alt: &str,
+    model_config: &serde_json::Value,
+    saved: &[(std::path::PathBuf, media::BraveImageHit)],
+) -> (Option<usize>, String) {
+    let candidates_json: Vec<serde_json::Value> = saved
+        .iter()
+        .map(|(p, _)| json!({ "path": p.to_string_lossy() }))
+        .collect();
+    let review_params = json!({
+        "backend": course.agent,
+        "language": course.language,
+        "description": description,
+        "alt": alt,
+        "topic": course.topic,
+        "candidates": candidates_json,
+        "modelConfig": model_config,
+    });
+    match sidecar.call("submodule_review_images", review_params, Duration::from_secs(180)) {
+        Ok(v) => {
+            let pick = v
+                .get("pick")
+                .and_then(|p| p.as_u64())
+                .map(|n| n as usize)
+                .filter(|i| *i < saved.len());
+            let refined = v
+                .get("refinedQuery")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            (pick, refined)
+        }
+        Err(e) => {
+            eprintln!("[resolve] review: {e}");
+            (None, String::new())
+        }
     }
 }
 
@@ -3227,8 +3399,6 @@ fn illustrate_one_widget(
         None => derive_image_search_query(course, sidecar, description, alt, model_config)
             .unwrap_or_else(|| description.trim().to_string()),
     };
-    let mut tried_urls = std::collections::HashSet::<String>::new();
-
     for round in 0..3 {
         emit_progress_event(
             app,
@@ -3238,33 +3408,30 @@ fn illustrate_one_widget(
             "searching",
             Some(&format!("{} (round {}/3)", query, round + 1)),
         );
-        let mut next_query = String::new();
-        let hits = if let Some(key) = brave_key.as_deref() {
-            match media::brave_image_search(key, &query, 12) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("[illustrate] brave search '{wid}' round {round}: {e}");
-                    break;
-                }
-            }
-        } else {
-            let (hits, refined) = agent_image_search(
-                app,
-                course,
-                sub_id,
-                sidecar,
-                description,
-                alt,
-                &query,
+        // Round 0 runs the full multi-strategy gather (source-page scrape +
+        // Commons + web by query + web by alt); later rounds re-search the web by
+        // the refined query only.
+        let (candidates, refined) = if round == 0 {
+            gather_image_candidates(
+                app, course, sub_id, sidecar, existing_source, description, &query, alt, brave_key,
                 model_config,
-            );
-            next_query = refined;
-            hits
+            )
+        } else {
+            let mut seen = std::collections::HashSet::<String>::new();
+            let (hits, r) = if let Some(key) = brave_key.as_deref() {
+                (media::brave_image_search(key, &query, 10).unwrap_or_default(), String::new())
+            } else {
+                agent_image_search(app, course, sub_id, sidecar, description, alt, &query, model_config)
+            };
+            let pool: Vec<media::BraveImageHit> = expand_image_hits(hits, &mut seen)
+                .into_iter()
+                .filter(|h| media::hit_meets_min_dim(h, media::MIN_ADDED_IMAGE_DIM))
+                .collect();
+            (pool, r)
         };
-        let candidates = expand_image_hits(hits, &mut tried_urls);
         if candidates.is_empty() {
-            if !next_query.is_empty() && next_query != query {
-                query = next_query;
+            if !refined.is_empty() && refined != query {
+                query = refined;
                 continue;
             }
             break;
@@ -3279,35 +3446,7 @@ fn illustrate_one_widget(
             "downloading",
             Some(&format!("{}: {} candidate(s)", wid, candidates.len())),
         );
-        // Download candidates in parallel, preserving order for the pick index.
-        let saved: Vec<(std::path::PathBuf, media::BraveImageHit)> = std::thread::scope(|s| {
-            let handles: Vec<_> = candidates
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let round_dir = round_dir.clone();
-                    s.spawn(move || {
-                        let bytes = match media::download_resize_jpeg(&c.url, 2000, media::MIN_ADDED_IMAGE_DIM) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                eprintln!("[illustrate] download/resize '{wid}' r{round} #{i}: {e}");
-                                return None;
-                            }
-                        };
-                        let p = round_dir.join(format!("{i}.jpg"));
-                        if let Err(e) = media::save_bytes(&bytes, &p) {
-                            eprintln!("[illustrate] save '{wid}' r{round} #{i}: {e}");
-                            return None;
-                        }
-                        Some((p, c.clone()))
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().unwrap_or(None))
-                .collect()
-        });
+        let saved = download_candidates(&round_dir, &candidates);
         if saved.is_empty() {
             continue;
         }
@@ -3320,61 +3459,35 @@ fn illustrate_one_widget(
             "reviewing",
             Some(&format!("{wid}: {} candidate(s)", saved.len())),
         );
-        let candidates_json: Vec<serde_json::Value> = saved
-            .iter()
-            .map(|(p, _)| json!({ "path": p.to_string_lossy() }))
-            .collect();
-        let review_params = json!({
-            "backend": course.agent,
-            "language": course.language,
-            "description": description,
-            "alt": alt,
-            "topic": course.topic,
-            "candidates": candidates_json,
-            "modelConfig": model_config,
-        });
-        match sidecar.call("submodule_review_images", review_params, Duration::from_secs(300)) {
-            Ok(v) => {
-                let pick = v.get("pick").and_then(|p| p.as_u64()).map(|n| n as usize);
-                let refined = v
-                    .get("refinedQuery")
-                    .and_then(|p| p.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(idx) = pick.filter(|i| *i < saved.len()) {
-                    let (src_path, hit) = &saved[idx];
-                    let final_path = images_dir.join(format!("{wid}.jpg"));
-                    if let Err(e) = std::fs::create_dir_all(images_dir) {
-                        eprintln!("[illustrate] mkdir final '{wid}': {e}");
-                        break;
-                    }
-                    if let Err(e) = std::fs::copy(src_path, &final_path) {
-                        eprintln!("[illustrate] copy final '{wid}': {e}");
-                        break;
-                    }
-                    let fill = WidgetFill {
-                        url: final_path.to_string_lossy().to_string(),
-                        // Always keep a source: fall back to the image URL.
-                        source: Some(if hit.source.trim().is_empty() {
-                            hit.url.clone()
-                        } else {
-                            hit.source.clone()
-                        }),
-                        original_url: Some(hit.url.clone()),
-                        generated: false,
-                        query: Some(query.clone()),
-                    };
-                    let _ = std::fs::remove_dir_all(images_dir.join("_candidates").join(wid));
-                    return Some(fill);
-                }
-                if !refined.is_empty() {
-                    query = refined;
-                }
-            }
-            Err(e) => {
-                eprintln!("[illustrate] review '{wid}' r{round}: {e}");
+        let (pick, refined_review) = review_pick(sidecar, course, description, alt, model_config, &saved);
+        if let Some(idx) = pick {
+            let (src_path, hit) = &saved[idx];
+            let final_path = images_dir.join(format!("{wid}.jpg"));
+            if let Err(e) = std::fs::create_dir_all(images_dir) {
+                eprintln!("[illustrate] mkdir final '{wid}': {e}");
                 break;
             }
+            if let Err(e) = std::fs::copy(src_path, &final_path) {
+                eprintln!("[illustrate] copy final '{wid}': {e}");
+                break;
+            }
+            let fill = WidgetFill {
+                url: final_path.to_string_lossy().to_string(),
+                // Always keep a source: fall back to the image URL.
+                source: Some(if hit.source.trim().is_empty() {
+                    hit.url.clone()
+                } else {
+                    hit.source.clone()
+                }),
+                original_url: Some(hit.url.clone()),
+                generated: false,
+                query: Some(query.clone()),
+            };
+            let _ = std::fs::remove_dir_all(images_dir.join("_candidates").join(wid));
+            return Some(fill);
+        }
+        if !refined_review.is_empty() {
+            query = refined_review;
         }
     }
 
@@ -7031,9 +7144,10 @@ async fn search_widget_candidates(
         let target = image_op_target(&widget, item_index)?;
         let (seed, description, alt) = widget_query_fields(target);
         let model_config = settings.stage_model(&course.agent, "utility");
-        // Resolve the short, clean search query: user override > cached `query`
-        // on the item > freshly derived by the fast model > mechanical fallback.
-        // Never append the course topic — the model includes any needed locality.
+        // Resolve the search query WITHOUT blocking on a model: user override >
+        // cached `query` on the item > mechanical (caption/prompt). Dropping the
+        // synchronous fast-model derive here is the fix for the "search hangs"
+        // regression — Brave/agent runs immediately. Never append the topic.
         let refine = query.unwrap_or_default();
         let refine = refine.trim();
         let cached = target
@@ -7046,9 +7160,8 @@ async fn search_widget_candidates(
         } else if !cached.is_empty() {
             cached.to_string()
         } else {
-            let target_text = if !seed.is_empty() { &seed } else { &description };
-            derive_image_search_query(&course, &sidecar, target_text, &alt, &model_config)
-                .unwrap_or_else(|| target_text.trim().to_string())
+            let base = if !description.is_empty() { &description } else { &seed };
+            base.chars().take(160).collect::<String>().trim().to_string()
         };
         if query.is_empty() {
             return Ok(WidgetSearchResult { query, candidates: Vec::new() });
@@ -7337,6 +7450,116 @@ async fn import_local_image(
             source.as_deref(),
             false,
         )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Autonomously resolve a placeholder image: pool candidates from every strategy
+/// (scrape the item's own `source` page, Wikimedia Commons, web search by query +
+/// by alt), let the LLM vision-review pick the best, then attach it. Keyless
+/// strategies run first, so it returns fast even without a Brave key. Off-thread.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn auto_resolve_widget_image(
+    app: AppHandle,
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    course_id: String,
+    module_id: String,
+    submodule_id: String,
+    widget_id: String,
+    item_index: Option<usize>,
+) -> Result<(), String> {
+    let db = db_state.inner().clone();
+    let paths = paths_state.inner().clone();
+    let sidecar = sidecar_state.inner().clone();
+    let settings = settings_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let course = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            db::get_course(&conn, &course_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("course not found: {course_id}"))?
+        };
+        let content = courses::read_submodule_content(&paths, &course_id, &module_id, &submodule_id)
+            .map_err(|e| e.to_string())?;
+        let widget = content
+            .widgets
+            .get(&widget_id)
+            .cloned()
+            .ok_or_else(|| format!("widget not found: {widget_id}"))?;
+        let target = image_op_target(&widget, item_index)?;
+        let (seed, description, alt) = widget_query_fields(target);
+        let source = target
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        // Short query: cached → caption → prompt. No fast-model call on this hot
+        // path (the source scrape is keyless and doesn't need it).
+        let query = target
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| if !description.is_empty() { description.clone() } else { seed.clone() });
+        let model_config = settings.stage_model(&course.agent, "utility");
+        let brave_key = settings.brave_api_key();
+
+        let (candidates, _refined) = gather_image_candidates(
+            &app,
+            &course,
+            &submodule_id,
+            &sidecar,
+            source.as_deref(),
+            &description,
+            &query,
+            &alt,
+            &brave_key,
+            &model_config,
+        );
+        if candidates.is_empty() {
+            return Err("подходящих изображений не найдено".into());
+        }
+        let images_dir =
+            media::submodule_images_dir(&paths.course_dir(&course_id), &module_id, &submodule_id);
+        let cand_dir = images_dir.join("_candidates").join(&widget_id);
+        let saved = download_candidates(&cand_dir, &candidates);
+        if saved.is_empty() {
+            let _ = std::fs::remove_dir_all(&cand_dir);
+            return Err("не удалось скачать изображения-кандидаты".into());
+        }
+        let (pick, _r) = review_pick(&sidecar, &course, &description, &alt, &model_config, &saved);
+        let result = match pick {
+            Some(idx) => {
+                let (src_path, hit) = &saved[idx];
+                std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+                let final_path = images_dir.join(widget_image_filename(&widget_id, item_index));
+                std::fs::copy(src_path, &final_path).map_err(|e| e.to_string())?;
+                let source_attr = if hit.source.trim().is_empty() {
+                    hit.url.clone()
+                } else {
+                    hit.source.clone()
+                };
+                update_widget_in_place(
+                    &paths,
+                    &course_id,
+                    &module_id,
+                    &submodule_id,
+                    &widget_id,
+                    item_index,
+                    &final_path.to_string_lossy(),
+                    Some(source_attr.as_str()),
+                    false,
+                )
+            }
+            None => Err("ИИ не выбрал подходящее изображение".into()),
+        };
+        let _ = std::fs::remove_dir_all(&cand_dir);
+        result
     })
     .await
     .map_err(|e| e.to_string())?
@@ -8711,6 +8934,7 @@ pub fn run() {
             coderun::run_code_snippet,
             coderun::trace_python_snippet,
             search_widget_candidates,
+            auto_resolve_widget_image,
             set_widget_image,
             generate_widget_image,
             fix_widget,

@@ -765,6 +765,9 @@ const STRINGS = {
     fmtFormula: "Формула",
     widgetImageNone: "Нет картинки",
     widgetImageUpload: "Загрузить",
+    widgetAutoFind: "Найти автоматически",
+    widgetAutoFindHint:
+      "Собрать варианты (страница-источник, Commons, веб-поиск) и дать ИИ выбрать лучшую большую картинку",
     widgetImageSearch: "Найти",
     widgetImageGenerate: "Сгенерировать",
     widgetImageUrl: "Вставьте ссылку на картинку",
@@ -1598,6 +1601,9 @@ const STRINGS = {
     fmtFormula: "Formula",
     widgetImageNone: "No image",
     widgetImageUpload: "Upload",
+    widgetAutoFind: "Auto-find",
+    widgetAutoFindHint:
+      "Gather options (source page, Commons, web search) and let the AI pick the best large image",
     widgetImageSearch: "Search",
     widgetImageGenerate: "Generate",
     widgetImageUrl: "Paste an image URL",

@@ -141,6 +141,68 @@ pub fn brave_image_search(
     Ok(out)
 }
 
+const COMMONS_API: &str = "https://commons.wikimedia.org/w/api.php";
+
+/// Keyless image search via the Wikimedia Commons API (File namespace). Returns
+/// the shared `BraveImageHit` shape so it pools with other strategies: `url` is a
+/// ≤1600px rendition (smaller, safely under the download cap), `source` the File
+/// description page, dims from the original. Non-image files (svg/pdf/audio) that
+/// slip through are dropped later at decode time.
+pub fn commons_image_search(query: &str, count: u32) -> Result<Vec<BraveImageHit>, MediaError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = urlencoding::encode(trimmed);
+    let n = count.clamp(1, 20);
+    let url = format!(
+        "{COMMONS_API}?action=query&format=json&generator=search&gsrsearch={q}&gsrnamespace=6&gsrlimit={n}&prop=imageinfo&iiprop=url%7Csize&iiurlwidth=1600"
+    );
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
+    let resp = agent
+        .get(&url)
+        .set("Accept", "application/json")
+        .set("Accept-Encoding", "identity")
+        .set("User-Agent", "Mozilla/5.0 (Learn-Almost-Anything)")
+        .call()
+        .map_err(|e| MediaError::BraveHttp(e.to_string()))?;
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| MediaError::BraveParse(e.to_string()))?;
+    let Some(pages) = body.pointer("/query/pages").and_then(|v| v.as_object()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for page in pages.values() {
+        let Some(info) = page.pointer("/imageinfo/0") else {
+            continue;
+        };
+        let full = info.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let thumb = info.get("thumburl").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let image = if thumb.is_empty() { full.clone() } else { thumb.clone() };
+        if image.is_empty() {
+            continue;
+        }
+        let source = info
+            .get("descriptionurl")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&image)
+            .to_string();
+        out.push(BraveImageHit {
+            title: page.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            source,
+            url: image,
+            thumbnail: if thumb.is_empty() { full } else { thumb },
+            width: info.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+            height: info.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 struct ExtractedImage {
     url: String,
