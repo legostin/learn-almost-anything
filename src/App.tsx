@@ -10066,6 +10066,14 @@ function SubmoduleView({
     };
   }, [course, submoduleId, reloadTree, reloadContent]);
 
+  // When the open article changes (e.g. a "See also" cross-link navigates to
+  // another article), return the reader to the top rather than keeping the
+  // previous scroll position. The scroll container is the .main ancestor.
+  const viewRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    viewRef.current?.closest(".main")?.scrollTo({ top: 0 });
+  }, [submoduleId]);
+
   if (!course) return <div className="placeholder">{t("courseNotFound")}</div>;
   if (!sub && !tree) return <div className="placeholder">{t("loadingStructure")}</div>;
   if (!sub) return <div className="placeholder">{t("courseNotFound")}</div>;
@@ -10139,7 +10147,7 @@ function SubmoduleView({
   }
 
   return (
-    <div className="submodule-view">
+    <div className="submodule-view" ref={viewRef}>
       {course && (
         <CourseAssistant
           courseId={course.id}
