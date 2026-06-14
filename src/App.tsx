@@ -821,37 +821,50 @@ function emptyProgress(): CourseProgress {
   };
 }
 
-function summarizeStructure(tree: StructureFile): CourseProgress {
+// `countAll` (documentation): every node at any depth is an article addressed
+// as ("_doc", id). Otherwise only leaf submodules carry content (2-level).
+function summarizeStructure(tree: StructureFile, countAll = false): CourseProgress {
   const progress = emptyProgress();
-  for (const module of tree.modules) {
-    for (const submodule of module.submodules) {
-      progress.total += 1;
-      const pointer = {
-        moduleId: module.id,
-        submoduleId: submodule.id,
-        index: progress.total,
-        title: submodule.title,
-      };
-      if (submodule.generation_state === "ready") {
-        progress.ready += 1;
-        if (!submodule.test_passed && !progress.nextReady) {
-          progress.nextReady = pointer;
-        }
-      } else if (submodule.generation_state === "pending") {
-        progress.pending += 1;
-        if (!progress.nextPending) {
-          progress.nextPending = pointer;
-        }
-      } else if (submodule.generation_state === "queued") {
-        progress.queued += 1;
-      } else if (submodule.generation_state === "generating") {
-        progress.generating += 1;
-      } else if (submodule.generation_state === "failed") {
-        progress.failed += 1;
+  const count = (node: ModuleNode, moduleId: string) => {
+    progress.total += 1;
+    const pointer = {
+      moduleId,
+      submoduleId: node.id,
+      index: progress.total,
+      title: node.title,
+    };
+    if (node.generation_state === "ready") {
+      progress.ready += 1;
+      if (!node.test_passed && !progress.nextReady) {
+        progress.nextReady = pointer;
       }
-      if (submodule.test_passed) {
-        progress.verified += 1;
-        if (submodule.test_passed_at) progress.verifiedAt.push(submodule.test_passed_at);
+    } else if (node.generation_state === "pending") {
+      progress.pending += 1;
+      if (!progress.nextPending) {
+        progress.nextPending = pointer;
+      }
+    } else if (node.generation_state === "queued") {
+      progress.queued += 1;
+    } else if (node.generation_state === "generating") {
+      progress.generating += 1;
+    } else if (node.generation_state === "failed") {
+      progress.failed += 1;
+    }
+    if (node.test_passed) {
+      progress.verified += 1;
+      if (node.test_passed_at) progress.verifiedAt.push(node.test_passed_at);
+    }
+  };
+  if (countAll) {
+    const visit = (node: ModuleNode) => {
+      count(node, "_doc");
+      node.submodules.forEach(visit);
+    };
+    tree.modules.forEach(visit);
+  } else {
+    for (const module of tree.modules) {
+      for (const submodule of module.submodules) {
+        count(submodule, module.id);
       }
     }
   }
@@ -2545,7 +2558,10 @@ function CourseDashboard({
       readyCourses.map(async (course) => {
         try {
           const tree = await invoke<StructureFile>("get_structure", { courseId: course.id });
-          return [course.id, summarizeStructure(tree)] as const;
+          return [
+            course.id,
+            summarizeStructure(tree, course.course_format === "documentation"),
+          ] as const;
         } catch {
           return [course.id, emptyProgress()] as const;
         }
@@ -8206,7 +8222,7 @@ function Structure({
   if (error && !tree) return <div className="placeholder">{t("loadError", { error })}</div>;
   if (!tree) return <div className="placeholder">{t("loadingStructure")}</div>;
 
-  const progress = summarizeStructure(tree);
+  const progress = summarizeStructure(tree, course.course_format === "documentation");
   // Single lessons have a trivial 1x1 plan: no full-course generation,
   // refinement, or structure editing — only the lesson row itself.
   const isLesson = course.course_format === "single_lesson";
@@ -8292,6 +8308,7 @@ function Structure({
             <StructureTree
               tree={tree}
               hideCompletion={isReferenceFormat(course.course_format)}
+              docMode={course.course_format === "documentation"}
               onOpenSub={onOpenSub}
               onStartSubGen={async (subId) => {
                 // Start (re)generation in the background — stay on the plan and
@@ -8384,6 +8401,7 @@ function RefineChat({
                   <StructureTree
                     tree={{ course_id: course.id, modules: msg.modules }}
                     hideCompletion={isReferenceFormat(course.course_format)}
+                    docMode={course.course_format === "documentation"}
                   />
                   {isPending && (
                     <div className="proposal-actions">
@@ -8431,6 +8449,7 @@ function StructureTree({
   onOpenSub,
   onStartSubGen,
   hideCompletion = false,
+  docMode = false,
 }: {
   tree: StructureFile;
   onOpenSub?: (moduleId: string, submoduleId: string) => void;
@@ -8438,8 +8457,50 @@ function StructureTree({
   // Encyclopedia has no tests/homework, so suppress the "passed"/"ready"
   // completion checkmarks (keep generating/queued/failed indicators).
   hideCompletion?: boolean;
+  // Documentation: arbitrarily-nested tree where every node is an article,
+  // addressed as ("_doc", id). Renders recursively instead of 2-level.
+  docMode?: boolean;
 }) {
   const t = useT();
+  if (docMode) {
+    const renderDocNode = (node: ModuleNode, num: string) => (
+      <li key={node.id} className={`submodule state-${node.generation_state}`}>
+        <div className="submodule-row">
+          <div
+            className="submodule-title"
+            onClick={() => onOpenSub?.("_doc", node.id)}
+            role={onOpenSub ? "button" : undefined}
+          >
+            <span className="num">{num}</span>
+            {node.title}
+            <SubmoduleStateIcon state={node.generation_state} hideReady={hideCompletion} />
+          </div>
+          {onOpenSub && onStartSubGen && (
+            <SubmoduleAction
+              state={node.generation_state}
+              onOpen={() => onOpenSub("_doc", node.id)}
+              onGenerate={() => onStartSubGen(node.id)}
+            />
+          )}
+        </div>
+        {node.summary && (
+          <div className="submodule-summary" onClick={() => onOpenSub?.("_doc", node.id)}>
+            {node.summary}
+          </div>
+        )}
+        {node.submodules.length > 0 && (
+          <ol className="submodules">
+            {node.submodules.map((child, k) => renderDocNode(child, `${num}${k + 1}.`))}
+          </ol>
+        )}
+      </li>
+    );
+    return (
+      <ol className="modules doc-tree">
+        {tree.modules.map((m, i) => renderDocNode(m, `${i + 1}.`))}
+      </ol>
+    );
+  }
   return (
     <ol className="modules">
       {tree.modules.map((m, i) => (
