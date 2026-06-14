@@ -20,13 +20,11 @@ It's the difference between asking a smart friend questions all evening and havi
 
 ## What it looks like
 
-<!-- TODO: скриншот — главный экран с библиотекой курсов на разных языках -->
-<p align="center"><img src="screens/placeholder-home.png" alt="Home library with courses in several languages" width="900"></p>
+<!-- TODO: скриншот — главный экран с библиотекой курсов на разных языках (в screens/ пока нет отдельного скрина главной) -->
 
 You pick a topic, language, format and agent. The course can be a full academic course, a compact mini-module, a podcast-style series, a single lesson — or a roadmap that maps the whole journey first.
 
-<!-- TODO: скриншот — форма создания курса с чекбоксами и выбором формата -->
-<p align="center"><img src="screens/placeholder-create.png" alt="Course creation: format, quality tier, tests/homework toggles" width="900"></p>
+<p align="center"><img src="screens/new_course.png" alt="Course creation: format, quality tier, tests/homework toggles" width="900"></p>
 
 ## The full learning loop
 
@@ -38,8 +36,7 @@ Most AI tools stop at "here's some text". This one closes the loop:
 - **Spaced repetition** — flashcards are extracted from each lesson and scheduled for review, so the course keeps working on you after you've read it.
 - **Lecture audio** — free OS voices out of the box, optional premium Gemini TTS, cached on disk.
 
-<!-- TODO: скриншот — тест или проверка домашки с фидбеком агента -->
-<p align="center"><img src="screens/placeholder-homework.png" alt="Homework review with agent feedback" width="900"></p>
+<p align="center"><img src="screens/homework.png" alt="Homework review with agent feedback" width="900"></p>
 
 Don't want the full treatment? Checkboxes at creation turn tests and homework off, and you can skip the clarifying interview entirely — title, plan, go.
 
@@ -47,8 +44,7 @@ Don't want the full treatment? Checkboxes at creation turn tests and homework of
 
 For big goals ("become a data engineer", "learn academic painting from zero") a single course is the wrong shape. A roadmap lays out stages and skills, runs a quick diagnostic to find out what you already know, and spawns a lesson or a full course from any skill — each one aware of where it sits in the bigger picture.
 
-<!-- TODO: скриншот — роудмап с этапами и навыками -->
-<p align="center"><img src="screens/placeholder-roadmap.png" alt="A learning roadmap with stages and skills" width="900"></p>
+<!-- TODO: скриншот — роудмап с этапами и навыками (в screens/ пока нет) -->
 
 ## Your materials, your sources
 
@@ -68,8 +64,7 @@ docker run -d -p 8080:8080 \
 
 Everyone on the team adds the URL in Settings and gets a shared internal course library: onboarding tracks, domain knowledge, tooling guides. Authors publish with the team token; everyone else browses, installs and pulls updates with no token at all. Courses remember which catalog they came from, so update checks keep working even across reconfigurations. The public catalog stays available alongside.
 
-<!-- TODO: скриншот — браузер каталога с переключателем «Публичный / корпоративный» -->
-<p align="center"><img src="screens/placeholder-catalog.png" alt="Catalog browser with public/private source switcher" width="900"></p>
+<p align="center"><img src="screens/catalog.png" alt="Public catalog: browse and install shared courses" width="900"></p>
 
 And of course: publish your best courses to the [public catalog](https://catalog.almost-anything.io), install other people's courses, translate any course into another language — structure, lessons, tests, homework, diagram labels and even baked-in image text included.
 
