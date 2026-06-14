@@ -10457,7 +10457,21 @@ type ReaderPart =
 // Split a lesson segment into render parts, flagging runs wrapped in the
 // `la:new` … `la:newend` markers (just-added "go deeper" blocks) so the reader
 // can highlight them. Everything else is processed exactly as before.
+// Encyclopedia cross-links are authored/generated as
+// `[Title](course://article/<raw title>)`, but the raw title carries spaces and
+// colons, so remark won't parse it as a link — it rendered as literal markdown.
+// Percent-encode just the href so the link parses; the reader's `a` handler
+// decodes it back. Hrefs stay raw at rest (this only runs at render), so it's
+// idempotent for the stored markdown.
+function encodeArticleLinkHrefs(text: string): string {
+  return String(text || "").replace(
+    /\]\(course:\/\/article\/([^)]+)\)/gi,
+    (_full, raw: string) => `](course://article/${encodeURIComponent(raw.trim())})`
+  );
+}
+
 function buildReaderParts(text: string): ReaderPart[] {
+  text = encodeArticleLinkHrefs(text);
   const out: ReaderPart[] = [];
   const re = /<!--\s*la:new\s*-->([\s\S]*?)<!--\s*la:newend\s*-->/g;
   let last = 0;
