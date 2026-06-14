@@ -13,7 +13,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -12124,6 +12124,12 @@ function ArticleReader({
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+          // react-markdown's default sanitizer drops non-standard protocols, so
+          // course://article/<title> links lose their href and the handler below
+          // never fires. Let that scheme through; everything else stays sanitized.
+          urlTransform={(url) =>
+            /^course:\/\/article\//i.test(url) ? url : defaultUrlTransform(url)
+          }
           components={{
             pre: CodeBlock,
             // Encyclopedia cross-links use the scheme course://article/<title>;
