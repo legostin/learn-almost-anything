@@ -2561,8 +2561,15 @@ function CourseDashboard({
   const summaries = filteredCourses.map((course) => {
     const progress = progressById.get(course.id);
     const structureJob = jobs.get(jobKey(course.id, "build_structure"));
+    // Encyclopedia has no tests, so "progress" is the share of generated
+    // articles (ready) rather than passed tests (verified) — otherwise the bar
+    // is stuck at 0% even when every article is generated.
+    const progressDone =
+      course.course_format === "encyclopedia" ? progress?.ready : progress?.verified;
     const verifiedPercent =
-      progress && progress.total > 0 ? Math.round((progress.verified / progress.total) * 100) : 0;
+      progress && progress.total > 0
+        ? Math.round(((progressDone ?? 0) / progress.total) * 100)
+        : 0;
 
     let actionLabel = t("courseActionOpen");
     let actionDisabled = false;
