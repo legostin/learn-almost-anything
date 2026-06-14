@@ -186,6 +186,12 @@ pub struct GenerationProfile {
     /// straight to plan building.
     #[serde(default)]
     pub skip_wizard: Option<bool>,
+    /// Run the clarifying-questions interview AND the structure build in ONE
+    /// reused agent session per course (on the planning model) so the shared
+    /// topic prefix is prompt-cached across calls. Default ON; turn off to
+    /// spawn a fresh agent per call (more variety, no cache reuse).
+    #[serde(default)]
+    pub reuse_thread_per_topic: Option<bool>,
 }
 
 /// Resolved defaults for one cost tier. The model/reasoning cascade is added
@@ -357,6 +363,12 @@ impl GenerationProfile {
     pub fn skip_assignments(&self) -> bool {
         self.skip_assignments
             .unwrap_or_else(|| tier_preset(self.tier()).skip_assignments)
+    }
+
+    /// Whether the wizard + structure stages reuse one agent session per course
+    /// (prompt-cache friendly). Default ON.
+    pub fn reuse_thread_per_topic(&self) -> bool {
+        self.reuse_thread_per_topic.unwrap_or(true)
     }
 
     pub fn max_test_questions(&self) -> u8 {
