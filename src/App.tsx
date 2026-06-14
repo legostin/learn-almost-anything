@@ -6486,22 +6486,28 @@ function CreateCourse({
           <span className="field-note">{t("tierNote")}</span>
         </label>
         <div className="create-toggles">
-          <label className="create-toggle">
-            <input
-              type="checkbox"
-              checked={withTests}
-              onChange={(e) => setWithTests(e.target.checked)}
-            />
-            {t("createIncludeTestsLabel")}
-          </label>
-          <label className="create-toggle">
-            <input
-              type="checkbox"
-              checked={withAssignments}
-              onChange={(e) => setWithAssignments(e.target.checked)}
-            />
-            {t("createIncludeAssignmentsLabel")}
-          </label>
+          {/* Reference formats (encyclopedia/documentation) have no tests or
+              homework — the backend skips them regardless, so hide the toggles. */}
+          {!isReferenceFormat(courseFormat) && (
+            <>
+              <label className="create-toggle">
+                <input
+                  type="checkbox"
+                  checked={withTests}
+                  onChange={(e) => setWithTests(e.target.checked)}
+                />
+                {t("createIncludeTestsLabel")}
+              </label>
+              <label className="create-toggle">
+                <input
+                  type="checkbox"
+                  checked={withAssignments}
+                  onChange={(e) => setWithAssignments(e.target.checked)}
+                />
+                {t("createIncludeAssignmentsLabel")}
+              </label>
+            </>
+          )}
           <label className="create-toggle">
             <input
               type="checkbox"
