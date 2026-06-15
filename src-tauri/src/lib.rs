@@ -9229,9 +9229,18 @@ pub fn run() {
                 spaces_root: dir.join("spaces"),
             });
             {
-                // Import MCP-authored courses (Claude Code) from the unified store.
+                // Import MCP-authored courses (Claude Code) into native storage.
+                // Scan the unified store AND the legacy MCP-only dir, so courses
+                // are picked up whether or not the MCP server has migrated yet
+                // (and regardless of a stale LAA_COURSE_STORE override).
                 let conn = db.0.lock().expect("db lock");
                 import_unified_mcp_courses(&conn, &app_paths, &unified_courses);
+                if let Ok(home) = app.path().home_dir() {
+                    let legacy_mcp = home.join(".laa-course-mcp");
+                    if legacy_mcp != unified_courses {
+                        import_unified_mcp_courses(&conn, &app_paths, &legacy_mcp);
+                    }
+                }
             }
             {
                 // One-time card backfill from existing flashcards.json decks
