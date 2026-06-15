@@ -275,6 +275,34 @@ pub fn build_package(
     })
 }
 
+/// Install a package as a NATIVE local course (id = package id, origin = id) so
+/// it stays first-class and publishable — as opposed to `install_package`, which
+/// marks a course "imported" (new local id ≠ origin) and blocks re-publishing.
+/// Used to ingest MCP-authored courses into the app store (LEG-46). Idempotent:
+/// re-running upserts the same course id and rewrites its content.
+pub fn install_local_package(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+    package: CatalogCoursePackage,
+) -> Result<String, String> {
+    if package.schema_version != SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported catalog package schema: {}",
+            package.schema_version
+        ));
+    }
+    let id = package.course.id.clone();
+    if id.trim().is_empty() {
+        return Err("package course id is empty".to_string());
+    }
+    let version = package_version(&package);
+    let now = now_secs();
+    // origin_id == course_id → the publish gate treats it as a local, publishable
+    // course (not an imported catalog copy).
+    write_package_to_course(conn, paths, &package, &id, &id, version, now, None)?;
+    Ok(id)
+}
+
 pub fn install_package(
     conn: &rusqlite::Connection,
     paths: &AppPaths,

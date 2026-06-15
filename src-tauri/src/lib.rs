@@ -9163,7 +9163,9 @@ fn import_unified_mcp_courses(conn: &rusqlite::Connection, paths: &AppPaths, dir
         if mcp.id.is_empty() {
             continue;
         }
-        if let Ok(Some(existing)) = db::get_course_by_catalog_origin(conn, &mcp.id) {
+        // The imported course keeps the MCP id, so dedup by id directly. Skip if
+        // already present and not older than the json (don't clobber app edits).
+        if let Ok(Some(existing)) = db::get_course(conn, &mcp.id) {
             if existing.updated_at >= mcp.updated_at {
                 continue;
             }
@@ -9172,7 +9174,7 @@ fn import_unified_mcp_courses(conn: &rusqlite::Connection, paths: &AppPaths, dir
         if package.submodules.is_empty() {
             continue; // nothing generated yet
         }
-        match catalog::install_package(conn, paths, package, None) {
+        match catalog::install_local_package(conn, paths, package) {
             Ok(_) => eprintln!("[unified-store] imported MCP course {}", mcp.id),
             Err(e) => eprintln!("[unified-store] import {} failed: {e}", mcp.id),
         }
