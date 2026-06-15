@@ -8785,6 +8785,9 @@ function DocStructureEditor({
   const [tagText, setTagText] = useState(() => (course.tags ?? []).join(", "));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Drag-and-drop: which node is being dragged, and where it would land.
+  const [dragPath, setDragPath] = useState<number[] | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ path: number[]; pos: "before" | "after" | "inside" } | null>(null);
 
   const newNode = (): DocNode => ({ id: "", title: "", summary: "", state: "pending", children: [] });
   const edit = (fn: (draft: DocNode[]) => void) =>
@@ -8841,6 +8844,46 @@ function DocStructureEditor({
     });
   };
 
+  const pathStr = (p: number[]) => p.join("-");
+  // A drop onto the dragged node itself or any of its descendants is illegal
+  // (it would detach the subtree into itself).
+  const isSelfOrDescendant = (drag: number[], target: number[]) =>
+    target.length >= drag.length && drag.every((v, i) => v === target[i]);
+  // Find a node by object identity, returning its containing array + index.
+  const locate = (forest: DocNode[], node: DocNode): { arr: DocNode[]; i: number } | null => {
+    for (let i = 0; i < forest.length; i++) {
+      if (forest[i] === node) return { arr: forest, i };
+      const hit = locate(forest[i].children, node);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  // Move a node (with its subtree) before/after a target as a sibling, or inside
+  // it as the last child. The target is resolved by identity so removing the
+  // source first can't invalidate an index-based path.
+  const moveNode = (from: number[], to: number[], pos: "before" | "after" | "inside") => {
+    if (isSelfOrDescendant(from, to)) return;
+    edit((d) => {
+      const target = nodeAt(d, to);
+      const [moved] = siblingsAt(d, from).splice(last(from), 1);
+      if (pos === "inside") {
+        target.children.push(moved);
+        return;
+      }
+      const loc = locate(d, target);
+      if (!loc) return;
+      loc.arr.splice(pos === "before" ? loc.i : loc.i + 1, 0, moved);
+    });
+    setDragPath(null);
+    setDropTarget(null);
+  };
+  // Split a node row into before / inside / after zones by cursor position.
+  const dropPosFromEvent = (e: React.DragEvent): "before" | "after" | "inside" => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const o = (e.clientY - r.top) / r.height;
+    return o < 0.3 ? "before" : o > 0.7 ? "after" : "inside";
+  };
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -8866,8 +8909,44 @@ function DocStructureEditor({
     const arr = siblingsAt(nodes, path);
     const idx = last(path);
     return (
-      <li key={path.join("-")} className={`struct-edit-module doc-edit-node state-${node.state}`}>
-        <div className="struct-edit-row">
+      <li key={path.join("-")} className={`struct-edit-module doc-edit-node state-${node.state}${dragPath && pathStr(dragPath) === pathStr(path) ? " dragging" : ""}`}>
+        <div
+          className={`struct-edit-row${dropTarget && pathStr(dropTarget.path) === pathStr(path) ? ` drop-${dropTarget.pos}` : ""}`}
+          onDragOver={(e) => {
+            if (!dragPath || isSelfOrDescendant(dragPath, path)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            const pos = dropPosFromEvent(e);
+            if (!dropTarget || dropTarget.pos !== pos || pathStr(dropTarget.path) !== pathStr(path)) {
+              setDropTarget({ path, pos });
+            }
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              setDropTarget((prev) => (prev && pathStr(prev.path) === pathStr(path) ? null : prev));
+            }
+          }}
+          onDrop={(e) => {
+            if (!dragPath) return;
+            e.preventDefault();
+            e.stopPropagation();
+            moveNode(dragPath, path, dropPosFromEvent(e));
+          }}
+        >
+          <span
+            className="doc-drag-handle"
+            draggable={!saving}
+            onDragStart={(e) => {
+              setDragPath(path);
+              e.dataTransfer.effectAllowed = "move";
+              try { e.dataTransfer.setData("text/plain", pathStr(path)); } catch { /* not all browsers allow it during dragstart */ }
+            }}
+            onDragEnd={() => { setDragPath(null); setDropTarget(null); }}
+            title={t("docDragHandle")}
+            aria-label={t("docDragHandle")}
+          >
+            ⠿
+          </span>
           <span className="num">{num}</span>
           <input
             className="struct-edit-input"
