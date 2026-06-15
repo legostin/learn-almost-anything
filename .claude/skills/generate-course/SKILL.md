@@ -14,12 +14,33 @@ Code (no paid external model calls).
 
 ## Prerequisites
 
-- The `laa-course` MCP server is registered (see `.mcp.json` at the repo root).
-  Its tools: `course_create`, `course_set_structure`, `course_set_space`,
-  `course_status`, `course_list`, `lesson_get`, `lesson_save`, `course_publish`.
-- Catalog target: set `CATALOG_URL` and `CATALOG_UPLOAD_TOKEN` in the MCP env
-  (`.mcp.json`), or pass `catalogUrl`/`token` to `course_publish`. For a local
-  self-hosted catalog that's usually `http://localhost:8080` + its upload token.
+- The `laa-course` MCP server is registered. Its tools: `course_create`,
+  `course_set_structure`, `course_set_space`, `course_status`, `course_list`,
+  `lesson_get`, `lesson_save`, `course_publish`.
+- Catalog target: set `CATALOG_URL` and `CATALOG_UPLOAD_TOKEN` in the MCP env,
+  or pass `catalogUrl`/`token` to `course_publish`. For a local self-hosted
+  catalog that's usually `http://localhost:8080` + its upload token.
+
+### Running the server
+
+`server.mjs` is a **single, zero-dependency file** — it uses only Node built-ins,
+so it runs anywhere `node` is installed, with nothing to `npm install`.
+
+- **From this repo (dev):** it's pre-registered via `.mcp.json` at the repo root —
+  just open Claude Code in the repo and approve the `laa-course` server.
+- **From the installed app (DMG users):** the file ships inside the app bundle.
+  Register it once with one command (Claude Code only needs `node` on PATH):
+
+  ```bash
+  claude mcp add laa-course \
+    --env CATALOG_URL=http://localhost:8080 \
+    --env CATALOG_UPLOAD_TOKEN=<your-token> \
+    -- node "/Applications/Learn (Almost) Anything.app/Contents/Resources/sidecar/src/course-mcp/server.mjs"
+  ```
+
+  (Or copy that one `server.mjs` anywhere and point `node` at it.) Verify with
+  `claude mcp list` → `laa-course: connected`. Courses are stored under
+  `$LAA_COURSE_STORE` (default `~/.laa-course-mcp`).
 
 ## Reference files (load on demand — keep this skill lean)
 

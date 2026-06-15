@@ -12,12 +12,11 @@
 // ~/.laa-course-mcp). Publishing builds a CatalogCoursePackage (schema v1) and
 // PUTs it to $CATALOG_URL (overridable per call).
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+// Zero-dependency on purpose: only Node built-ins, so this single file runs
+// anywhere `node` is available (incl. straight from the packaged .app bundle)
+// without installing anything. MCP over stdio is newline-delimited JSON-RPC 2.0,
+// which we implement inline below.
+import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -450,26 +449,56 @@ async function handleTool(name, args) {
   }
 }
 
-// ── wire up MCP ───────────────────────────────────────────────────────────────
-const server = new Server(
-  { name: "laa-course", version: "0.1.0" },
-  { capabilities: { tools: {} } }
-);
+// ── MCP over stdio (newline-delimited JSON-RPC 2.0) ──────────────────────────
+const PROTOCOL_VERSION = "2024-11-05";
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
+const replyError = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+async function dispatch(method, params, id) {
+  switch (method) {
+    case "initialize":
+      return reply(id, {
+        protocolVersion: params?.protocolVersion || PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { name: "laa-course", version: "0.1.0" },
+      });
+    case "tools/list":
+      return reply(id, { tools: TOOLS });
+    case "tools/call": {
+      const { name, arguments: args } = params || {};
+      try {
+        const result = await handleTool(name, args);
+        return reply(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+      } catch (e) {
+        return reply(id, {
+          isError: true,
+          content: [{ type: "text", text: `Error in ${name}: ${e?.message || String(e)}` }],
+        });
+      }
+    }
+    case "ping":
+      return reply(id, {});
+    default:
+      return replyError(id, -32601, `method not found: ${method}`);
+  }
+}
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+const rl = createInterface({ input: process.stdin });
+rl.on("line", async (line) => {
+  const text = line.trim();
+  if (!text) return;
+  let msg;
   try {
-    const result = await handleTool(name, args);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    msg = JSON.parse(text);
+  } catch {
+    return; // ignore non-JSON noise
+  }
+  // Notifications (no id) — e.g. notifications/initialized — need no response.
+  if (msg.id === undefined || msg.id === null) return;
+  try {
+    await dispatch(msg.method, msg.params, msg.id);
   } catch (e) {
-    return {
-      isError: true,
-      content: [{ type: "text", text: `Error in ${name}: ${e?.message || String(e)}` }],
-    };
+    replyError(msg.id, -32603, e?.message || String(e));
   }
 });
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
