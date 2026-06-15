@@ -808,6 +808,7 @@ const STRINGS = {
     structNew: "новый",
     structEditNote: "Новые уроки появятся как «черновики» — откройте их и напишите вручную или сгенерируйте ИИ.",
     docNodeTitle: "Заголовок статьи",
+    docNodeSummary: "Описание: что должно быть в этой статье (используется при генерации)",
     docEditorHint:
       "Стройте дерево документации сами: «＋» добавляет вложенную статью, кнопка внизу — раздел верхнего уровня. Вложенность любой глубины. Сохраните, затем «Сгенерировать» наполнит статьи.",
     translateProgress: "Перевод: {done}/{total} разделов…",
@@ -1662,6 +1663,7 @@ const STRINGS = {
     structNew: "new",
     structEditNote: "New lessons appear as drafts — open one to write it by hand or generate it with AI.",
     docNodeTitle: "Article title",
+    docNodeSummary: "Description: what this article should cover (used when generating)",
     docEditorHint:
       "Build the documentation tree yourself: “＋” adds a nested article, the button below adds a top-level section. Nest to any depth. Save, then “Generate” fills the articles.",
     translateProgress: "Translating: {done}/{total} sections…",

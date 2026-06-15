@@ -285,6 +285,18 @@ type StructureFile = {
   modules: ModuleNode[];
 };
 
+// Find a node by id anywhere in the (recursively nested) structure tree.
+// Documentation nodes are arbitrarily deep and addressed by id alone, so the
+// flat module→submodule lookup misses them.
+function findNodeById(mods: ModuleNode[] | undefined, id: string): ModuleNode | undefined {
+  for (const m of mods ?? []) {
+    if (m.id === id) return m;
+    const hit = findNodeById(m.submodules, id);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 type ChatRole = "user" | "agent" | "system";
 
 type ChatMessage = {
@@ -8801,6 +8813,10 @@ function DocStructureEditor({
     edit((d) => {
       siblingsAt(d, path)[last(path)].title = title;
     });
+  const setSummary = (path: number[], summary: string) =>
+    edit((d) => {
+      siblingsAt(d, path)[last(path)].summary = summary;
+    });
   const addChild = (path: number[]) =>
     edit((d) => {
       nodeAt(d, path).children.push(newNode());
@@ -8873,6 +8889,14 @@ function DocStructureEditor({
             ✕
           </button>
         </div>
+        <textarea
+          className="struct-edit-input doc-edit-summary"
+          placeholder={t("docNodeSummary")}
+          value={node.summary}
+          onChange={(e) => setSummary(path, e.target.value)}
+          disabled={saving}
+          rows={2}
+        />
         {node.children.length > 0 && (
           <ol className="struct-edit-subs doc-edit-children">
             {node.children.map((c, i) => renderNode(c, [...path, i], `${num}${i + 1}.`))}
@@ -9987,9 +10011,13 @@ function SubmoduleView({
     reloadTree();
   }, [reloadTree, submoduleId]);
 
-  const sub = tree?.modules
-    .find((m) => m.id === moduleId)
-    ?.submodules.find((s) => s.id === submoduleId);
+  // Documentation addresses nodes by id at any depth (moduleId is the "_doc"
+  // sentinel from the doc tree), so resolve recursively; other formats keep the
+  // module→submodule lookup.
+  const sub =
+    course?.course_format === "documentation"
+      ? findNodeById(tree?.modules, submoduleId)
+      : tree?.modules.find((m) => m.id === moduleId)?.submodules.find((s) => s.id === submoduleId);
   const state = sub?.generation_state ?? "pending";
 
   useEffect(() => {
