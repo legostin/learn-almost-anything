@@ -9787,6 +9787,48 @@ textarea.le-cap {
   color: var(--danger);
   border-color: var(--danger);
 }
+/* Drag-and-drop in the documentation tree editor. */
+.doc-drag-handle {
+  flex: 0 0 auto;
+  cursor: grab;
+  color: var(--text-subtle);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px;
+  user-select: none;
+}
+.doc-drag-handle:active {
+  cursor: grabbing;
+}
+.doc-edit-node.dragging {
+  opacity: 0.45;
+}
+/* Drop indicators: a line before/after for sibling drops, a ring for "inside". */
+.struct-edit-row.drop-before,
+.struct-edit-row.drop-after,
+.struct-edit-row.drop-inside {
+  position: relative;
+}
+.struct-edit-row.drop-before::before,
+.struct-edit-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--primary);
+}
+.struct-edit-row.drop-before::before {
+  top: -4px;
+}
+.struct-edit-row.drop-after::after {
+  bottom: -4px;
+}
+.struct-edit-row.drop-inside {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
 .struct-new-badge {
   font-size: 11px;
   color: var(--status-ready-fg);

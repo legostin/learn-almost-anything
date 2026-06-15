@@ -1225,10 +1225,22 @@ pub fn load_structure(
             Some(parent) => sub_by_parent.entry(parent).or_default().push(node),
         }
     }
-    for m in top.iter_mut() {
-        if let Some(children) = sub_by_parent.remove(&m.id) {
-            m.submodules = children;
+    // Re-attach children recursively so arbitrarily-deep trees (documentation)
+    // survive a save→load round-trip. The old non-recursive version only wired up
+    // top-level modules' direct children, orphaning every node at depth >= 2.
+    fn attach_children(
+        node: &mut ModuleNode,
+        sub_by_parent: &mut std::collections::HashMap<String, Vec<ModuleNode>>,
+    ) {
+        if let Some(mut children) = sub_by_parent.remove(&node.id) {
+            for child in children.iter_mut() {
+                attach_children(child, sub_by_parent);
+            }
+            node.submodules = children;
         }
+    }
+    for m in top.iter_mut() {
+        attach_children(m, &mut sub_by_parent);
     }
     Ok(StructureFile {
         course_id: course_id.to_string(),
