@@ -6273,7 +6273,13 @@ function FieldSelect({
               aria-selected={o.value === value}
               className={`field-select-option${o.value === value ? " selected" : ""}`}
               disabled={o.disabled}
-              onClick={() => {
+              onClick={(e) => {
+                // FieldSelect is rendered inside a <label>; in WebKit a click on
+                // an option is also forwarded to the label's first control (our
+                // trigger button), which re-toggles the menu back open. Stop the
+                // event here so selecting an option only ever closes the menu.
+                e.preventDefault();
+                e.stopPropagation();
                 onChange(o.value);
                 setOpen(false);
               }}
