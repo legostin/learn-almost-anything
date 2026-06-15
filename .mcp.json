@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "laa-course": {
+      "command": "node",
+      "args": ["sidecar/src/course-mcp/server.mjs"],
+      "env": {
+        "LAA_COURSE_STORE": "${HOME}/.laa-course-mcp",
+        "CATALOG_URL": "http://localhost:8080",
+        "CATALOG_UPLOAD_TOKEN": ""
+      }
+    }
+  }
+}
