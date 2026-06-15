@@ -247,6 +247,22 @@ const TOOLS = [
     },
   },
   {
+    name: "course_set_space",
+    description:
+      "Attach (or update) a SPACE — the supplied material a course is grounded in. `strict` true = use ONLY this material (no outside knowledge/web); false = it's the primary base you may supplement. Stored on the course and returned by course_status so grounding persists across sessions. You read the dirs/sources/links yourself with your own tools.",
+    inputSchema: {
+      type: "object",
+      required: ["courseId"],
+      properties: {
+        courseId: { type: "string" },
+        strict: { type: "boolean", description: "Only use this material (default false)." },
+        dirs: { type: "array", items: { type: "string" }, description: "Local directories to read with your file tools." },
+        links: { type: "array", description: "Allowed URLs [{title?,url,kind?}] (or plain url strings)." },
+        sources: { type: "array", description: "Documents [{title,kind?,path?,content?}] grounding the course." },
+      },
+    },
+  },
+  {
     name: "course_list",
     description: "List all courses in the local store with title, format, language and lesson counts.",
     inputSchema: { type: "object", properties: {} },
@@ -340,6 +356,19 @@ async function handleTool(name, args) {
       return { courseId: course.id, nodes: keptIds.size, modules: statusTree(course) };
     }
 
+    case "course_set_space": {
+      const course = await loadCourse(a.courseId);
+      if (!course) throw new Error(`course not found: ${a.courseId}`);
+      course.space = {
+        strict: a.strict === true,
+        dirs: Array.isArray(a.dirs) ? a.dirs : [],
+        links: Array.isArray(a.links) ? a.links : [],
+        sources: Array.isArray(a.sources) ? a.sources : [],
+      };
+      await saveCourse(course);
+      return { courseId: course.id, space: course.space };
+    }
+
     case "course_status": {
       const course = await loadCourse(a.courseId);
       if (!course) throw new Error(`course not found: ${a.courseId}`);
@@ -352,6 +381,7 @@ async function handleTool(name, args) {
         total: all.length,
         ready,
         pending: all.length - ready,
+        ...(course.space ? { space: course.space } : {}),
         modules: statusTree(course),
       };
     }
