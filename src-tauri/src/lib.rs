@@ -8957,6 +8957,228 @@ fn set_course_profile(
     db::set_course_generation_profile(&conn, &course_id, Some(&json)).map_err(|e| e.to_string())
 }
 
+// ── Unified course store (LEG-46): ~/.laa-course, shared with the MCP server ──
+
+/// Non-destructive, one-time copy of the app's legacy courses dir into the
+/// unified ~/.laa-course store (guarded by an app_meta flag). Originals stay put,
+/// an already-present course is never overwritten. Returns whether the unified
+/// store is safe to use as the active courses root — only true once the copy is
+/// confirmed complete, so a partial/failed migration keeps the app on the legacy
+/// (complete) dir and retries next launch.
+fn migrate_courses_to_unified(
+    conn: &rusqlite::Connection,
+    legacy: &std::path::Path,
+    unified: &std::path::Path,
+) -> bool {
+    let already = conn
+        .query_row(
+            "SELECT 1 FROM app_meta WHERE key = 'unified_courses_store_v1'",
+            [],
+            |_| Ok::<(), rusqlite::Error>(()),
+        )
+        .is_ok();
+    if already {
+        return true;
+    }
+    if legacy == unified {
+        return true;
+    }
+    let mut ok = true;
+    if legacy.exists() {
+        if let Err(e) = std::fs::create_dir_all(unified) {
+            eprintln!("[unified-store] mkdir {unified:?}: {e}");
+            return false;
+        }
+        if let Ok(entries) = std::fs::read_dir(legacy) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if !src.is_dir() {
+                    continue;
+                }
+                let dst = unified.join(entry.file_name());
+                if dst.exists() {
+                    continue;
+                }
+                if let Err(e) = copy_dir_all(&src, &dst) {
+                    eprintln!("[unified-store] copy {:?}: {e}", entry.file_name());
+                    ok = false; // keep using legacy until this succeeds
+                }
+            }
+        }
+    } else if let Err(e) = std::fs::create_dir_all(unified) {
+        eprintln!("[unified-store] mkdir {unified:?}: {e}");
+        return false;
+    }
+    if !ok {
+        return false;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES ('unified_courses_store_v1', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![now.to_string()],
+    );
+    true
+}
+
+#[derive(serde::Deserialize)]
+struct McpStore {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    topic: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default)]
+    course_format: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    course_md: String,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default)]
+    updated_at: i64,
+    #[serde(default)]
+    structure: McpStructure,
+    #[serde(default)]
+    lessons: std::collections::HashMap<String, McpLesson>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct McpStructure {
+    #[serde(default)]
+    modules: Vec<courses::ModuleNode>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct McpLesson {
+    #[serde(default)]
+    article: String,
+    #[serde(default)]
+    widgets: serde_json::Value,
+    #[serde(default)]
+    sources: serde_json::Value,
+    #[serde(default)]
+    test: serde_json::Value,
+    #[serde(default)]
+    assignments: serde_json::Value,
+    #[serde(default)]
+    flashcards: serde_json::Value,
+    #[serde(default)]
+    review_notes: String,
+}
+
+fn mcp_to_package(mcp: &McpStore) -> catalog::CatalogCoursePackage {
+    let is_doc = mcp.course_format == "documentation";
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    fn walk(
+        nodes: &[courses::ModuleNode],
+        parent: &str,
+        is_doc: bool,
+        lessons: &std::collections::HashMap<String, McpLesson>,
+        out: &mut Vec<catalog::CatalogSubmodulePackage>,
+    ) {
+        for n in nodes {
+            if let Some(l) = lessons.get(&n.id) {
+                out.push(catalog::CatalogSubmodulePackage {
+                    module_id: if is_doc { "_doc".to_string() } else { parent.to_string() },
+                    submodule_id: n.id.clone(),
+                    article: l.article.clone(),
+                    widgets: l.widgets.clone(),
+                    sources: l.sources.clone(),
+                    test: l.test.clone(),
+                    review_notes: l.review_notes.clone(),
+                    assignments: l.assignments.clone(),
+                    flashcards: l.flashcards.clone(),
+                });
+            }
+            walk(&n.submodules, &n.id, is_doc, lessons, out);
+        }
+    }
+    let mut submodules = Vec::new();
+    walk(&mcp.structure.modules, "", is_doc, &mcp.lessons, &mut submodules);
+    catalog::CatalogCoursePackage {
+        schema_version: 1,
+        exported_at: now,
+        course: catalog::CatalogCourseMeta {
+            id: mcp.id.clone(),
+            topic: mcp.topic.clone(),
+            title: if mcp.title.trim().is_empty() {
+                None
+            } else {
+                Some(mcp.title.clone())
+            },
+            tags: mcp.tags.clone(),
+            language: mcp.language.clone(),
+            course_format: if mcp.course_format.is_empty() {
+                "academic_course".to_string()
+            } else {
+                mcp.course_format.clone()
+            },
+            agent: mcp.agent.clone().unwrap_or_else(|| "claude".to_string()),
+            created_at: mcp.created_at,
+            updated_at: mcp.updated_at,
+            catalog_origin_id: Some(mcp.id.clone()),
+            catalog_version: now,
+        },
+        course_md: mcp.course_md.clone(),
+        structure: courses::StructureFile {
+            course_id: mcp.id.clone(),
+            modules: mcp.structure.modules.clone(),
+        },
+        submodules,
+        files: vec![],
+    }
+}
+
+/// Import MCP-authored courses (~/.laa-course/<id>.json) into the app's storage so
+/// courses generated from Claude Code appear natively. Idempotent: dedups via
+/// catalog_origin_id and re-imports only when the json is newer. Runs at startup.
+fn import_unified_mcp_courses(conn: &rusqlite::Connection, paths: &AppPaths, dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mcp) = serde_json::from_str::<McpStore>(&text) else {
+            continue;
+        };
+        if mcp.id.is_empty() {
+            continue;
+        }
+        if let Ok(Some(existing)) = db::get_course_by_catalog_origin(conn, &mcp.id) {
+            if existing.updated_at >= mcp.updated_at {
+                continue;
+            }
+        }
+        let package = mcp_to_package(&mcp);
+        if package.submodules.is_empty() {
+            continue; // nothing generated yet
+        }
+        match catalog::install_package(conn, paths, package, None) {
+            Ok(_) => eprintln!("[unified-store] imported MCP course {}", mcp.id),
+            Err(e) => eprintln!("[unified-store] import {} failed: {e}", mcp.id),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
@@ -8981,10 +9203,34 @@ pub fn run() {
                     Err(e) => eprintln!("[startup] reset_stuck_generations: {e}"),
                 }
             }
+            // Unified course store shared with the MCP server (LEG-46): courses
+            // live under ~/.laa-course. Copy the app's legacy courses in once,
+            // then import any MCP-authored courses (~/.laa-course/<id>.json).
+            let legacy_courses = dir.join("courses");
+            let unified_courses = app
+                .path()
+                .home_dir()
+                .map(|h| h.join(".laa-course"))
+                .unwrap_or_else(|_| legacy_courses.clone());
+            // Use the unified root only once its migration is confirmed complete;
+            // otherwise stay on the (complete) legacy dir and retry next launch.
+            let courses_root = {
+                let conn = db.0.lock().expect("db lock");
+                if migrate_courses_to_unified(&conn, &legacy_courses, &unified_courses) {
+                    unified_courses.clone()
+                } else {
+                    legacy_courses.clone()
+                }
+            };
             let app_paths = Arc::new(AppPaths {
-                courses_root: dir.join("courses"),
+                courses_root,
                 spaces_root: dir.join("spaces"),
             });
+            {
+                // Import MCP-authored courses (Claude Code) from the unified store.
+                let conn = db.0.lock().expect("db lock");
+                import_unified_mcp_courses(&conn, &app_paths, &unified_courses);
+            }
             {
                 // One-time card backfill from existing flashcards.json decks
                 // (guarded by an app_meta flag; idempotent on crash).

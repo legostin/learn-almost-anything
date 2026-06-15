@@ -22,7 +22,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 
-const STORE_DIR = process.env.LAA_COURSE_STORE || join(homedir(), ".laa-course-mcp");
+// Unified store shared with the desktop app (LEG-46): courses live under
+// ~/.laa-course. ~/.laa-course-mcp is the legacy MCP-only location — migrated in
+// on first run (copy, non-destructive).
+const STORE_DIR = process.env.LAA_COURSE_STORE || join(homedir(), ".laa-course");
+const LEGACY_STORE_DIR = join(homedir(), ".laa-course-mcp");
 const SCHEMA_VERSION = 1;
 const REFERENCE_FORMATS = new Set(["encyclopedia", "documentation"]);
 const COURSE_FORMATS = [
@@ -40,6 +44,35 @@ const nowSecs = () => Math.floor(Date.now() / 1000);
 
 async function ensureStore() {
   await mkdir(STORE_DIR, { recursive: true });
+}
+
+// One-time, non-destructive migration of legacy ~/.laa-course-mcp/*.json into the
+// unified ~/.laa-course store. Copies only files not already present; leaves the
+// originals in place. Safe to run on every startup.
+async function migrateLegacyStore() {
+  if (STORE_DIR === LEGACY_STORE_DIR) return;
+  let files;
+  try {
+    files = await readdir(LEGACY_STORE_DIR);
+  } catch {
+    return; // no legacy store
+  }
+  await ensureStore();
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    const dest = join(STORE_DIR, f);
+    try {
+      await readFile(dest, "utf8"); // already migrated
+      continue;
+    } catch {
+      /* not present — copy it */
+    }
+    try {
+      await writeFile(dest, await readFile(join(LEGACY_STORE_DIR, f), "utf8"));
+    } catch {
+      /* skip unreadable */
+    }
+  }
 }
 
 async function loadCourse(id) {
@@ -483,6 +516,8 @@ async function dispatch(method, params, id) {
       return replyError(id, -32601, `method not found: ${method}`);
   }
 }
+
+await migrateLegacyStore().catch(() => {});
 
 const rl = createInterface({ input: process.stdin });
 rl.on("line", async (line) => {
