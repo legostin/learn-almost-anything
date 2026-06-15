@@ -3692,6 +3692,48 @@ function CustomMcpSection({
   );
 }
 
+// Course-generation MCP for Claude Code: shows a ready `claude mcp add` command
+// pointing at the bundled, zero-dependency server.mjs (path resolved per-OS by
+// the backend), so users can author & publish courses from Claude Code.
+function CourseMcpSection({ catalogServers }: { catalogServers: CatalogServerStatus[] }) {
+  const t = useT();
+  const [path, setPath] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    invoke<string>("course_mcp_server_path")
+      .then(setPath)
+      .catch(() => setPath(""));
+  }, []);
+  const catalogUrl = catalogServers.find((s) => s.base_url)?.base_url || "http://localhost:8080";
+  const cmd = path
+    ? `claude mcp add laa-course \\\n  --env CATALOG_URL=${catalogUrl} \\\n  --env CATALOG_UPLOAD_TOKEN=<token> \\\n  -- node "${path}"`
+    : "";
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  return (
+    <>
+      <div className="setting-note">{t("claudeMcpNote")}</div>
+      {cmd && (
+        <div className="course-mcp">
+          <pre className="course-mcp-cmd">
+            <code>{cmd}</code>
+          </pre>
+          <button className="course-mcp-copy" onClick={copy} disabled={!cmd}>
+            {copied ? t("claudeMcpCopied") : t("claudeMcpCopy")}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 // Private self-hosted catalog servers: list + add (URL probed by the backend
 // before saving) + delete. Tokens never round-trip — re-add to change one.
 function CatalogServersSection({
@@ -4237,6 +4279,11 @@ function SettingsModal({
         <div className="setting-group">
           <div className="setting-label">{t("privateCatalogsTitle")}</div>
           <CatalogServersSection servers={catalogServers} onStatus={applySettingsStatus} />
+        </div>
+
+        <div className="setting-group">
+          <div className="setting-label">{t("claudeMcpTitle")}</div>
+          <CourseMcpSection catalogServers={catalogServers} />
         </div>
 
         <div className="setting-group">

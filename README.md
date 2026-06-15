@@ -68,6 +68,31 @@ Everyone on the team adds the URL in Settings and gets a shared internal course 
 
 And of course: publish your best courses to the [public catalog](https://catalog.almost-anything.io), install other people's courses, translate any course into another language — structure, lessons, tests, homework, diagram labels and even baked-in image text included.
 
+## Generate courses from Claude Code (MCP)
+
+Author and publish courses straight from [Claude Code](https://claude.com/claude-code): a built-in **MCP server** (`laa-course`) lets the model design the structure, write and fact-check the lessons, pick images and cite sources itself, then save and publish them to your catalog — including arbitrarily-nested **documentation** with working cross-links and **space**-grounded courses (build only from supplied docs/repos). Generation runs inside Claude Code; the server only persists, lists status, edits structure and publishes (it never calls an LLM).
+
+The server ships inside the app and is a single, **zero-dependency** file — you only need Claude Code and `node` on your PATH. The easiest way: open **Settings → Generate courses from Claude Code** and click **Copy command** — it's prefilled with the correct path for your OS. Or register it by hand:
+
+```bash
+# macOS (path inside the installed .app)
+claude mcp add laa-course \
+  --env CATALOG_URL=http://localhost:8080 --env CATALOG_UPLOAD_TOKEN=your-token \
+  -- node "/Applications/Learn (Almost) Anything.app/Contents/Resources/sidecar/src/course-mcp/server.mjs"
+
+# Windows (path inside the install dir; adjust if you installed elsewhere)
+claude mcp add laa-course ^
+  --env CATALOG_URL=http://localhost:8080 --env CATALOG_UPLOAD_TOKEN=your-token ^
+  -- node "C:\Program Files\Learn (Almost) Anything\resources\sidecar\src\course-mcp\server.mjs"
+
+# Linux (AppImage/deb — adjust to your install path)
+claude mcp add laa-course \
+  --env CATALOG_URL=http://localhost:8080 --env CATALOG_UPLOAD_TOKEN=your-token \
+  -- node "/usr/lib/learn-almost-anything/resources/sidecar/src/course-mcp/server.mjs"
+```
+
+Verify with `claude mcp list` (→ `laa-course: connected`), then just ask: *"generate documentation on how HTTP/2 works and publish it"*. Courses are stored under `$LAA_COURSE_STORE` (default `~/.laa-course-mcp`). The repo also ships a `.claude/skills/generate-course` skill that drives the whole authoring workflow.
+
 ## Your subscription is the engine
 
 The app is free and runs no paid backend. Every LLM call goes through an agent CLI **already installed and authenticated on your machine**:

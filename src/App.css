@@ -5437,6 +5437,29 @@ button {
   color: var(--text-subtle);
   line-height: 1.5;
 }
+.course-mcp {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.course-mcp-cmd {
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-subtle, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+.course-mcp-copy {
+  cursor: pointer;
+}
 .modal .setting-note {
   margin: 0;
   font-size: 14px;

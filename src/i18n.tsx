@@ -691,6 +691,11 @@ const STRINGS = {
     tagsPlaceholder: "через запятую",
     tagsEdit: "Теги",
     tagsSave: "Сохранить",
+    claudeMcpTitle: "Генерация курсов в Claude Code",
+    claudeMcpNote:
+      "Подключите MCP-сервер генерации курсов к Claude Code — он будет создавать и публиковать курсы в каталог. Нужен установленный Claude Code и node. Выполните команду в терминале (впишите токен каталога), затем просто просите Claude «сгенерируй курс по … и опубликуй».",
+    claudeMcpCopy: "Скопировать команду",
+    claudeMcpCopied: "Скопировано ✓",
     mcpTitle: "MCP",
     mcpEmpty: "Добавленных MCP пока нет.",
     mcpNote:
@@ -1547,6 +1552,11 @@ const STRINGS = {
     tagsPlaceholder: "comma-separated",
     tagsEdit: "Tags",
     tagsSave: "Save",
+    claudeMcpTitle: "Generate courses from Claude Code",
+    claudeMcpNote:
+      "Connect the course-generation MCP server to Claude Code — it creates and publishes courses to your catalog. Requires Claude Code and node installed. Run the command in a terminal (fill in your catalog token), then just ask Claude to “generate a course on … and publish it”.",
+    claudeMcpCopy: "Copy command",
+    claudeMcpCopied: "Copied ✓",
     mcpTitle: "MCP",
     mcpEmpty: "No added MCP servers yet.",
     mcpNote:

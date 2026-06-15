@@ -6046,6 +6046,20 @@ fn sidecar_script_path(app: &AppHandle) -> PathBuf {
     source
 }
 
+/// Absolute path to the bundled course-generation MCP server (the sibling of the
+/// sidecar entrypoint). Used by Settings to show a `claude mcp add` command so
+/// Claude Code can drive course authoring/publishing. Cross-platform: derived
+/// from the same resolver as the sidecar (handles the Windows verbatim prefix).
+#[tauri::command]
+fn course_mcp_server_path(app: AppHandle) -> String {
+    sidecar_script_path(&app)
+        .parent()
+        .map(|dir| dir.join("course-mcp").join("server.mjs"))
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
 // Path of the dev-only agent transcript log the sidecar writes (see
 // sidecar/src/lib/devlog.mjs). Mirrors that module's default location.
 fn dev_log_path(app: &AppHandle) -> PathBuf {
@@ -9097,6 +9111,7 @@ pub fn run() {
             start_illustrate_submodule,
             delete_course,
             get_settings_status,
+            course_mcp_server_path,
             set_brave_key,
             set_gemini_key,
             set_catalog_upload_token,
