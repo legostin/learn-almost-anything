@@ -57,7 +57,8 @@ type CourseFormat =
   | "podcast_series"
   | "single_lesson"
   | "encyclopedia"
-  | "documentation";
+  | "documentation"
+  | "fact_check";
 
 const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
 
@@ -65,6 +66,17 @@ const DEFAULT_COURSE_FORMAT: CourseFormat = "academic_course";
 // no tests/homework and progress measured by generated articles, not tests.
 const isReferenceFormat = (format?: string | null): boolean =>
   format === "encyclopedia" || format === "documentation";
+
+// Single-lesson-shaped formats: exactly one standalone lesson (no plan step),
+// straight into the reader. Fact-check is a single lesson too.
+const isSingleLessonFormat = (format?: string | null): boolean =>
+  format === "single_lesson" || format === "fact_check";
+
+// Formats with no tests/homework — progress is generated-article share and the
+// test/assignment toggles + completion UI are hidden. Reference formats plus
+// fact-check (a verdict article, not a quizzed lesson).
+const isNoTestFormat = (format?: string | null): boolean =>
+  isReferenceFormat(format) || format === "fact_check";
 
 const COURSE_FORMATS = [
   {
@@ -97,6 +109,11 @@ const COURSE_FORMATS = [
     titleKey: "courseFormatDocumentationTitle",
     descKey: "courseFormatDocumentationDesc",
   },
+  {
+    value: "fact_check",
+    titleKey: "courseFormatFactCheckTitle",
+    descKey: "courseFormatFactCheckDesc",
+  },
 ] as const satisfies ReadonlyArray<{
   value: CourseFormat;
   titleKey:
@@ -105,14 +122,16 @@ const COURSE_FORMATS = [
     | "courseFormatPodcastTitle"
     | "courseFormatLessonTitle"
     | "courseFormatEncyclopediaTitle"
-    | "courseFormatDocumentationTitle";
+    | "courseFormatDocumentationTitle"
+    | "courseFormatFactCheckTitle";
   descKey:
     | "courseFormatAcademicDesc"
     | "courseFormatMiniDesc"
     | "courseFormatPodcastDesc"
     | "courseFormatLessonDesc"
     | "courseFormatEncyclopediaDesc"
-    | "courseFormatDocumentationDesc";
+    | "courseFormatDocumentationDesc"
+    | "courseFormatFactCheckDesc";
 }>;
 
 // Generation cost/quality tier chosen at course creation; mirrors the Rust
@@ -2607,7 +2626,7 @@ function CourseDashboard({
     // articles (ready) rather than passed tests (verified) — otherwise the bar
     // is stuck at 0% even when every article is generated.
     const progressDone =
-      isReferenceFormat(course.course_format) ? progress?.ready : progress?.verified;
+      isNoTestFormat(course.course_format) ? progress?.ready : progress?.verified;
     const verifiedPercent =
       progress && progress.total > 0
         ? Math.round(((progressDone ?? 0) / progress.total) * 100)
@@ -2631,7 +2650,7 @@ function CourseDashboard({
       action = () => onOpenCourse(course.id);
       needsAction = true;
     } else if (course.status === "structuring") {
-      if (course.course_format === "single_lesson") {
+      if (isSingleLessonFormat(course.course_format)) {
         // Lessons have no plan-building step: opening the course auto-starts
         // generation (CourseView effect), so never expose a build-plan action.
         actionLabel = t("courseActionOpen");
@@ -2695,10 +2714,10 @@ function CourseDashboard({
   });
   // Single lessons live in their own home section, never in featured/index.
   const lessonSummaries = summaries.filter(
-    (s) => s.course.course_format === "single_lesson"
+    (s) => isSingleLessonFormat(s.course.course_format)
   );
   const courseSummaries = summaries.filter(
-    (s) => s.course.course_format !== "single_lesson"
+    (s) => !isSingleLessonFormat(s.course.course_format)
   );
   const attention = courseSummaries.filter((s) => s.needsAction);
   const summariesById = new Map(courseSummaries.map((summary) => [summary.course.id, summary]));
@@ -6402,6 +6421,7 @@ function CreateCourse({
     initialFormat ?? DEFAULT_COURSE_FORMAT
   );
   const isRoadmap = courseFormat === "roadmap";
+  const isFactCheck = courseFormat === "fact_check";
   const [tier, setTier] = useState<GenerationTier>(DEFAULT_GENERATION_TIER);
   // Explicit overrides for the tier presets: tests and homework on/off.
   const [withTests, setWithTests] = useState(true);
@@ -6411,6 +6431,16 @@ function CreateCourse({
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
+  // Fact-check source attachments: an optional URL and an optional image. The
+  // image only works with codex (claude's generation can't see images here).
+  const [factUrl, setFactUrl] = useState("");
+  const [factImage, setFactImage] = useState<
+    { name: string; dataBase64: string; ext: string } | null
+  >(null);
+  const [factImageError, setFactImageError] = useState<string | null>(null);
+  useEffect(() => {
+    if (agent !== "codex" && factImage) setFactImage(null);
+  }, [agent, factImage]);
 
   // If agentAvail loads after first render and the selected agent is
   // unavailable, swap to whichever is available.
@@ -6463,9 +6493,24 @@ function CreateCourse({
         tier,
         skip_tests: !withTests,
         skip_assignments: !withAssignments,
-        skip_wizard: !askQuestions,
+        // Fact-check has no interview: the claim is the input.
+        skip_wizard: isFactCheck ? true : !askQuestions,
       },
     }).catch(() => {});
+    if (isFactCheck) {
+      // Persist the source URL first, then merge in the uploaded image (codex).
+      await invoke("set_fact_input", {
+        courseId: id,
+        factInput: { url: factUrl.trim() || null },
+      }).catch(() => {});
+      if (factImage && agent === "codex") {
+        await invoke("save_fact_image", {
+          courseId: id,
+          dataBase64: factImage.dataBase64,
+          ext: factImage.ext,
+        }).catch(() => {});
+      }
+    }
     if (selectedMcp.length > 0) {
       await invoke("set_course_mcp", { courseId: id, serverIds: selectedMcp }).catch(() => {});
     }
@@ -6477,7 +6522,7 @@ function CreateCourse({
       <h2>{t("createTitle")}</h2>
       {roadmapId && <div className="field-note">{t("courseLinkedToRoadmap")}</div>}
       <label>
-        {t("topicLabel")}
+        {isFactCheck ? t("factClaimLabel") : t("topicLabel")}
         <textarea
           autoFocus
           rows={2}
@@ -6502,7 +6547,13 @@ function CreateCourse({
               e.currentTarget.form?.requestSubmit();
             }
           }}
-          placeholder={isRoadmap ? t("roadmapTopicPlaceholder") : t("topicPlaceholder")}
+          placeholder={
+            isFactCheck
+              ? t("factClaimPlaceholder")
+              : isRoadmap
+                ? t("roadmapTopicPlaceholder")
+                : t("topicPlaceholder")
+          }
         />
       </label>
       <label>
@@ -6530,6 +6581,57 @@ function CreateCourse({
         />
         <span className="field-note">{t("courseFormatNote")}</span>
       </label>
+      {isFactCheck && (
+        <>
+          <label>
+            {t("factUrlLabel")}
+            <input
+              type="url"
+              value={factUrl}
+              onChange={(e) => setFactUrl(e.target.value)}
+              placeholder={t("factUrlPlaceholder")}
+            />
+          </label>
+          <label>
+            {t("factImageLabel")}
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={agent !== "codex"}
+              onChange={async (e) => {
+                setFactImageError(null);
+                const file = e.target.files?.[0];
+                if (!file) {
+                  setFactImage(null);
+                  return;
+                }
+                if (file.size > 8 * 1024 * 1024) {
+                  setFactImageError(t("factImageTooLarge"));
+                  e.target.value = "";
+                  return;
+                }
+                try {
+                  const buf = await file.arrayBuffer();
+                  let binary = "";
+                  const bytes = new Uint8Array(buf);
+                  for (let i = 0; i < bytes.length; i += 1) {
+                    binary += String.fromCharCode(bytes[i]);
+                  }
+                  const ext = file.name.split(".").pop()?.toLowerCase() || "png";
+                  setFactImage({ name: file.name, dataBase64: btoa(binary), ext });
+                } catch {
+                  setFactImageError(t("factImageReadError"));
+                }
+              }}
+            />
+            <span className="field-note">
+              {agent === "codex" ? t("factImageHint") : t("factImageCodexOnly")}
+            </span>
+            {factImage && <span className="field-note">{factImage.name}</span>}
+            {factImageError && <span className="field-note">{factImageError}</span>}
+          </label>
+        </>
+      )}
       {!isRoadmap && (
         <>
         <label>
@@ -6553,7 +6655,7 @@ function CreateCourse({
         <div className="create-toggles">
           {/* Reference formats (encyclopedia/documentation) have no tests or
               homework — the backend skips them regardless, so hide the toggles. */}
-          {!isReferenceFormat(courseFormat) && (
+          {!isNoTestFormat(courseFormat) && (
             <>
               <label className="create-toggle">
                 <input
@@ -6573,14 +6675,17 @@ function CreateCourse({
               </label>
             </>
           )}
-          <label className="create-toggle">
-            <input
-              type="checkbox"
-              checked={askQuestions}
-              onChange={(e) => setAskQuestions(e.target.checked)}
-            />
-            {t("createAskQuestionsLabel")}
-          </label>
+          {/* Fact-check skips the interview entirely — the claim is the input. */}
+          {!isFactCheck && (
+            <label className="create-toggle">
+              <input
+                type="checkbox"
+                checked={askQuestions}
+                onChange={(e) => setAskQuestions(e.target.checked)}
+              />
+              {t("createAskQuestionsLabel")}
+            </label>
+          )}
         </div>
         </>
       )}
@@ -6907,7 +7012,7 @@ function CourseView({
   const [updatingCatalog, setUpdatingCatalog] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [lessonStartError, setLessonStartError] = useState<string | null>(null);
-  const isLesson = course?.course_format === "single_lesson";
+  const isLesson = isSingleLessonFormat(course?.course_format);
 
   // Single lessons skip plan building entirely: the backend installs a trivial
   // 1x1 structure (no sidecar call), queues generation, and we drop the
@@ -7550,8 +7655,9 @@ function Wizard({
   const finalizedRef = useRef(false);
   const skipStartedRef = useRef(false);
   // Single lessons run a shortened interview: 1-3 questions instead of 3-10.
-  const minQuestions =
-    course.course_format === "single_lesson" ? 1 : WIZARD_MIN_QUESTIONS;
+  const minQuestions = isSingleLessonFormat(course.course_format)
+    ? 1
+    : WIZARD_MIN_QUESTIONS;
 
   const askNext = useCallback(
     async (history: QnA[], reRequested = false) => {
@@ -8317,7 +8423,7 @@ function Structure({
   const progress = summarizeStructure(tree, course.course_format === "documentation");
   // Single lessons have a trivial 1x1 plan: no full-course generation,
   // refinement, or structure editing — only the lesson row itself.
-  const isLesson = course.course_format === "single_lesson";
+  const isLesson = isSingleLessonFormat(course.course_format);
   const canStartFull =
     progress.pending > 0 || (progress.queued > 0 && progress.generating === 0);
   // Documentation: the structure is authored by hand in a recursive editor.
@@ -8415,7 +8521,7 @@ function Structure({
           ) : (
             <StructureTree
               tree={tree}
-              hideCompletion={isReferenceFormat(course.course_format)}
+              hideCompletion={isNoTestFormat(course.course_format)}
               docMode={course.course_format === "documentation"}
               onOpenSub={onOpenSub}
               onStartSubGen={async (subId) => {
@@ -8508,7 +8614,7 @@ function RefineChat({
                   <div className="proposal-header">{t("proposal")}</div>
                   <StructureTree
                     tree={{ course_id: course.id, modules: msg.modules }}
-                    hideCompletion={isReferenceFormat(course.course_format)}
+                    hideCompletion={isNoTestFormat(course.course_format)}
                     docMode={course.course_format === "documentation"}
                   />
                   {isPending && (

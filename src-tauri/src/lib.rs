@@ -96,7 +96,7 @@ fn spawn_generate_course_tags(
         }
         let params = json!({
             "backend": course.agent,
-            "kind": if course.course_format == "single_lesson" { "lesson" } else { "course" },
+            "kind": if course.course_format == "single_lesson" || course.course_format == "fact_check" { "lesson" } else { "course" },
             "topic": course.topic,
             "title": course.title,
             "language": course.language,
@@ -238,6 +238,72 @@ fn create_course(
     )
     .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+/// Store a fact-check course's source attachments (JSON with optional `url`).
+/// The image ref is added separately by `save_fact_image`, so this preserves
+/// any existing `image` key rather than clobbering it.
+#[tauri::command]
+fn set_fact_input(
+    state: tauri::State<'_, Arc<Db>>,
+    course_id: String,
+    fact_input: Value,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let existing = db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|c| c.fact_input);
+    let mut merged = fact_input;
+    if let (Some(image), Some(obj)) = (
+        existing
+            .as_ref()
+            .and_then(|v| v.get("image"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        merged.as_object_mut(),
+    ) {
+        obj.entry("image").or_insert(json!(image));
+    }
+    db::set_fact_input(&conn, &course_id, Some(&merged.to_string())).map_err(|e| e.to_string())
+}
+
+/// Save an uploaded fact-check image under the course directory and record its
+/// relative ref in `fact_input.image`. Returns the stored relative path.
+#[tauri::command]
+fn save_fact_image(
+    db_state: tauri::State<'_, Arc<Db>>,
+    paths_state: tauri::State<'_, Arc<AppPaths>>,
+    course_id: String,
+    data_base64: String,
+    ext: String,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let safe_ext = match ext.trim().to_lowercase().as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "webp" => "webp",
+        other => return Err(format!("unsupported image type: {other}")),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("bad image data: {e}"))?;
+    let rel = format!("fact/source.{safe_ext}");
+    let dir = paths_state.course_dir(&course_id).join("fact");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(paths_state.course_dir(&course_id).join(&rel), bytes)
+        .map_err(|e| e.to_string())?;
+
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let mut fact = db::get_course(&conn, &course_id)
+        .map_err(|e| e.to_string())?
+        .and_then(|c| c.fact_input)
+        .unwrap_or_else(|| json!({}));
+    if !fact.is_object() {
+        fact = json!({});
+    }
+    fact["image"] = json!(rel);
+    db::set_fact_input(&conn, &course_id, Some(&fact.to_string())).map_err(|e| e.to_string())?;
+    Ok(rel)
 }
 
 #[tauri::command]
@@ -1784,9 +1850,11 @@ fn spawn_generate_submodule(
 
     thread::spawn(move || {
         let is_podcast = course.course_format == "podcast_series";
-        // Encyclopedia & documentation: reference articles, no tests and no homework.
+        // Encyclopedia, documentation & fact-check: reference-style, no tests and
+        // no homework.
         let is_reference = course.course_format == "encyclopedia"
-            || course.course_format == "documentation";
+            || course.course_format == "documentation"
+            || course.course_format == "fact_check";
         // Resolved generation profile (per-course override else balanced default).
         // Drives stage gating + is passed to the sidecar for depth/pedagogy.
         let profile: GenerationProfile = course
@@ -1842,6 +1910,22 @@ fn spawn_generate_submodule(
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
+        }
+        // Fact-check lessons: pass the verifiable fact (claim is the topic;
+        // attachments add an optional source URL and, for codex, an image to
+        // examine via vision). Resolve the image ref to an absolute path the
+        // sidecar process can read.
+        if course.course_format == "fact_check" {
+            let mut fact = course.fact_input.clone().unwrap_or_else(|| json!({}));
+            if let Some(image) = fact
+                .get("image")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let abs = paths.course_dir(&course.id).join(image);
+                fact["imagePath"] = json!(abs.to_string_lossy());
+            }
+            common["factInput"] = fact;
         }
 
         let make_progress_cb = |stage: &'static str| {
@@ -5876,7 +5960,7 @@ fn start_lesson_generation(
         let course = db::get_course(&conn, &course_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("course not found: {course_id}"))?;
-        if course.course_format != "single_lesson" {
+        if course.course_format != "single_lesson" && course.course_format != "fact_check" {
             return Err(format!("not a single-lesson course: {course_id}"));
         }
         let structure = if course.status == "structuring" {
@@ -9299,6 +9383,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_courses,
             create_course,
+            set_fact_input,
+            save_fact_image,
             set_course_agent,
             set_course_tags,
             sidecar_status,

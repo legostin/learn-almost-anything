@@ -85,6 +85,7 @@ function normalizeCourseFormat(value) {
     "single_lesson",
     "encyclopedia",
     "documentation",
+    "fact_check",
     "roadmap",
   ].includes(value)
     ? value
@@ -116,6 +117,18 @@ function courseFormatGuide(courseFormat, lang) {
 - Cover the requested topic end-to-end at the learner's level: motivation, core explanation, concrete examples, common pitfalls, and a short actionable wrap-up.
 - Never reference "this course", "later modules", or future lessons.
 - Keep tests and assignments small and focused strictly on this one lesson.`;
+  }
+  if (format === "fact_check") {
+    return `Generation format: FACT-CHECK (single standalone lesson).
+- This is ONE self-contained fact-check article — NOT a course. There is no curriculum, no other modules, and no previous or next lessons. Never reference "this course" or other lessons.
+- What you verify is the CLAIM (the lesson topic), together with any source link or image given in the "FACT INPUT" section below.
+- Structure the article exactly as:
+  1. **Claim** — restate, in one clear sentence, the claim being checked.
+  2. **Verdict** — open with ONE verdict, written in ${lang}, chosen from this scale: True / Mostly true / Mixed / Misleading / False / Unverifiable. Make it prominent (a bold line at the very top).
+  3. **What the evidence shows** — explain the reasoning with concrete facts, figures, dates and context; address WHY the claim is true / false / partly true, and any important nuance.
+  4. **Sources** — cite several authoritative, primary sources you actually consulted; every key factual statement must be traceable to a source.
+- Research thoroughly and prioritise accuracy over persuasion. Stay neutral and analytical; never invent facts or sources. If the claim cannot be settled with available evidence, say so honestly (Unverifiable) and explain what would settle it.
+- Do NOT generate tests or homework assignments for fact-check material.`;
   }
   if (format === "roadmap") {
     return `Generation format: learning ROADMAP.
@@ -161,6 +174,9 @@ function wizardQuestionGuide(courseFormat, lang) {
   if (format === "single_lesson") {
     return `For the single-lesson wizard, ask at most a couple of laser-focused questions: the exact angle or use-case the learner wants covered, and their current level. Do NOT ask about weekly time budget, schedules, or course-scale preferences.`;
   }
+  if (format === "fact_check") {
+    return `For the fact-check wizard, the claim to verify is already given. Ask at most one short question only if the claim is ambiguous (which specific assertion, time frame, or scope to check). Do NOT ask about levels, schedules, tests, or visual assets.`;
+  }
   if (format === "roadmap") {
     return `For the roadmap wizard, ask at most a couple of laser-focused questions: the learner's current level and the precise target outcome (job, project, exam). Do NOT ask about lesson formats, weekly schedules, tests, or visual assets.`;
   }
@@ -171,6 +187,32 @@ function wizardQuestionGuide(courseFormat, lang) {
     return `For the documentation wizard, ask only what defines the scope of the docs: exactly WHAT is being documented (the specific tool/system/library and its version if relevant), its boundaries (what to include/exclude), the target reader and their level, and which areas must be covered (setup, concepts, configuration, API/reference, troubleshooting). Do NOT ask about tests, homework, weekly schedules, or pacing.`;
   }
   return "";
+}
+
+// Fact-check material: surface the user-provided fact to verify (a source URL
+// to fetch, an attached image to examine, or extra text). The claim itself is
+// the topic; this lists the attachments.
+function factCheckInputBlock(courseFormat, factInput) {
+  if (normalizeCourseFormat(courseFormat) !== "fact_check") return "";
+  const fi = factInput && typeof factInput === "object" ? factInput : {};
+  const lines = [];
+  if (typeof fi.url === "string" && fi.url.trim()) {
+    lines.push(
+      `- Source link: ${fi.url.trim()}\n  Fetch and read this page (WebFetch) and base your verdict on what it actually says.`
+    );
+  }
+  if (typeof fi.imagePath === "string" && fi.imagePath.trim()) {
+    lines.push(
+      `- An image was attached as the fact to check (path: ${fi.imagePath.trim()}). Examine the image and verify the claim it makes or that is made about it.`
+    );
+  }
+  if (typeof fi.text === "string" && fi.text.trim()) {
+    lines.push(`- Extra context from the user: ${fi.text.trim()}`);
+  }
+  const body = lines.length
+    ? lines.join("\n")
+    : "- No extra attachments; verify the claim stated in the lesson topic.";
+  return `\nFACT INPUT (what to verify):\n${body}\n`;
 }
 
 function podcastNoWidgetGuide(courseFormat) {
@@ -564,6 +606,7 @@ async function draftArticleInternal(
     learnerProfile,
     researchPack,
     customMcp,
+    factInput,
   },
   onProgress
 ) {
@@ -613,7 +656,7 @@ code APIs, image/video URLs, fine-grained numbers).
 
 ${courseFormatGuide(courseFormat, lang)}
 ${podcastNoWidgetGuide(courseFormat)}
-
+${factCheckInputBlock(courseFormat, factInput)}
 Course brief (wizard Q&A):
 <course-md>
 ${courseMd}
@@ -3277,11 +3320,18 @@ export async function wizardNextQuestion(
   const wizardFormat = normalizeCourseFormat(courseFormat);
   // Short interviews: a single lesson or a roadmap need 1-3 focused questions,
   // not the full 3-10 learner-profile interview.
-  const isShort = wizardFormat === "single_lesson" || wizardFormat === "roadmap";
+  const isShort =
+    wizardFormat === "single_lesson" ||
+    wizardFormat === "roadmap" ||
+    wizardFormat === "fact_check";
   const minQ = isShort ? 1 : 3;
   const maxQ = isShort ? 3 : 10;
   const subjectNoun =
-    wizardFormat === "single_lesson" ? "lesson" : wizardFormat === "roadmap" ? "roadmap" : "course";
+    wizardFormat === "single_lesson" || wizardFormat === "fact_check"
+      ? "lesson"
+      : wizardFormat === "roadmap"
+        ? "roadmap"
+        : "course";
   const hasSpace =
     (Array.isArray(spaceDirs) && spaceDirs.length > 0) ||
     (Array.isArray(spaceSources) && spaceSources.length > 0) ||

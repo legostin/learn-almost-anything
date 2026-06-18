@@ -313,6 +313,18 @@ const STRINGS = {
     courseFormatDocumentationTitle: "Документация",
     courseFormatDocumentationDesc:
       "Связанные статьи-справки по разделам, как docs-сайт. Упор на то, как что-то работает: настройка, концепции, справка, траблшутинг. Без тестов и домашки.",
+    courseFormatFactCheckTitle: "Фактчек",
+    courseFormatFactCheckDesc:
+      "Один отдельный урок: проверка утверждения с вердиктом и пруфами. Можно дать ссылку или картинку как проверяемый факт. Без тестов и домашки.",
+    factClaimLabel: "Проверяемое утверждение",
+    factClaimPlaceholder: "Например: «Великая Китайская стена видна из космоса»",
+    factUrlLabel: "Ссылка для проверки (необязательно)",
+    factUrlPlaceholder: "https://… — статья, пост или источник утверждения",
+    factImageLabel: "Изображение для проверки (необязательно)",
+    factImageHint: "PNG, JPEG или WebP. Codex рассмотрит картинку.",
+    factImageCodexOnly: "Загрузка картинки доступна только для агента Codex.",
+    factImageTooLarge: "Файл слишком большой (макс. 8 МБ).",
+    factImageReadError: "Не удалось прочитать файл.",
     courseFormatRoadmapTitle: "Роудмап",
     courseFormatRoadmapDesc:
       "Маршрут обучения от цели: этапы, навыки и материалы. Из каждого навыка генерируется урок или курс.",
@@ -1174,6 +1186,18 @@ const STRINGS = {
     courseFormatDocumentationTitle: "Documentation",
     courseFormatDocumentationDesc:
       "Interlinked reference articles grouped into sections, like a docs site. Focused on how something works: setup, concepts, reference, troubleshooting. No tests or homework.",
+    courseFormatFactCheckTitle: "Fact-check",
+    courseFormatFactCheckDesc:
+      "One standalone lesson: verify a claim with a verdict and sources. You can give a link or an image as the fact to check. No tests or homework.",
+    factClaimLabel: "Claim to verify",
+    factClaimPlaceholder: 'e.g. "The Great Wall of China is visible from space"',
+    factUrlLabel: "Link to check (optional)",
+    factUrlPlaceholder: "https://… — the article, post, or source of the claim",
+    factImageLabel: "Image to check (optional)",
+    factImageHint: "PNG, JPEG or WebP. Codex will examine the image.",
+    factImageCodexOnly: "Image upload is available only with the Codex agent.",
+    factImageTooLarge: "File is too large (max 8 MB).",
+    factImageReadError: "Could not read the file.",
     courseFormatRoadmapTitle: "Roadmap",
     courseFormatRoadmapDesc:
       "A learning route from a goal: stages, skills, and materials. Each skill spawns a lesson or a course.",
