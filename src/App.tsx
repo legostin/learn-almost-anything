@@ -2531,6 +2531,7 @@ function CourseDashboard({
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [showAllCourses, setShowAllCourses] = useState(false);
   const [showAllLessons, setShowAllLessons] = useState(false);
+  const [showAllFactChecks, setShowAllFactChecks] = useState(false);
   const [spaces, setSpaces] = useState<Space[]>([]);
   useEffect(() => {
     invoke<Space[]>("list_spaces")
@@ -2768,10 +2769,12 @@ function CourseDashboard({
       needsAction,
     };
   });
-  // Single lessons live in their own home section, never in featured/index.
+  // Single lessons and fact-checks each live in their own home section, never in
+  // featured/index.
   const lessonSummaries = summaries.filter(
-    (s) => isSingleLessonFormat(s.course.course_format)
+    (s) => isSingleLessonFormat(s.course.course_format) && s.course.course_format !== "fact_check"
   );
+  const factCheckSummaries = summaries.filter((s) => s.course.course_format === "fact_check");
   const courseSummaries = summaries.filter(
     (s) => !isSingleLessonFormat(s.course.course_format)
   );
@@ -3160,6 +3163,45 @@ function CourseDashboard({
                   </span>
                 </button>
               ))}
+            </div>
+          </section>
+        )}
+        {factCheckSummaries.length > 0 && (
+          <section className="home-shelf">
+            <div className="home-shelf-head">
+              <span className="home-section-kicker">{t("courseFormatFactCheckTitle")}</span>
+              {factCheckSummaries.length > 6 && (
+                <button
+                  className="home-link-action"
+                  onClick={() => setShowAllFactChecks((v) => !v)}
+                >
+                  {showAllFactChecks
+                    ? t("homeShowLess")
+                    : `${t("homeShowAll")} (${factCheckSummaries.length}) →`}
+                </button>
+              )}
+            </div>
+            <div className="home-card-grid">
+              {(showAllFactChecks ? factCheckSummaries : factCheckSummaries.slice(0, 6)).map(
+                (summary) => (
+                  <button
+                    className="home-card home-card--factcheck"
+                    key={summary.course.id}
+                    onClick={summary.action}
+                    disabled={summary.actionDisabled}
+                  >
+                    <span className="home-card-title">
+                      {courseTitle(summary.course, t("courseTitlePending"))}
+                    </span>
+                    <span className="home-card-meta">
+                      {courseCardProgressLine(summary, uiLang, t)}
+                    </span>
+                    <span className="home-hairline-progress" aria-hidden="true">
+                      <span style={{ width: `${summary.verifiedPercent}%` }} />
+                    </span>
+                  </button>
+                )
+              )}
             </div>
           </section>
         )}
@@ -6977,8 +7019,8 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
           {query.trim() ? t("catalogSearchEmpty") : t("catalogEmpty")}
         </div>
       )}
-      <div className="catalog-list">
-        {items.map((item) => (
+      {(() => {
+        const renderCard = (item: CatalogCourse) => (
           <article className="catalog-card" key={item.id}>
             <div className="catalog-card-main">
               <div className="catalog-card-title">{item.title}</div>
@@ -7010,8 +7052,22 @@ function CatalogView({ onImported }: { onImported: (courseId: string) => void | 
               </button>
             </div>
           </article>
-        ))}
-      </div>
+        );
+        // Fact-checks get their own section, separate from courses/lessons.
+        const facts = items.filter((i) => i.course_format === "fact_check");
+        const main = items.filter((i) => i.course_format !== "fact_check");
+        return (
+          <>
+            {main.length > 0 && <div className="catalog-list">{main.map(renderCard)}</div>}
+            {facts.length > 0 && (
+              <>
+                <div className="catalog-section-head">{t("courseFormatFactCheckTitle")}</div>
+                <div className="catalog-list">{facts.map(renderCard)}</div>
+              </>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

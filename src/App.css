@@ -1650,6 +1650,14 @@ button {
   flex-direction: column;
   gap: 0;
 }
+.catalog-section-head {
+  margin: 18px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
 .catalog-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
