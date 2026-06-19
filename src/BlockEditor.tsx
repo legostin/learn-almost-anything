@@ -118,14 +118,27 @@ function editorMarkdown(editor: Editor): string {
 
 // markdown-it merges a `::widget{…}` marker into an adjacent paragraph when it's
 // only single-newline separated, which hides it from WidgetNode's parser; on save
-// referencedWidgets then prunes its data. Force a blank line around every marker
-// so each parses as its own block. (Saved articles are already separated this
-// way; this protects AI-authored ones with tighter spacing.)
+// referencedWidgets then prunes its data. Surround each STANDALONE marker line
+// with blank lines so it parses as its own block. Operates line-by-line and skips
+// fenced code blocks, so a literal `::widget{…}` inside prose or a code sample is
+// left untouched (otherwise it would split prose or alter code on save).
 function isolateWidgetMarkers(md: string): string {
-  return md
-    .replace(/(::widget\{[^}]*\})/g, "\n\n$1\n\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\n+/, "");
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of md.split("\n")) {
+    const t = line.trim();
+    if (/^(```|~~~)/.test(t)) {
+      inFence = !inFence;
+      out.push(line);
+    } else if (!inFence && /^::widget\{[^}]*\}$/.test(t)) {
+      if (out.length && out[out.length - 1].trim() !== "") out.push("");
+      out.push(t);
+      out.push("");
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
 // Widgets still referenced by a node in the doc (drop deleted ones).
