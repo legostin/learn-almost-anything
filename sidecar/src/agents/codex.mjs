@@ -3776,10 +3776,13 @@ const classifySchema = {
 };
 
 /**
- * Content-safety + strategy gate, run once before building a curriculum.
- * Refuses genuinely harmful topics; flags sensitive ones for cautious treatment
- * and meme / internet-culture / "better-on-YouTube" ones for video-heavy lessons.
- * Best-effort: a missing/invalid result is treated as "ok" by callers.
+ * Assess a topic on two INDEPENDENT axes before building a curriculum:
+ *   - safety: refuse a genuinely harmful topic, or flag a sensitive one for
+ *     cautious, responsible treatment;
+ *   - medium (a positive content hint, NOT a restriction): flag watch-first
+ *     subjects (memes, demos, cooking, UI walkthroughs) so lessons lean on video.
+ * The two are reported separately and never gate each other. Best-effort: a
+ * missing/invalid result is treated as "ok" with no flags.
  * @returns {Promise<{ decision: "ok"|"caution"|"refuse", reason: string, video_heavy: boolean }>}
  */
 export async function classifyTopic({ topic, language, courseMd, modelConfig }, ctx) {
@@ -3795,7 +3798,7 @@ Pick exactly one "decision":
 - "caution" — ALLOW but require careful, responsible treatment of a legitimate yet sensitive or potentially dangerous subject (medicine, mental health, self-defense, defensive security, hazardous chemistry/electricity, weapons as history, drugs/addiction, extremism studied as a subject). The course must stay strictly educational, add safety caveats, and never give operational harm-enabling detail.
 - "ok" — everything else.
 
-Set "video_heavy": true when the subject is learned mainly by WATCHING and is easier to find on YouTube — internet memes and viral moments, dances or sports moves, music / instrument technique, cooking, crafts / DIY, makeup, software UI walkthroughs.
+Separately, set "video_heavy": true when the subject is learned mainly by WATCHING and is easier to find on YouTube — internet memes and viral moments, dances or sports moves, music / instrument technique, cooking, crafts / DIY, makeup, software UI walkthroughs. This is an INDEPENDENT, positive content hint, unrelated to the safety decision: set it whenever it fits, including for an "ok" or "caution" topic. It never restricts anything.
 
 Return the decision, an optional reason, and video_heavy.`;
   ctx?.progress?.({ label: "checking topic" });

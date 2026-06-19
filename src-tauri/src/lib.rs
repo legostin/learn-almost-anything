@@ -785,11 +785,14 @@ fn start_build_structure(
     let reuse_topic = profile.reuse_thread_per_topic();
 
     thread::spawn(move || {
-        // Content-safety + strategy gate (runs once, before any generation).
-        // Hard-refuse genuinely harmful topics; flag sensitive ones for cautious
-        // treatment and meme/"better-on-YouTube" ones for video-heavy lessons.
-        // Best-effort: a classifier error falls through as "ok" — the structure
-        // and lesson prompts carry the same guidance as a second layer.
+        // Two INDEPENDENT automatic triggers at course creation, assessed in one
+        // pass but kept apart on purpose (the video signal is NOT censorship):
+        //   1. Safety — hard-refuse a genuinely harmful topic ("refuse"), or mark a
+        //      sensitive one for cautious, responsible treatment ("caution").
+        //   2. Content strategy (a positive enhancement) — mark a watch-first topic
+        //      (memes, demos, cooking, UI walkthroughs) so the course leans into
+        //      video lessons. Applies regardless of the safety decision.
+        // Best-effort: a classifier error falls through as "ok" with no flags.
         let mut cautious = false;
         let mut video_heavy = false;
         {
