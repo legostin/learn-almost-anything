@@ -665,6 +665,28 @@ fn count_generated_lessons(conn: &rusqlite::Connection, course_id: &str) -> Resu
         .count())
 }
 
+// The course-relative path for a widget file ref. Prefers stripping course_root
+// (resolving symlinks first), and falls back to the path segment after the
+// <course_id> directory so a stale absolute path from a prior store location
+// (e.g. left by the LEG-46 legacy → ~/.laa-course migration) still resolves.
+// Returns None when the ref isn't part of this course's files.
+fn course_relative_path(path: &Path, course_root: &Path) -> Option<String> {
+    let canon = path.canonicalize().ok();
+    let probe = canon.as_deref().unwrap_or(path);
+    if let Ok(rel) = probe.strip_prefix(course_root) {
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        return (!rel.is_empty()).then_some(rel);
+    }
+    let course_id = course_root.file_name()?.to_str()?;
+    let comps: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let idx = comps.iter().rposition(|c| *c == course_id)?;
+    let rel = comps[idx + 1..].join("/");
+    (!rel.is_empty()).then_some(rel)
+}
+
 fn rewrite_local_file_refs(
     value: &mut Value,
     course_root: &Path,
@@ -675,23 +697,25 @@ fn rewrite_local_file_refs(
             let Some(path) = local_path_from_ref(s) else {
                 return Ok(());
             };
-            let Ok(canon) = path.canonicalize() else {
+            // Usually `path` is an absolute path under course_root, but a course
+            // migrated between store locations (LEG-46) can carry a stale absolute
+            // path pointing at the previous store. Recover the relative path either
+            // way and read the file from the current store (the migration copied it
+            // there). Without this, publishing such a course silently drops its
+            // images and downloads render them broken.
+            let Some(rel) = course_relative_path(&path, course_root) else {
                 return Ok(());
             };
-            if !canon.starts_with(course_root) {
+            let abs = course_root.join(&rel);
+            if !abs.exists() {
                 return Ok(());
             }
-            let rel = canon
-                .strip_prefix(course_root)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .replace('\\', "/");
             if !files.contains_key(&rel) {
-                let bytes = fs::read(&canon).map_err(|e| e.to_string())?;
+                let bytes = fs::read(&abs).map_err(|e| e.to_string())?;
                 files.insert(
                     rel.clone(),
                     CatalogFilePackage {
-                        media_type: media_type_for_path(&canon),
+                        media_type: media_type_for_path(&abs),
                         path: rel.clone(),
                         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                     },
