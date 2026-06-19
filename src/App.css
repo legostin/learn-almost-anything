@@ -10193,3 +10193,53 @@ textarea.le-cap {
   color: var(--text);
   cursor: pointer;
 }
+/* Selection bubble menu (formatting chips + AI) */
+.bubble-menu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+.bubble-menu button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.bubble-menu button:hover {
+  background: var(--surface-hover);
+}
+.bubble-menu button.active {
+  background: var(--surface-hover);
+  font-weight: 600;
+}
+.bubble-menu .bubble-ai-btn {
+  color: #9333ea;
+}
+.bubble-ai {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.bubble-ai input {
+  width: 260px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
