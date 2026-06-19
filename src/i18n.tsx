@@ -375,6 +375,7 @@ const STRINGS = {
     optMulti: "множественный выбор",
     optSingle: "один вариант",
     saving: "Сохраняю…",
+    editorSlashHint: "Введите текст или «/» для команд…",
 
     builderIntro:
       "Ответы сохранены. Агент исследует тему и предложит план курса. Это займёт от 30 секунд до 2 минут. Интерфейс не блокируется — можно переключиться на другой курс.",
@@ -1253,6 +1254,7 @@ const STRINGS = {
     optMulti: "multiple choice",
     optSingle: "single choice",
     saving: "Saving…",
+    editorSlashHint: "Type text, or '/' for commands…",
 
     builderIntro:
       "Your answers are saved. The agent will research the topic and propose a course plan. This takes 30 seconds to 2 minutes. The interface stays responsive — you can switch courses.",

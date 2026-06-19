@@ -10045,3 +10045,58 @@ textarea.le-cap {
 .block-editor-content .ProseMirror > * + * {
   margin-top: 0.7em;
 }
+.block-editor-hint {
+  font-size: 12px;
+  color: var(--text-subtle);
+}
+/* Empty-block placeholder hint */
+.block-editor-content .ProseMirror p.is-editor-empty:first-child::before,
+.block-editor-content .ProseMirror .is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-subtle);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+/* "/" slash command menu */
+.slash-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 240px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.slash-menu.slash-empty {
+  color: var(--text-subtle);
+  padding: 10px 12px;
+}
+.slash-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.slash-item.active {
+  background: var(--surface-hover);
+}
+.slash-title {
+  font-size: 14px;
+  color: var(--text);
+}
+.slash-hint {
+  font-size: 12px;
+  color: var(--text-subtle);
+}
