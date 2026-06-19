@@ -335,6 +335,12 @@ const REFERENCE_MCP_ALLOWED_TOOLS = [
 // built-in WebSearch + WebFetch tools — native internet on subscription auth,
 // no key needed. When braveApiKey is provided, the Brave MCP server is added
 // too (its image search complements web search for finding real image URLs).
+// Generous hard ceiling for agentic tool-use loops. NOT a research/quality
+// knob — research effort is guided in the prompt; this is purely a runaway
+// backstop set far above any real article's needs, so complex lessons are never
+// aborted mid-generation with "max turns reached".
+const MAX_AGENT_TURNS = 200;
+
 function buildClaudeOptions({
   maxTurns,
   web,
@@ -355,7 +361,7 @@ function buildClaudeOptions({
     // Generous ceiling so the agent never errors with "max turns reached"
     // before it writes the article. Research depth is throttled in the prompt
     // (a few targeted lookups, then write), not by starving the turn budget.
-    maxTurns: maxTurns ?? (hasTools ? 10 : 1),
+    maxTurns: maxTurns ?? (hasTools ? MAX_AGENT_TURNS : 1),
     ...claudeBaseOptions(modelOptions(modelConfig)),
   };
   const allowedTools = [];
@@ -925,7 +931,7 @@ If no widgets, use []. If no sources, use [].`;
     braveApiKey,
     modelConfig,
     dirs: spaceDirs,
-    maxTurns: genProfile?.researchMaxTurns,
+    maxTurns: MAX_AGENT_TURNS,
     category,
     stage: "draft",
     customMcp,
@@ -1833,7 +1839,7 @@ Shape:
     web: true,
     modelConfig,
     dirs: spaceDirs,
-    maxTurns: genProfile?.researchMaxTurns,
+    maxTurns: MAX_AGENT_TURNS,
     stage: "structure",
     customMcp,
     // LEG-36: continue the wizard's session so the topic prefix stays cached.
@@ -1936,7 +1942,7 @@ Shape:
     stage: "structure",
     // Roadmap research (existing roadmaps + URL verification) is turn-hungry
     // and has no generation profile to size it.
-    maxTurns: 40,
+    maxTurns: MAX_AGENT_TURNS,
   });
   const parsed = extractJson(text);
   if (!Array.isArray(parsed?.stages) || parsed.stages.length === 0) {
@@ -2116,7 +2122,7 @@ Output ONLY a JSON object on a single line:
   const text = await runStreamed(prompt, ctx?.progress, {
     web: true,
     modelConfig,
-    maxTurns: 30,
+    maxTurns: MAX_AGENT_TURNS,
   });
   return normalizeMcpCandidates(extractJson(text));
 }
@@ -2229,7 +2235,7 @@ Output ONLY a JSON object on a single line:
   const text = await runStreamed(prompt, ctx?.progress, {
     web: true,
     modelConfig,
-    maxTurns: 24,
+    maxTurns: MAX_AGENT_TURNS,
   });
   const parsed = extractJson(text);
   const reply =
@@ -2441,7 +2447,7 @@ Answer in ${lang}, in Markdown. Be concise but complete; use examples or code wh
     // space dirs) so an image question is grounded identically across backends.
     for await (const m of query({
       prompt: userPrompt(),
-      options: buildClaudeOptions({ maxTurns: 10, web: true, modelConfig, dirs: spaceDirs }),
+      options: buildClaudeOptions({ maxTurns: MAX_AGENT_TURNS, web: true, modelConfig, dirs: spaceDirs }),
     })) {
       if (m.type === "result" && m.subtype === "success") text = m.result;
     }
@@ -2819,7 +2825,7 @@ Output ONLY a JSON object on a single line, no prose, no markdown fence:
     modelConfig,
     category,
     stage: "verify",
-    maxTurns: 14,
+    maxTurns: MAX_AGENT_TURNS,
   });
   return normalizeFactCheck(extractJson(text));
 }
