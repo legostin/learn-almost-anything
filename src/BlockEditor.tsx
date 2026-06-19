@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
-import { invoke } from "./transport";
 import StarterKit from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import { CodeBlock } from "./editorCode";
@@ -174,6 +173,8 @@ export function BlockEditor({
   onSave,
   onPersist,
   onReadWidgets,
+  onAskAssistant,
+  reloadKey,
   onClose,
 }: {
   article: string;
@@ -186,6 +187,13 @@ export function BlockEditor({
   // backend image/AI op can read it), and re-read widget data after the op.
   onPersist: (markdown: string, widgets: Record<string, unknown>) => Promise<void>;
   onReadWidgets: () => Promise<Record<string, unknown>>;
+  // Open the course assistant focused on the selected text (replaces the old
+  // one-shot edit_text). The editor persists the draft first so the assistant
+  // operates on current content.
+  onAskAssistant: (selection: string) => void | Promise<void>;
+  // Bumped by the parent after the assistant changes the lesson; the editor
+  // reloads the article + widgets to reflect it.
+  reloadKey?: number;
   onClose: () => void;
 }) {
   const t = useT();
@@ -230,6 +238,24 @@ export function BlockEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
+  // After the assistant edits the lesson the parent bumps reloadKey; reload the
+  // article + widgets so the editor reflects the change (the draft was persisted
+  // before the assistant ran, so nothing unsaved is lost). The first observed
+  // value just initializes the baseline — it never re-loads on mount.
+  const lastReloadKey = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!editor) return;
+    if (lastReloadKey.current === undefined || reloadKey === lastReloadKey.current) {
+      lastReloadKey.current = reloadKey;
+      return;
+    }
+    lastReloadKey.current = reloadKey;
+    const api = (editor.storage as unknown as { widget: WidgetStorage }).widget;
+    api.widgets = { ...widgets };
+    editor.commands.setContent(isolateWidgetMarkers(article));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, reloadKey]);
+
   const save = async () => {
     if (!editor || saving) return;
     setSaving(true);
@@ -242,35 +268,18 @@ export function BlockEditor({
     }
   };
 
-  // Selection AI: rewrite/extend the selected text. Context = the whole article
-  // (course brief + space context are added server-side as edit_text grows).
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiInstr, setAiInstr] = useState("");
-  const [aiBusy, setAiBusy] = useState(false);
-  const runAi = async () => {
-    if (!editor || aiBusy) return;
-    const instruction = aiInstr.trim();
+  // Selection AI: hand the selected text to the course assistant's full chat
+  // interface (instead of a silent one-shot edit). Persist the current draft so
+  // the assistant works on up-to-date content; the editor reloads via reloadKey
+  // once the assistant applies a change.
+  const openAssistant = async () => {
+    if (!editor) return;
     const { from, to } = editor.state.selection;
-    const selection = editor.state.doc.textBetween(from, to, "\n");
-    if (!instruction || !selection.trim()) return;
-    setAiBusy(true);
-    try {
-      const result = await invoke<string>("edit_text", {
-        courseId: ctx.courseId,
-        selection,
-        instruction,
-        context: editorMarkdown(editor),
-      });
-      if (typeof result === "string" && result.trim()) {
-        editor.chain().focus().insertContentAt({ from, to }, result.trim()).run();
-      }
-      setAiOpen(false);
-      setAiInstr("");
-    } catch (e) {
-      console.error("edit_text failed", e);
-    } finally {
-      setAiBusy(false);
-    }
+    const selection = editor.state.doc.textBetween(from, to, "\n").trim();
+    if (!selection) return;
+    const store = (editor.storage as unknown as { widget: WidgetStorage }).widget.widgets;
+    await onPersist(editorMarkdown(editor), referencedWidgets(editor, store));
+    await onAskAssistant(selection);
   };
 
   return (
@@ -292,76 +301,48 @@ export function BlockEditor({
           options={{ placement: "bottom-start", offset: 8 }}
           className="bubble-menu"
         >
-          {aiOpen ? (
-            <div className="bubble-ai">
-              <input
-                autoFocus
-                value={aiInstr}
-                disabled={aiBusy}
-                placeholder="Попросите ИИ: переписать, дополнить мысль…"
-                onChange={(e) => setAiInstr(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void runAi();
-                  } else if (e.key === "Escape") {
-                    setAiOpen(false);
-                  }
-                }}
-              />
-              <button onMouseDown={(e) => { e.preventDefault(); void runAi(); }} disabled={aiBusy}>
-                {aiBusy ? "…" : "OK"}
-              </button>
-              <button className="ghost" onMouseDown={(e) => { e.preventDefault(); setAiOpen(false); }} disabled={aiBusy}>
-                ✕
-              </button>
-            </div>
-          ) : (
-            <>
-              <button
-                className={editor.isActive("bold") ? "active" : ""}
-                title="Жирный"
-                onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }}
-              >
-                <b>B</b>
-              </button>
-              <button
-                className={editor.isActive("italic") ? "active" : ""}
-                title="Курсив"
-                onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }}
-              >
-                <i>I</i>
-              </button>
-              <button
-                className={editor.isActive("code") ? "active" : ""}
-                title="Код"
-                onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleCode().run(); }}
-              >
-                {"</>"}
-              </button>
-              <button
-                className={editor.isActive("heading", { level: 2 }) ? "active" : ""}
-                title="Заголовок"
-                onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleHeading({ level: 2 }).run(); }}
-              >
-                H
-              </button>
-              <button
-                className={editor.isActive("blockquote") ? "active" : ""}
-                title="Цитата"
-                onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleBlockquote().run(); }}
-              >
-                ❝
-              </button>
-              <button
-                className="bubble-ai-btn"
-                title="Изменить через ИИ"
-                onMouseDown={(e) => { e.preventDefault(); setAiOpen(true); }}
-              >
-                ✨ ИИ
-              </button>
-            </>
-          )}
+          <button
+            className={editor.isActive("bold") ? "active" : ""}
+            title="Жирный"
+            onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }}
+          >
+            <b>B</b>
+          </button>
+          <button
+            className={editor.isActive("italic") ? "active" : ""}
+            title="Курсив"
+            onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }}
+          >
+            <i>I</i>
+          </button>
+          <button
+            className={editor.isActive("code") ? "active" : ""}
+            title="Код"
+            onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleCode().run(); }}
+          >
+            {"</>"}
+          </button>
+          <button
+            className={editor.isActive("heading", { level: 2 }) ? "active" : ""}
+            title="Заголовок"
+            onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleHeading({ level: 2 }).run(); }}
+          >
+            H
+          </button>
+          <button
+            className={editor.isActive("blockquote") ? "active" : ""}
+            title="Цитата"
+            onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().toggleBlockquote().run(); }}
+          >
+            ❝
+          </button>
+          <button
+            className="bubble-ai-btn"
+            title="Открыть ассистента для этого фрагмента"
+            onMouseDown={(e) => { e.preventDefault(); void openAssistant(); }}
+          >
+            ✨ ИИ
+          </button>
         </BubbleMenu>
       )}
       <EditorContent editor={editor} className="block-editor-content" />

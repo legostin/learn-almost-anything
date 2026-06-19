@@ -9580,6 +9580,8 @@ function CourseAssistant({
   submoduleId,
   target,
   onTargetConsumed,
+  editSeed,
+  onEditSeedConsumed,
   socraticSeed,
   onSocraticConsumed,
   deepenSeed,
@@ -9592,6 +9594,9 @@ function CourseAssistant({
   submoduleId: string;
   target?: AssistantTarget | null;
   onTargetConsumed?: () => void;
+  // Editor "✨ ИИ": open the panel focused on the selected article text.
+  editSeed?: { fragment: string } | null;
+  onEditSeedConsumed?: () => void;
   socraticSeed?: SocraticSeed | null;
   onSocraticConsumed?: () => void;
   deepenSeed?: number | null;
@@ -9851,6 +9856,17 @@ function CourseAssistant({
     setCandidates([]);
     onTargetConsumed?.();
   }, [target, onTargetConsumed]);
+
+  // Consume an editor edit-seed: open the panel focused on the selected article
+  // text (as a fragment), so the writer can ask the assistant to rewrite/extend
+  // it or add widgets/images — in the assistant's own chat interface.
+  useEffect(() => {
+    if (!editSeed) return;
+    setMode("chat");
+    setOpen(true);
+    setFragment(editSeed.fragment);
+    onEditSeedConsumed?.();
+  }, [editSeed, onEditSeedConsumed]);
 
   // Consume a "go deeper" trigger from the end-of-article button: open the
   // panel and ask — without an LLM call — which direction to expand. The
@@ -10355,6 +10371,10 @@ function SubmoduleView({
   const editingRef = useRef(false);
   editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
+  // Editor "✨ ИИ" → open the assistant on the selected text; reloadKey re-syncs
+  // the open editor after the assistant changes the lesson.
+  const [editAssistantSeed, setEditAssistantSeed] = useState<{ fragment: string } | null>(null);
+  const [editorReloadKey, setEditorReloadKey] = useState(0);
   const [socraticSeed, setSocraticSeed] = useState<SocraticSeed | null>(null);
   const [deepenSeed, setDeepenSeed] = useState<number | null>(null);
   const [recallCards, setRecallCards] = useState<Record<string, SubCard>>({});
@@ -10591,11 +10611,17 @@ function SubmoduleView({
           submoduleId={submoduleId}
           target={assistantTarget}
           onTargetConsumed={() => setAssistantTarget(null)}
+          editSeed={editAssistantSeed}
+          onEditSeedConsumed={() => setEditAssistantSeed(null)}
           socraticSeed={socraticSeed}
           onSocraticConsumed={() => setSocraticSeed(null)}
           deepenSeed={deepenSeed}
           onDeepenConsumed={() => setDeepenSeed(null)}
-          onChanged={reloadContent}
+          onChanged={async () => {
+            await reloadContent();
+            // Re-sync the editor if it's open (assistant edited the lesson).
+            setEditorReloadKey((k) => k + 1);
+          }}
           onOpenSubmodule={onOpenSubmodule}
         />
       )}
@@ -10660,6 +10686,8 @@ function SubmoduleView({
             });
             return c?.widgets ?? {};
           }}
+          onAskAssistant={(selection) => setEditAssistantSeed({ fragment: selection })}
+          reloadKey={editorReloadKey}
           onClose={() => setEditing(false)}
         />
       )}
