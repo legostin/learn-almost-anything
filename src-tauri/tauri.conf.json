@@ -23,7 +23,8 @@
         "enable": true,
         "scope": [
           "$APPDATA/**",
-          "$HOME/Library/Application Support/com.legostin.learnanything/**"
+          "$HOME/Library/Application Support/com.legostin.learnanything/**",
+          "$HOME/.laa-course/**"
         ]
       }
     }
