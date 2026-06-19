@@ -683,8 +683,13 @@ fn course_relative_path(path: &Path, course_root: &Path) -> Option<String> {
         .filter_map(|c| c.as_os_str().to_str())
         .collect();
     let idx = comps.iter().rposition(|c| *c == course_id)?;
-    let rel = comps[idx + 1..].join("/");
-    (!rel.is_empty()).then_some(rel)
+    let tail = &comps[idx + 1..];
+    // Reject traversal / relative components so the recovered path can never
+    // escape the course dir (the bytes are read from course_root.join(rel)).
+    if tail.is_empty() || tail.iter().any(|c| *c == ".." || *c == ".") {
+        return None;
+    }
+    Some(tail.join("/"))
 }
 
 fn rewrite_local_file_refs(
@@ -707,7 +712,14 @@ fn rewrite_local_file_refs(
                 return Ok(());
             };
             let abs = course_root.join(&rel);
-            if !abs.exists() {
+            // Containment guard: only bundle a file that resolves to a location
+            // INSIDE course_root (canonicalize also confirms it exists). Both sides
+            // are canonicalized so symlinks/.. can't be used to escape the store.
+            let inside = match (abs.canonicalize(), course_root.canonicalize()) {
+                (Ok(a), Ok(root)) => a.starts_with(&root),
+                _ => false,
+            };
+            if !inside {
                 return Ok(());
             }
             if !files.contains_key(&rel) {
