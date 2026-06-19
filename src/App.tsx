@@ -318,6 +318,22 @@ function findNodeById(mods: ModuleNode[] | undefined, id: string): ModuleNode | 
   return undefined;
 }
 
+// Recursive title lookup for wiki-link resolution — returns the matched node and
+// its immediate parent's id (undefined for a top-level node). Searches the whole
+// tree so deeply-nested documentation pages resolve, not just 2-level courses.
+function findNodeByTitle(
+  mods: ModuleNode[] | undefined,
+  norm: string,
+  parentId?: string
+): { node: ModuleNode; parentId?: string } | undefined {
+  for (const m of mods ?? []) {
+    if (m.title.trim().toLowerCase() === norm) return { node: m, parentId };
+    const hit = findNodeByTitle(m.submodules, norm, m.id);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 type ChatRole = "user" | "agent" | "system";
 
 type ChatMessage = {
@@ -10504,14 +10520,13 @@ function SubmoduleView({
   // Resolve a wiki-link (course://article/<title>) to its submodule by title and navigate.
   const openArticleByTitle = (title: string) => {
     const norm = title.trim().toLowerCase();
-    for (const m of tree!.modules) {
-      for (const s of m.submodules) {
-        if (s.title.trim().toLowerCase() === norm) {
-          onOpenSubmodule(m.id, s.id);
-          return;
-        }
-      }
-    }
+    const found = findNodeByTitle(tree?.modules, norm);
+    if (!found) return;
+    // Documentation stores every node's content under ("_doc", id) regardless of
+    // depth; other formats address it under its immediate parent module.
+    const modId =
+      course?.course_format === "documentation" ? "_doc" : found.parentId ?? found.node.id;
+    onOpenSubmodule(modId, found.node.id);
   };
   // Soft prerequisites (non-linear courses): unmet earlier submodules, matched by
   // title across the tree. Non-blocking — a hint with links, never a hard lock.
