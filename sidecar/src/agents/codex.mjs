@@ -411,6 +411,20 @@ function withImageInput(prompt, opts) {
   return prompt;
 }
 
+// A model newer than the installed Codex CLI yields a deterministic HTTP 400
+// whose raw message is opaque ("...requires a newer version of Codex..."). Turn
+// it into clear, actionable guidance; pass other errors through unchanged.
+function describeCodexError(msg) {
+  const s = String(msg || "");
+  if (
+    /requires a newer version of Codex/i.test(s) ||
+    (/\b400\b/.test(s) && /model/i.test(s) && /(upgrade|newer version)/i.test(s))
+  ) {
+    return `The selected model isn't supported by your installed Codex CLI (${s.trim()}). Update the Codex CLI (npm i -g @openai/codex) or pick a supported model in Settings.`;
+  }
+  return s;
+}
+
 async function runOnce(prompt, outputSchema, opts) {
   opts = { ...opts, modelConfig: await resolveModelConfig(opts?.modelConfig) };
   const rec = devlog.startCall({ backend: "codex", prompt, model: opts?.modelConfig?.model });
@@ -477,7 +491,7 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
       if (ev.type === "turn.started") {
         onProgress({ label: "thinking" });
       } else if (ev.type === "turn.failed") {
-        throw new Error(ev.error?.message || "codex turn failed");
+        throw new Error(describeCodexError(ev.error?.message) || "codex turn failed");
       } else if (ev.type === "item.started" || ev.type === "item.updated") {
         const item = ev.item;
         if (!item) continue;
@@ -516,7 +530,7 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
           rec.tool("mcp", `${item.server}.${item.tool}`);
         }
       } else if (ev.type === "error") {
-        throw new Error(ev.message || "codex stream error");
+        throw new Error(describeCodexError(ev.message) || "codex stream error");
       }
     }
     if (!final.trim()) throw new Error("Codex response missing final message");
