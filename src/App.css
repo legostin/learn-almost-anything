@@ -10100,3 +10100,51 @@ textarea.le-cap {
   font-size: 12px;
   color: var(--text-subtle);
 }
+/* Widget blocks inside the inline editor */
+.we-widget {
+  position: relative;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-hover);
+}
+.we-widget.ProseMirror-selectednode {
+  outline: 2px solid var(--border-strong);
+}
+.we-badge {
+  display: inline-block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+.we-img {
+  display: block;
+  max-width: 100%;
+  border-radius: 6px;
+}
+.we-gallery {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+.we-gallery img,
+.we-cell {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--surface);
+}
+.we-code {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}
+.we-muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}

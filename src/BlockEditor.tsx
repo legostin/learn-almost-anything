@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
 import Placeholder from "@tiptap/extension-placeholder";
 import { SlashCommands, type SlashCommand } from "./editorSlash";
+import { WidgetNode, WIDGET_TYPES, newWidgetId, defaultWidgetData } from "./editorWidget";
 import { useT, useLang } from "./i18n";
 
 // Localized "/" command labels (kept here rather than i18n.tsx to avoid dozens
@@ -19,6 +20,13 @@ const SLASH_LABELS = {
     quote: ["Цитата", "Блок цитаты"],
     code: ["Код", "Блок кода"],
     hr: ["Разделитель", "Горизонтальная линия"],
+    image: ["Изображение", "Картинка с поиском/загрузкой"],
+    gallery: ["Галерея", "Несколько изображений"],
+    diagram: ["Диаграмма", "Mermaid-схема"],
+    video: ["Видео", "Встроенное видео"],
+    interactive: ["Интерактив", "Интерактивный виджет"],
+    checkpoint: ["Проверка", "Вопрос для самопроверки"],
+    recall: ["Карточка", "Карточка для запоминания"],
   },
   en: {
     text: ["Text", "Plain paragraph"],
@@ -30,6 +38,13 @@ const SLASH_LABELS = {
     quote: ["Quote", "Block quote"],
     code: ["Code", "Code block"],
     hr: ["Divider", "Horizontal rule"],
+    image: ["Image", "Picture with search/upload"],
+    gallery: ["Gallery", "Multiple images"],
+    diagram: ["Diagram", "Mermaid chart"],
+    video: ["Video", "Embedded video"],
+    interactive: ["Interactive", "Interactive widget"],
+    checkpoint: ["Checkpoint", "Self-check question"],
+    recall: ["Recall card", "Memory card"],
   },
 } as const;
 
@@ -41,6 +56,13 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
     keywords,
     run,
   });
+  const insertWidget = (wtype: string): SlashCommand["run"] => (e, r) => {
+    const id = newWidgetId(wtype);
+    const store = (e.storage as unknown as { widget: { widgets: Record<string, unknown> } }).widget
+      .widgets;
+    store[id] = defaultWidgetData(wtype);
+    e.chain().focus().deleteRange(r).insertContent({ type: "widget", attrs: { id, wtype } }).run();
+  };
   return [
     mk("text", "text paragraph текст абзац", (e, r) =>
       e.chain().focus().deleteRange(r).setNode("paragraph").run()
@@ -69,22 +91,32 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
     mk("hr", "divider horizontal rule разделитель линия", (e, r) =>
       e.chain().focus().deleteRange(r).setHorizontalRule().run()
     ),
+    mk("image", "image picture изображение картинка фото", insertWidget("image")),
+    mk("gallery", "gallery images галерея изображения", insertWidget("gallery")),
+    mk("diagram", "diagram mermaid диаграмма схема", insertWidget("diagram")),
+    mk("video", "video видео ролик", insertWidget("video")),
+    mk("interactive", "interactive widget интерактив виджет", insertWidget("interactive")),
+    mk("checkpoint", "checkpoint question проверка вопрос", insertWidget("checkpoint")),
+    mk("recall", "recall flashcard карточка запоминание", insertWidget("recall")),
   ];
 }
 
 // LEG-21 — inline WYSIWYG block editor (Tiptap). Edits article prose directly in
-// the rendered layout, with a "/" slash menu to insert blocks. Round-trips
-// through markdown; ::widget markers + math are preserved verbatim as text for
-// now (rich per-widget block editing is the next step).
+// the rendered layout with a "/" slash menu to insert blocks AND widgets (image,
+// gallery, diagram, video, interactive, checkpoint, recall). Widgets round-trip
+// to ::widget markers; their data is carried in editor storage and returned on
+// save. Per-widget configuration (image search/upload, source, fixes) is next.
 export function BlockEditor({
   article,
+  widgets,
   busy,
   onSave,
   onClose,
 }: {
   article: string;
+  widgets: Record<string, unknown>;
   busy?: boolean;
-  onSave: (markdown: string) => void | Promise<void>;
+  onSave: (markdown: string, widgets: Record<string, unknown>) => void | Promise<void>;
   onClose: () => void;
 }) {
   const t = useT();
@@ -93,6 +125,7 @@ export function BlockEditor({
   const editor = useEditor({
     extensions: [
       StarterKit,
+      WidgetNode,
       Markdown.configure({
         html: false,
         tightLists: true,
@@ -102,20 +135,39 @@ export function BlockEditor({
       }),
       Placeholder.configure({
         includeChildren: false,
-        placeholder: ({ node }) =>
-          node.type.name === "paragraph" ? t("editorSlashHint") : "",
+        placeholder: ({ node }) => (node.type.name === "paragraph" ? t("editorSlashHint") : ""),
       }),
       SlashCommands.configure({ commands: buildSlashCommands(lang === "ru" ? "ru" : "en") }),
     ],
-    content: article,
+    content: "",
   });
+
+  // Load widget data into editor storage, then parse the article (so widget
+  // node-views can resolve their data). Once per open.
+  useEffect(() => {
+    if (!editor) return;
+    (editor.storage as unknown as { widget: { widgets: Record<string, unknown> } }).widget.widgets = {
+      ...widgets,
+    };
+    editor.commands.setContent(article);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor]);
 
   const save = async () => {
     if (!editor || saving) return;
     setSaving(true);
     try {
       const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
-      await onSave(md);
+      // Keep only widgets still referenced in the doc (drop deleted ones).
+      const referenced = new Set<string>();
+      editor.state.doc.descendants((node) => {
+        if (node.type.name === "widget" && node.attrs.id) referenced.add(node.attrs.id as string);
+      });
+      const store = (editor.storage as unknown as { widget: { widgets: Record<string, unknown> } })
+        .widget.widgets;
+      const widgetsOut: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(store)) if (referenced.has(k)) widgetsOut[k] = v;
+      await onSave(md, widgetsOut);
     } finally {
       setSaving(false);
     }
@@ -138,3 +190,5 @@ export function BlockEditor({
     </div>
   );
 }
+
+export { WIDGET_TYPES };

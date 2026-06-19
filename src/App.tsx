@@ -10605,14 +10605,15 @@ function SubmoduleView({
       {editing && editorKind === "beta" && (
         <BlockEditor
           article={content?.article ?? ""}
+          widgets={(content?.widgets as Record<string, unknown>) ?? {}}
           busy={enriching}
-          onSave={async (md) => {
+          onSave={async (md, widgetsOut) => {
             await invoke("save_lesson_content", {
               courseId: course.id,
               moduleId,
               submoduleId,
               article: md,
-              widgets: (content?.widgets as Record<string, WidgetData>) ?? {},
+              widgets: widgetsOut,
               markReady: state !== "ready",
             });
             setEditing(false);
