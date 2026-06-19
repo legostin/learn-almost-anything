@@ -3600,9 +3600,12 @@ Below is the course brief — a markdown file with the wizard Q&A.
 ${courseMd}
 </course-md>
 ${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}
-First generate a short display title for the whole course. It must NOT copy the
-learner's raw request verbatim. Make it a concise noun phrase, 2-6 words,
-written in language "${lang}", with no quotes and no "course about/on" wrapper.
+First generate a short display title for the whole course, written in language
+"${lang}", with no quotes and no "course about/on" wrapper. ${
+    courseFormat === "fact_check"
+      ? `This is a FACT-CHECK: the title MUST clearly identify the SPECIFIC claim being examined so it is instantly recognizable (concise, e.g. "Вакцины и аутизм", "Миф: Великая стена видна из космоса") — NEVER a generic label like "проверка гипотезы", "проверка факта" or "fact check".`
+      : `It must NOT copy the learner's raw request verbatim; make it a concise noun phrase, 2-6 words.`
+  }
 
 Then design a curriculum: a list of top-level modules, each with a few submodules.
 
