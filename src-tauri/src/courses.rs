@@ -1143,6 +1143,86 @@ pub fn structure_outline(structure: &StructureFile, current_module_id: &str) -> 
     serde_json::json!({ "modules": modules })
 }
 
+/// Collapse an article to a short, whitespace-normalized snippet for context.
+fn snippet_of(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        collapsed
+    } else {
+        let head: String = collapsed.chars().take(max_chars).collect();
+        format!("{head}…")
+    }
+}
+
+/// Documentation-only generation context. Unlike `read_previous_articles` (one
+/// adjacent article, order-based — wrong for a non-linear doc tree), this gives
+/// the page being written (1) its position in the outline (ancestor titles →
+/// this title) and (2) every OTHER page's title + summary + a short content
+/// snippet (best-effort; skipped when a page is not yet generated). Lets each
+/// page stay consistent as the documentation grows. Documentation content lives
+/// under ("_doc", id), so snippets are read from there.
+pub fn doc_pages_context(
+    paths: &AppPaths,
+    structure: &StructureFile,
+    current_sub_id: &str,
+) -> serde_json::Value {
+    const SNIPPET_CHARS: usize = 400;
+    let mut other_pages: Vec<serde_json::Value> = Vec::new();
+    let mut outline_path: Vec<String> = Vec::new();
+
+    fn walk(
+        paths: &AppPaths,
+        course_id: &str,
+        ancestors: &[String],
+        nodes: &[ModuleNode],
+        current_sub_id: &str,
+        other_pages: &mut Vec<serde_json::Value>,
+        outline_path: &mut Vec<String>,
+    ) {
+        for n in nodes {
+            let mut path = ancestors.to_vec();
+            path.push(n.title.clone());
+            if n.id == current_sub_id {
+                *outline_path = path.clone();
+            } else {
+                let mut entry = serde_json::json!({ "title": n.title });
+                if !n.summary.is_empty() {
+                    entry["summary"] = serde_json::json!(n.summary);
+                }
+                let article =
+                    submodule_dir(paths, course_id, "_doc", &n.id).join("article.md");
+                if let Ok(text) = fs::read_to_string(&article) {
+                    let snippet = snippet_of(&text, SNIPPET_CHARS);
+                    if !snippet.is_empty() {
+                        entry["snippet"] = serde_json::json!(snippet);
+                    }
+                }
+                other_pages.push(entry);
+            }
+            walk(
+                paths,
+                course_id,
+                &path,
+                &n.submodules,
+                current_sub_id,
+                other_pages,
+                outline_path,
+            );
+        }
+    }
+    walk(
+        paths,
+        &structure.course_id,
+        &[],
+        &structure.modules,
+        current_sub_id,
+        &mut other_pages,
+        &mut outline_path,
+    );
+
+    serde_json::json!({ "outlinePath": outline_path, "otherPages": other_pages })
+}
+
 /// Find a submodule's id and the id of its parent module within a tree.
 pub fn find_submodule_path<'a>(
     file: &'a StructureFile,

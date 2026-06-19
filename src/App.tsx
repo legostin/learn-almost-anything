@@ -158,6 +158,7 @@ type Course = {
   agent: Agent;
   created_at: number;
   updated_at: number;
+  generation_profile?: { tier?: string } | null;
   catalog_origin_id?: string | null;
   catalog_version?: number;
   catalog_synced_at?: number | null;
@@ -1389,13 +1390,28 @@ function App() {
       courseSuggestion.status === "ready" ? courseSuggestion.idea.topic : t("brand");
   }, [courseSuggestion, t]);
 
-  async function startSubmoduleGen(courseId: string, submoduleId: string) {
+  async function startSubmoduleGen(
+    courseId: string,
+    submoduleId: string,
+    opts?: { instructions?: string; tier?: string }
+  ) {
     try {
-      await invoke("start_generate_submodule", { courseId, submoduleId });
+      await invoke("start_generate_submodule", {
+        courseId,
+        submoduleId,
+        instructions: opts?.instructions ?? null,
+        tier: opts?.tier ?? null,
+      });
     } catch (e) {
       console.error("start_generate_submodule failed", e);
     }
   }
+
+  // Documentation per-page generation: the structure tree / reader request a
+  // modal (instructions + depth) instead of generating directly.
+  const [docGen, setDocGen] = useState<
+    { courseId: string; submoduleId: string; title: string } | null
+  >(null);
 
   async function startJob(courseId: string, kind: JobKind) {
     setJobs((prev) => {
@@ -1831,6 +1847,9 @@ function App() {
               openSubmodule(view.id, moduleId, submoduleId)
             }
             onStartSubGen={(submoduleId) => startSubmoduleGen(view.id, submoduleId)}
+            onDocGenRequest={(submoduleId, title) =>
+              setDocGen({ courseId: view.id, submoduleId, title })
+            }
             onDeleted={async () => {
               setView({ kind: "empty" });
               await refresh();
@@ -1850,6 +1869,9 @@ function App() {
             lastError={subErrors.get(view.submoduleId) ?? null}
             enriching={enrichingSubs.has(view.submoduleId)}
             onStartGen={(subId) => startSubmoduleGen(view.courseId, subId)}
+            onDocGenRequest={(submoduleId, title) =>
+              setDocGen({ courseId: view.courseId, submoduleId, title })
+            }
             onOpenSubmodule={(moduleId, submoduleId) =>
               openSubmodule(view.courseId, moduleId, submoduleId)
             }
@@ -1858,6 +1880,22 @@ function App() {
         </div>
       </main>
 
+      {docGen && (
+        <DocLessonModal
+          title={docGen.title}
+          submoduleId={docGen.submoduleId}
+          defaultTier={
+            (courses.find((c) => c.id === docGen.courseId)?.generation_profile
+              ?.tier as GenerationTier) || "balanced"
+          }
+          onClose={() => setDocGen(null)}
+          onSubmit={(instructions, tier) => {
+            const { courseId, submoduleId } = docGen;
+            setDocGen(null);
+            void startSubmoduleGen(courseId, submoduleId, { instructions, tier });
+          }}
+        />
+      )}
       {settingsOpen && (
         <SettingsModal
           onClose={() => {
@@ -6968,6 +7006,7 @@ function CourseView({
   onChanged,
   onOpenSub,
   onStartSubGen,
+  onDocGenRequest,
   onDeleted,
   onOpenCourse,
   onReview,
@@ -6980,6 +7019,8 @@ function CourseView({
   onChanged: () => void | Promise<void>;
   onOpenSub: (moduleId: string, submoduleId: string) => void;
   onStartSubGen: (submoduleId: string) => void | Promise<void>;
+  // Documentation only: open the per-page generation modal instead of generating.
+  onDocGenRequest?: (submoduleId: string, title: string) => void;
   onDeleted: () => void | Promise<void>;
   onOpenCourse: (id: string) => void;
   onReview: () => void;
@@ -7390,6 +7431,7 @@ function CourseView({
               course={course}
               onOpenSub={onOpenSub}
               onStartSubGen={onStartSubGen}
+              onDocGenRequest={onDocGenRequest}
             />
           ) : (
             <MasteryView course={course} onOpenSub={onOpenSub} onReview={onReview} />
@@ -7476,6 +7518,96 @@ function DeleteCourseModal({
           </button>
           <button className="danger" onClick={confirm} disabled={busy}>
             {busy ? t("deleting") : t("deleteConfirm")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Documentation per-page generation modal: the standard create flow minus the
+// course-type picker. Collects what to write on this page (persisted as the
+// node's instructions, pre-filled on regenerate) and a per-generation depth.
+function DocLessonModal({
+  title,
+  submoduleId,
+  defaultTier,
+  onSubmit,
+  onClose,
+}: {
+  title: string;
+  submoduleId: string;
+  defaultTier: GenerationTier;
+  onSubmit: (instructions: string, tier: GenerationTier) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [instructions, setInstructions] = useState("");
+  const [tier, setTier] = useState<GenerationTier>(defaultTier);
+  const [loaded, setLoaded] = useState(false);
+  // Pre-fill from any stored instructions, unless the user has already typed.
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    invoke<string | null>("get_module_instructions", { submoduleId })
+      .then((v) => {
+        if (alive && typeof v === "string" && !touchedRef.current) setInstructions(v);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setLoaded(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [submoduleId]);
+  const submit = () => {
+    if (loaded) onSubmit(instructions, tier);
+  };
+  return (
+    <div className="settings-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="modal doc-lesson-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("docLessonTitle")}</h2>
+        {title && <div className="field-note doc-lesson-page">{title}</div>}
+        <label>
+          {t("docLessonInstructionsLabel")}
+          <textarea
+            autoFocus
+            rows={5}
+            value={instructions}
+            onChange={(e) => {
+              touchedRef.current = true;
+              setInstructions(e.target.value);
+            }}
+            placeholder={t("docLessonInstructionsPlaceholder")}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+        </label>
+        <label>
+          {t("tierLabel")}
+          <FieldSelect
+            value={tier}
+            onChange={(v) => setTier(v as GenerationTier)}
+            options={GENERATION_TIERS.map((item) => ({
+              value: item.value,
+              title: t(item.titleKey),
+              desc: t(item.descKey),
+            }))}
+          />
+          <span className="field-note">{t("tierNote")}</span>
+        </label>
+        <span className="field-note">{t("docLessonNote")}</span>
+        <div className="modal-actions">
+          <button className="ghost" onClick={onClose}>
+            {t("cancel")}
+          </button>
+          <button onClick={submit} disabled={!loaded}>
+            {t("subGenerate")}
           </button>
         </div>
       </div>
@@ -8267,10 +8399,12 @@ function Structure({
   course,
   onOpenSub,
   onStartSubGen,
+  onDocGenRequest,
 }: {
   course: Course;
   onOpenSub: (moduleId: string, submoduleId: string) => void;
   onStartSubGen: (submoduleId: string) => void | Promise<void>;
+  onDocGenRequest?: (submoduleId: string, title: string) => void;
 }) {
   const t = useT();
   const [tree, setTree] = useState<StructureFile | null>(null);
@@ -8530,6 +8664,7 @@ function Structure({
                 await onStartSubGen(subId);
                 await reloadTree();
               }}
+              onDocGenRequest={onDocGenRequest}
             />
           )}
         </>
@@ -8662,12 +8797,16 @@ function StructureTree({
   tree,
   onOpenSub,
   onStartSubGen,
+  onDocGenRequest,
   hideCompletion = false,
   docMode = false,
 }: {
   tree: StructureFile;
   onOpenSub?: (moduleId: string, submoduleId: string) => void;
   onStartSubGen?: (submoduleId: string) => void;
+  // Documentation only: open the per-page generation modal (instructions +
+  // depth) instead of generating immediately. Used by the recursive doc render.
+  onDocGenRequest?: (submoduleId: string, title: string) => void;
   // Encyclopedia has no tests/homework, so suppress the "passed"/"ready"
   // completion checkmarks (keep generating/queued/failed indicators).
   hideCompletion?: boolean;
@@ -8693,7 +8832,11 @@ function StructureTree({
             <SubmoduleAction
               state={node.generation_state}
               onOpen={() => onOpenSub("_doc", node.id)}
-              onGenerate={() => onStartSubGen(node.id)}
+              onGenerate={() =>
+                onDocGenRequest
+                  ? onDocGenRequest(node.id, node.title)
+                  : onStartSubGen(node.id)
+              }
             />
           )}
         </div>
@@ -10163,6 +10306,7 @@ function SubmoduleView({
   lastError,
   enriching,
   onStartGen,
+  onDocGenRequest,
   onOpenSubmodule,
 }: {
   course?: Course;
@@ -10173,6 +10317,8 @@ function SubmoduleView({
   lastError: string | null;
   enriching: boolean;
   onStartGen: (submoduleId: string) => void | Promise<void>;
+  // Documentation only: open the per-page generation modal instead of generating.
+  onDocGenRequest?: (submoduleId: string, title: string) => void;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
 }) {
   const t = useT();
@@ -10492,6 +10638,10 @@ function SubmoduleView({
             ) : (
               <button
                 onClick={async () => {
+                  if (course?.course_format === "documentation" && onDocGenRequest) {
+                    onDocGenRequest(submoduleId, sub?.title ?? "");
+                    return;
+                  }
                   await onStartGen(submoduleId);
                   await reloadTree();
                 }}
@@ -10538,7 +10688,16 @@ function SubmoduleView({
                 ✎ {t("editLesson")}
               </button>
             )}
-            {confirmingRegen ? (
+            {course?.course_format === "documentation" && onDocGenRequest ? (
+              // Documentation: the modal subsumes the confirm step (it lets the
+              // user edit instructions/depth before overwriting the page).
+              <button
+                className="sub-regenerate"
+                onClick={() => onDocGenRequest(submoduleId, sub?.title ?? "")}
+              >
+                ↻ {t("subRegenerate")}
+              </button>
+            ) : confirmingRegen ? (
               <>
                 <span className="sub-regen-warn">{t("subRegenerateConfirm")}</span>
                 <button

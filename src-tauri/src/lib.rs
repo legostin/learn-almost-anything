@@ -1781,6 +1781,7 @@ fn spawn_next_queued_submodule(
         catalog_publish_target,
         true,
         true,
+        None,
     )?;
     if started {
         Ok(Some(sub_id))
@@ -1806,6 +1807,9 @@ fn spawn_generate_submodule(
     catalog_publish_target: Option<(String, String)>,
     course_serial: bool,
     continue_queued: bool,
+    // Per-generation depth override (documentation lesson modal). When set,
+    // replaces the course profile's tier for THIS draft only (not persisted).
+    tier_override: Option<String>,
 ) -> Result<bool, String> {
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1819,9 +1823,13 @@ fn spawn_generate_submodule(
     }
 
     let course_md = courses::read_course_md(&paths, &course.id).map_err(|e| e.to_string())?;
-    let structure = {
+    let (structure, user_instructions) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        courses::load_structure(&conn, &course.id).map_err(|e| e.to_string())?
+        let s = courses::load_structure(&conn, &course.id).map_err(|e| e.to_string())?;
+        // Per-page generation instructions (documentation lessons). Read from the
+        // DB so every path (modal, queue, bulk regen) honors stored directions.
+        let instr = db::get_module_instructions(&conn, &submodule_id).map_err(|e| e.to_string())?;
+        (s, instr)
     };
     let (mod_node, sub_node) = courses::find_submodule_path(&structure, &submodule_id)
         .ok_or_else(|| format!("submodule not found: {submodule_id}"))?;
@@ -1836,7 +1844,20 @@ fn spawn_generate_submodule(
         .iter()
         .map(|(name, content)| json!({ "filename": name, "content": content }))
         .collect();
-    let previous_articles = courses::read_previous_articles(&paths, &structure, &submodule_id);
+    let is_documentation = course.course_format == "documentation";
+    // Documentation is a non-linear, evolving tree: the single order-based
+    // "previous article" is wrong for it. Instead pass docPagesContext (this
+    // page's outline position + every other page's title/summary/snippet).
+    let previous_articles = if is_documentation {
+        Vec::new()
+    } else {
+        courses::read_previous_articles(&paths, &structure, &submodule_id)
+    };
+    let doc_pages_context = if is_documentation {
+        Some(courses::doc_pages_context(&paths, &structure, &submodule_id))
+    } else {
+        None
+    };
     // Compact outline (titles + current-module summaries only), not the full
     // tree: every lesson prompt carries this, so size matters.
     let structure_value = courses::structure_outline(&structure, &module_id);
@@ -1870,11 +1891,16 @@ fn spawn_generate_submodule(
             || course.course_format == "fact_check";
         // Resolved generation profile (per-course override else balanced default).
         // Drives stage gating + is passed to the sidecar for depth/pedagogy.
-        let profile: GenerationProfile = course
+        let mut profile: GenerationProfile = course
             .generation_profile
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        // Per-generation depth override (doc lesson modal): swap only the tier for
+        // this draft, leaving the course's explicit knobs intact. Not persisted.
+        if let Some(t) = tier_override.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            profile.tier = t.to_string();
+        }
         let skip_tests = profile.skip_tests();
         let skip_assignments = profile.skip_assignments();
         // Flashcards are an active-recall extra: skip on the lean pedagogy tier.
@@ -1923,6 +1949,16 @@ fn spawn_generate_submodule(
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
+        }
+        // Per-page user directions (documentation lesson modal): "what to write
+        // on this page". Surfaced as a prominent instructions block in the draft.
+        if let Some(instr) = user_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            common["userInstructions"] = json!(instr);
+        }
+        // Documentation: other pages' titles/summaries/snippets + this page's
+        // outline position, so the page is written consistently with the rest.
+        if let Some(ctx) = doc_pages_context {
+            common["docPagesContext"] = ctx;
         }
         // Fact-check lessons: pass the verifiable fact (claim is the topic;
         // attachments add an optional source URL and, for codex, an image to
@@ -5815,6 +5851,17 @@ fn start_illustrate_submodule(
     Ok(())
 }
 
+/// Read a documentation node's stored per-page generation instructions (used to
+/// pre-fill the doc lesson modal on regenerate). None when never set.
+#[tauri::command]
+fn get_module_instructions(
+    db_state: tauri::State<'_, Arc<Db>>,
+    submodule_id: String,
+) -> Result<Option<String>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::get_module_instructions(&conn, &submodule_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn start_generate_submodule(
     app: AppHandle,
@@ -5824,6 +5871,10 @@ fn start_generate_submodule(
     settings_state: tauri::State<'_, Arc<SettingsState>>,
     course_id: String,
     submodule_id: String,
+    // Doc lesson modal: per-page directions to persist, and a per-generation
+    // depth override. Both optional; absent for every non-documentation caller.
+    instructions: Option<String>,
+    tier: Option<String>,
 ) -> Result<(), String> {
     let course = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
@@ -5839,6 +5890,18 @@ fn start_generate_submodule(
         None => return Err(format!("submodule not found: {submodule_id}")),
         Some("generating") => return Ok(()), // already running — no-op
         _ => {}
+    }
+    // Persist the page's instructions before generating, so a later regenerate
+    // pre-fills them. Empty clears.
+    if let Some(instr) = instructions.as_deref() {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let trimmed = instr.trim();
+        db::set_module_instructions(
+            &conn,
+            &submodule_id,
+            if trimmed.is_empty() { None } else { Some(trimmed) },
+        )
+        .map_err(|e| e.to_string())?;
     }
     let writing_model = settings_state.stage_model(&course.agent, "writing");
     let tests_model = settings_state.stage_model(&course.agent, "tests");
@@ -5860,6 +5923,7 @@ fn start_generate_submodule(
         publish_target,
         false,
         true,
+        tier,
     )
     .map(|_| ())
 }
@@ -5904,6 +5968,7 @@ fn start_first_pending_submodule(
         publish_target,
         true,
         true,
+        None,
     )?;
     if started {
         Ok(Some(sub_id))
@@ -9430,6 +9495,7 @@ pub fn run() {
             start_structure_refine,
             accept_structure_refinement,
             start_generate_submodule,
+            get_module_instructions,
             start_first_pending_submodule,
             start_full_course_generation,
             start_lesson_generation,

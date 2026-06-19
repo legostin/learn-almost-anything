@@ -826,6 +826,11 @@ const STRINGS = {
     structEditNote: "Новые уроки появятся как «черновики» — откройте их и напишите вручную или сгенерируйте ИИ.",
     docNodeTitle: "Заголовок статьи",
     docNodeSummary: "Описание: что должно быть в этой статье (используется при генерации)",
+    docLessonTitle: "Генерация страницы",
+    docLessonInstructionsLabel: "Что написать на этой странице",
+    docLessonInstructionsPlaceholder:
+      "Укажите, что должна охватывать страница: ключевые пункты, акценты, тон. Учтётся вместе с остальной документацией.",
+    docLessonNote: "Генерация перезапишет содержимое этой страницы.",
     docDragHandle: "Перетащите, чтобы переместить",
     docEditorHint:
       "Стройте дерево документации сами: «＋» добавляет вложенную статью, кнопка внизу — раздел верхнего уровня. Перетаскивайте за «⠿», чтобы менять структуру. Вложенность любой глубины. Сохраните, затем «Сгенерировать» наполнит статьи.",
@@ -1699,6 +1704,11 @@ const STRINGS = {
     structEditNote: "New lessons appear as drafts — open one to write it by hand or generate it with AI.",
     docNodeTitle: "Article title",
     docNodeSummary: "Description: what this article should cover (used when generating)",
+    docLessonTitle: "Generate page",
+    docLessonInstructionsLabel: "What to write on this page",
+    docLessonInstructionsPlaceholder:
+      "Describe what this page should cover: key points, emphasis, tone. Considered alongside the rest of the documentation.",
+    docLessonNote: "Generating will (re)write this page.",
     docDragHandle: "Drag to move",
     docEditorHint:
       "Build the documentation tree yourself: “＋” adds a nested article, the button below adds a top-level section. Drag the “⠿” handle to restructure. Nest to any depth. Save, then “Generate” fills the articles.",
