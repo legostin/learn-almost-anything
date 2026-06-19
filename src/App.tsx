@@ -10522,11 +10522,16 @@ function SubmoduleView({
     const norm = title.trim().toLowerCase();
     const found = findNodeByTitle(tree?.modules, norm);
     if (!found) return;
-    // Documentation stores every node's content under ("_doc", id) regardless of
-    // depth; other formats address it under its immediate parent module.
-    const modId =
-      course?.course_format === "documentation" ? "_doc" : found.parentId ?? found.node.id;
-    onOpenSubmodule(modId, found.node.id);
+    // Documentation stores every node's content under ("_doc", id) at any depth.
+    if (course?.course_format === "documentation") {
+      onOpenSubmodule("_doc", found.node.id);
+      return;
+    }
+    // Other formats keep article content under the immediate parent module. A
+    // title matching a top-level module/section has no openable article, so
+    // no-op (as the pre-recursive version did) instead of navigating nowhere.
+    if (!found.parentId) return;
+    onOpenSubmodule(found.parentId, found.node.id);
   };
   // Soft prerequisites (non-linear courses): unmet earlier submodules, matched by
   // title across the tree. Non-blocking — a hint with links, never a hard lock.
