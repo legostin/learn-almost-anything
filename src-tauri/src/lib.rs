@@ -512,6 +512,14 @@ fn emit_progress_event(
 /// Max attempts (including the first) for a generation stage before it fails.
 const STAGE_MAX_ATTEMPTS: u32 = 3;
 
+/// Errors that are deterministic — retrying just delays a clear failure with the
+/// identical request (e.g. a model unsupported by the installed Codex CLI).
+fn is_nonretryable(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("requires a newer version of codex")
+        || e.contains("supported by your installed codex cli")
+}
+
 /// Run a generation stage with retries. Calls `f`; on error, invokes
 /// `on_retry(next_attempt, last_error)` so callers can surface the upcoming
 /// retry in the UI, then tries again — up to `max_attempts`. Returns the last
@@ -530,6 +538,11 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 last_err = e;
+                // Deterministic failures won't change on retry — fail fast with
+                // the clear message instead of looping the identical request.
+                if is_nonretryable(&last_err) {
+                    break;
+                }
                 if attempt < max_attempts {
                     on_retry(attempt + 1, &last_err);
                 }
