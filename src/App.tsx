@@ -2725,8 +2725,9 @@ function CourseDashboard({
         actionLabel = t("courseActionOpen");
         statusText = t("courseStatusLoading");
       } else if (progress.generating > 0) {
-        actionLabel = t("courseActionWorking");
-        actionDisabled = true;
+        // Lessons are generating in the background — keep the card openable so
+        // the writer can watch progress and read already-finished lessons.
+        actionLabel = t("courseActionOpen");
         statusText = t("courseStatusWorking");
       } else if (progress.queued > 0) {
         actionLabel = t("courseActionOpen");
