@@ -535,6 +535,8 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
                 app.state(),
                 req("courseId")?,
                 req("submoduleId")?,
+                None,
+                None,
             )?;
             Ok(Value::Null)
         }

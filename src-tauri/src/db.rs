@@ -752,6 +752,33 @@ pub fn course_id_for_submodule(
     ))
 }
 
+/// Store a node's per-page generation instructions (documentation lessons).
+/// Pass None to clear them.
+pub fn set_module_instructions(
+    conn: &Connection,
+    id: &str,
+    instructions: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET instructions = ?2 WHERE id = ?1",
+        rusqlite::params![id, instructions],
+    )?;
+    Ok(())
+}
+
+/// Read a node's stored per-page generation instructions, if any.
+pub fn get_module_instructions(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    Ok(none_on_no_rows(conn.query_row(
+        "SELECT instructions FROM modules WHERE id = ?1",
+        [id],
+        |r| r.get::<_, Option<String>>(0),
+    ))?
+    .flatten())
+}
+
 pub fn first_attempt_ratio(
     conn: &Connection,
     module_id: &str,

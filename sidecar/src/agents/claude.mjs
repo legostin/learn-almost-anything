@@ -215,6 +215,45 @@ function factCheckInputBlock(courseFormat, factInput) {
   return `\nFACT INPUT (what to verify):\n${body}\n`;
 }
 
+// Per-page user directions ("what to write on this page") from the doc lesson
+// modal. Highest-priority guidance for this single article.
+function userInstructionsBlock(userInstructions) {
+  const text = typeof userInstructions === "string" ? userInstructions.trim() : "";
+  if (!text) return "";
+  return `\nUSER INSTRUCTIONS FOR THIS PAGE (highest priority — follow them):
+<page-instructions>
+${text}
+</page-instructions>
+`;
+}
+
+// Documentation only: this page's place in the outline plus the other pages'
+// titles/summaries/snippets, so an evolving doc set stays consistent.
+function docPagesContextBlock(courseFormat, docPagesContext) {
+  if (normalizeCourseFormat(courseFormat) !== "documentation") return "";
+  const ctx = docPagesContext && typeof docPagesContext === "object" ? docPagesContext : {};
+  const outline = Array.isArray(ctx.outlinePath) ? ctx.outlinePath.filter(Boolean) : [];
+  const others = Array.isArray(ctx.otherPages) ? ctx.otherPages : [];
+  if (!outline.length && !others.length) return "";
+  const pos = outline.length ? `This page's place in the documentation: ${outline.join(" › ")}\n` : "";
+  const pages = others
+    .map((p) => {
+      const title = typeof p?.title === "string" ? p.title.trim() : "";
+      if (!title) return "";
+      const summary =
+        typeof p?.summary === "string" && p.summary.trim() ? ` — ${p.summary.trim()}` : "";
+      const snippet =
+        typeof p?.snippet === "string" && p.snippet.trim() ? `\n  excerpt: ${p.snippet.trim()}` : "";
+      return `- ${title}${summary}${snippet}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+  return `\nThis is ONE page of a larger DOCUMENTATION set that grows and changes over time. Write it to fit the whole: stay consistent in terminology and scope, cross-reference related pages where useful, and do NOT duplicate what other pages already cover.
+<documentation-context>
+${pos}${pages ? `Other pages in this documentation:\n${pages}\n` : ""}</documentation-context>
+`;
+}
+
 function podcastNoWidgetGuide(courseFormat) {
   if (normalizeCourseFormat(courseFormat) !== "podcast_series") return "";
   return `PODCAST FORMAT OVERRIDE:
@@ -607,6 +646,8 @@ async function draftArticleInternal(
     researchPack,
     customMcp,
     factInput,
+    userInstructions,
+    docPagesContext,
   },
   onProgress
 ) {
@@ -656,7 +697,7 @@ code APIs, image/video URLs, fine-grained numbers).
 
 ${courseFormatGuide(courseFormat, lang)}
 ${podcastNoWidgetGuide(courseFormat)}
-${factCheckInputBlock(courseFormat, factInput)}
+${factCheckInputBlock(courseFormat, factInput)}${userInstructionsBlock(userInstructions)}
 Course brief (wizard Q&A):
 <course-md>
 ${courseMd}
@@ -666,7 +707,7 @@ Full curriculum (for context — do not repeat other modules):
 <structure>
 ${JSON.stringify(structure, null, 2)}
 </structure>
-
+${docPagesContextBlock(courseFormat, docPagesContext)}
 ${spaceContextBlock(spaceSources, spaceLinks, lang, spaceStrict, spaceDirs)}${categoryBlock}${pedagogyBlock}${researchPackBlock}${memoryBlock}${prevArticlesBlock(previousArticles, lang)}You are writing this specific submodule:
 - Parent module: ${modulePath.title}${modulePath.summary ? ` — ${modulePath.summary}` : ""}
 - This submodule: ${submodulePath.title}${submodulePath.summary ? ` — ${submodulePath.summary}` : ""}
