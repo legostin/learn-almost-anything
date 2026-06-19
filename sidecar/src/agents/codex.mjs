@@ -19,6 +19,7 @@ import {
 } from "../lib/interactive.mjs";
 import { braveStdioServer } from "../lib/brave.mjs";
 import * as devlog from "../lib/devlog.mjs";
+import { lintMath, describeMathIssues } from "../lib/math-lint.mjs";
 import {
   context7StdioServer,
   mediawikiStdioServer,
@@ -2478,6 +2479,16 @@ overall course intro — assume the learner has the curriculum in front of them.
 When relevant, reference what was established in earlier submodules to build
 continuity. Never contradict them.
 
+Math: write EVERY mathematical expression as LaTeX — inline as $…$, standalone
+equations as $$…$$. This applies to even the simplest math: variables ($x$),
+powers ($x^2$, never x² or a bare x^2), subscripts ($x_i$), fractions
+($\\frac{a}{b}$, never a/b), roots ($\\sqrt{x}$), Greek letters ($\\pi$, $\\alpha$),
+sums/integrals/limits, and comparison/operator symbols ($\\leq$, $\\geq$, $\\neq$,
+$\\times$, $\\cdot$, $\\approx$). NEVER use Unicode math symbols (², ³, √, ≤, ≥, ≠,
+×, ·, π, ∑, ∫, →, ∞) or plain-text math in prose. Keep every formula valid and
+renderable by KaTeX: balanced $ delimiters and { } braces, standard commands,
+and make sure the math is also CORRECT, not just well-formed.
+
 For non-podcast formats, you may add visual-aid widgets where they meaningfully help. Be friendly to
 illustration count: on visual subjects, prefer several useful visuals over one
 token image.
@@ -2986,6 +2997,10 @@ async function reviewArticle(
   onProgress
 ) {
   const lang = (language || "en").trim();
+  const mathLint = lintMath(article);
+  const mathFlag = mathLint.ok
+    ? ""
+    : ` A quick scan flagged possibly-malformed math to fix first: ${describeMathIssues(mathLint.issues)}.`;
   const prompt = `You are reviewing one submodule article from a course on
 "${topic}" (language: ${lang}). Act as a careful editor + fact-checker.
 
@@ -3000,8 +3015,12 @@ Tasks, in order:
 4. Internal consistency — check this article against the previous submodules
    shown below. If there are contradictions (terminology, facts, level
    assumptions, etc.), resolve them in favor of what's already established.
-5. Light polish for flow — do NOT rewrite the voice or restructure.
-6. Preserve every ::widget{...} marker line EXACTLY as-is — never remove, move,
+5. Math — ensure EVERY mathematical expression is valid, correct LaTeX: inline
+   $…$, display $$…$$. Convert any plain-text or Unicode math (x², √, ≤, a/b, →,
+   π, …) to LaTeX, fix unbalanced $ delimiters or { } braces so it renders in
+   KaTeX, and verify the math itself is correct, not merely well-formed.${mathFlag}
+6. Light polish for flow — do NOT rewrite the voice or restructure.
+7. Preserve every ::widget{...} marker line EXACTLY as-is — never remove, move,
    merge, reword, or translate them, and keep the blank lines around them.
 
 ${prevArticlesBlock(previousArticles, lang)}Article to review:
