@@ -76,14 +76,24 @@ SlashMenu.displayName = "SlashMenu";
 function renderSlashMenu() {
   let component: ReactRenderer<{ onKeyDown: (p: { event: KeyboardEvent }) => boolean }, MenuProps> | null = null;
   let popup: HTMLDivElement | null = null;
+  let latestRect: (() => DOMRect | null) | null | undefined = null;
 
-  const place = (rect: (() => DOMRect | null) | null | undefined) => {
-    if (!popup || !rect) return;
-    const r = rect();
+  const place = () => {
+    if (!popup || !latestRect) return;
+    const r = latestRect();
     if (!r) return;
+    // Keep the menu pinned just under the caret, flipping above if it would
+    // overflow the viewport bottom. Recomputed on scroll/resize so it tracks
+    // the caret instead of staying frozen where it opened.
+    const menuH = popup.firstElementChild?.getBoundingClientRect().height ?? 0;
+    const below = r.bottom + 6;
+    const flip = menuH > 0 && below + menuH > window.innerHeight && r.top - 6 - menuH > 0;
     popup.style.left = `${Math.round(r.left)}px`;
-    popup.style.top = `${Math.round(r.bottom + 6)}px`;
+    popup.style.top = `${Math.round(flip ? r.top - 6 - menuH : below)}px`;
   };
+  // Capture-phase so it fires for scrolls inside the article's own scroll
+  // container, not just the window.
+  const reposition = () => place();
 
   return {
     onStart: (props: { editor: Editor; clientRect?: (() => DOMRect | null) | null }) => {
@@ -94,11 +104,15 @@ function renderSlashMenu() {
       popup.style.zIndex = "1000";
       document.body.appendChild(popup);
       popup.appendChild(component.element);
-      place(props.clientRect);
+      latestRect = props.clientRect;
+      place();
+      window.addEventListener("scroll", reposition, true);
+      window.addEventListener("resize", reposition);
     },
     onUpdate: (props: { clientRect?: (() => DOMRect | null) | null }) => {
       component?.updateProps(props);
-      place(props.clientRect);
+      latestRect = props.clientRect;
+      place();
     },
     onKeyDown: (props: { event: KeyboardEvent }) => {
       if (props.event.key === "Escape") {
@@ -108,10 +122,13 @@ function renderSlashMenu() {
       return component?.ref?.onKeyDown(props) ?? false;
     },
     onExit: () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
       popup?.remove();
       popup = null;
       component?.destroy();
       component = null;
+      latestRect = null;
     },
   };
 }
