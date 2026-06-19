@@ -51,6 +51,7 @@ const methods = {
   chat: async (params) => pickAgent(params).chat(params),
   wizard_next_question: async (params, ctx) => pickAgent(params).wizardNextQuestion(params, ctx),
   suggest_course_idea: async (params, ctx) => pickAgent(params).suggestCourseIdea(params, ctx),
+  classify_topic: async (params, ctx) => pickAgent(params).classifyTopic(params, ctx),
   build_structure: async (params, ctx) => pickAgent(params).buildStructure(params, ctx),
   generate_tags: async (params, ctx) => pickAgent(params).generateTags(params, ctx),
   build_roadmap: async (params, ctx) => pickAgent(params).buildRoadmap(params, ctx),

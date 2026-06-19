@@ -45,6 +45,22 @@ import {
 } from "../lib/widget-templates.mjs";
 import { lintMath, describeMathIssues } from "../lib/math-lint.mjs";
 
+// Safety / medium guidance from the topic classifier (classifyTopic), woven into
+// the structure prompt so the curriculum — and the submodule summaries lessons
+// later read — reflect the cautious / video_heavy flags.
+function contentGuidanceBlock(cautious, videoHeavy) {
+  const parts = [];
+  if (cautious)
+    parts.push(
+      "SAFETY: This is a sensitive or potentially dangerous subject. Treat it responsibly — keep it strictly educational, foreground safety and ethics, add clear caveats, and never include operational, harm-enabling detail. Reflect this care in module and submodule summaries."
+    );
+  if (videoHeavy)
+    parts.push(
+      "MEDIUM: This subject is learned mainly by WATCHING and is easy to find on YouTube (memes, demos, technique, cooking, UI walkthroughs). Favor a video-first plan — note in submodule summaries where short demonstration clips are the primary medium, so lessons lean on video widgets."
+    );
+  return parts.length ? `\n${parts.join("\n")}\n` : "";
+}
+
 function terminologyGuide(lang) {
   return `Use the terminology that practitioners in this field actually use in language "${lang}". Prefer established loan words and idiomatic terms over literal translations (e.g. for programming in Russian: "легаси-код", not "наследие-код"; "деплой" / "deploy", not "развёртывание"; "merge request", not "запрос на слияние"). The exact vocabulary depends on the domain — match the register of how professionals in this field actually speak and write.`;
 }
@@ -1778,6 +1794,8 @@ export async function buildStructure(
     customMcp,
     reuseThreadPerTopic,
     reuseSessionKey,
+    cautious,
+    videoHeavy,
   },
   ctx
 ) {
@@ -1792,7 +1810,7 @@ export async function buildStructure(
 The course will be delivered in language code "${lang}".
 
 ${courseFormatGuide(courseFormat, lang)}
-${learnerProfileBlock(learnerProfile)}
+${learnerProfileBlock(learnerProfile)}${contentGuidanceBlock(cautious, videoHeavy)}
 Below is the course brief — a markdown file with the wizard Q&A.
 
 <course-md>
@@ -1900,6 +1918,42 @@ Shape:
     category: normalizeCategory(parsed?.category),
     researchPack:
       typeof parsed?.researchPack === "string" ? parsed.researchPack.trim() : "",
+  };
+}
+
+/**
+ * Content-safety + strategy gate, run once before building a curriculum.
+ * Refuses genuinely harmful topics; flags sensitive ones for cautious treatment
+ * and meme / internet-culture / "better-on-YouTube" ones for video-heavy lessons.
+ * Best-effort: a missing/invalid result is treated as "ok" by callers (the
+ * structure + lesson prompts carry the same guidance as a second layer).
+ * @returns {Promise<{ decision: "ok"|"caution"|"refuse", reason: string, video_heavy: boolean }>}
+ */
+export async function classifyTopic({ topic, language, courseMd, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const brief =
+    typeof courseMd === "string" && courseMd.trim() ? `\nBrief:\n${courseMd.slice(0, 2000)}\n` : "";
+  const prompt = `You are the safety + content gate for an educational course generator. Classify the topic below. Write any human-readable "reason" in language "${lang}".
+
+Topic: ${JSON.stringify(topic)}${brief}
+
+Pick exactly one "decision":
+- "refuse" — refuse generation ENTIRELY when the topic's realistic purpose is socially harmful or dangerous (how to make weapons / explosives / poisons / illegal drugs, attacking people or infrastructure, malware or intrusion meant to cause harm), promotes or facilitates self-harm or SUICIDE, or is pornographic / sexually explicit material. When genuinely in doubt about real-world harm, REFUSE. Put a short, respectful explanation in "reason".
+- "caution" — ALLOW but require careful, responsible treatment of a legitimate yet sensitive or potentially dangerous subject (medicine, mental health, self-defense, defensive security, hazardous chemistry/electricity, weapons as history, drugs/addiction, extremism studied as a subject). The course must stay strictly educational, add safety caveats, and never give operational harm-enabling detail.
+- "ok" — everything else.
+
+Set "video_heavy": true when the subject is learned mainly by WATCHING and is easier to find on YouTube — internet memes and viral moments, dances or sports moves, music / instrument technique, cooking, crafts / DIY, makeup, software UI walkthroughs — so the course should lean on video.
+
+Output ONLY one line of JSON: {"decision":"ok|caution|refuse","reason":"...","video_heavy":true|false}`;
+  ctx?.progress?.({ label: "checking topic" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  const parsed = extractJson(text);
+  const decision =
+    parsed?.decision === "refuse" || parsed?.decision === "caution" ? parsed.decision : "ok";
+  return {
+    decision,
+    reason: typeof parsed?.reason === "string" ? parsed.reason.trim() : "",
+    video_heavy: !!parsed?.video_heavy,
   };
 }
 

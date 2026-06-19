@@ -785,6 +785,45 @@ fn start_build_structure(
     let reuse_topic = profile.reuse_thread_per_topic();
 
     thread::spawn(move || {
+        // Content-safety + strategy gate (runs once, before any generation).
+        // Hard-refuse genuinely harmful topics; flag sensitive ones for cautious
+        // treatment and meme/"better-on-YouTube" ones for video-heavy lessons.
+        // Best-effort: a classifier error falls through as "ok" — the structure
+        // and lesson prompts carry the same guidance as a second layer.
+        let mut cautious = false;
+        let mut video_heavy = false;
+        {
+            let classify_params = json!({
+                "backend": course.agent.clone(),
+                "topic": course.topic.clone(),
+                "language": course.language.clone(),
+                "courseMd": course_md.clone(),
+                "modelConfig": tag_model_config.clone(),
+            });
+            match sidecar.call("classify_topic", classify_params, Duration::from_secs(300)) {
+                Ok(v) => {
+                    let decision = v.get("decision").and_then(|d| d.as_str()).unwrap_or("ok");
+                    if decision == "refuse" {
+                        let reason = v
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("This topic can't be turned into a course.");
+                        emit_job_event(
+                            &app2,
+                            &cid,
+                            "build_structure",
+                            json!({ "ok": false, "error": reason, "refused": true, "exhausted": true, "agent": agent }),
+                        );
+                        return;
+                    }
+                    cautious = decision == "caution";
+                    video_heavy = v.get("video_heavy").and_then(|b| b.as_bool()).unwrap_or(false);
+                }
+                Err(e) => eprintln!("[classify_topic] non-fatal, proceeding: {e}"),
+            }
+        }
         let params = json!({
             "backend": course.agent,
             "topic": course.topic,
@@ -801,6 +840,8 @@ fn start_build_structure(
             "customMcp": custom_mcp,
             "reuseThreadPerTopic": reuse_topic,
             "reuseSessionKey": cid.clone(),
+            "cautious": cautious,
+            "videoHeavy": video_heavy,
         });
         // Durability: the planning agent can fail (timeout, bad JSON, transient
         // CLI error). Retry up to STAGE_MAX_ATTEMPTS, surfacing each retry in the
