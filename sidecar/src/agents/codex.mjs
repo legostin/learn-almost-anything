@@ -93,6 +93,10 @@ function makeCodex(braveApiKey, opts = {}) {
           command: s.command,
           args: Array.isArray(s.args) ? s.args : [],
           ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+          // Cold-start budget: an `npx`-launched server (e.g. @playwright/mcp)
+          // downloads its package on first run, which blows past the codex CLI's
+          // short default startup timeout. Matches the 180s the probe allows.
+          startup_timeout_sec: 180,
         },
       };
     }
