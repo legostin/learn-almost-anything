@@ -10,6 +10,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import { type Editor } from "@tiptap/core";
 import { SlashCommands, type SlashCommand } from "./editorSlash";
 import { WidgetNode, WIDGET_TYPES, newWidgetId, defaultWidgetData } from "./editorWidget";
+import { MathNode } from "./editorMath";
 import { useT, useLang } from "./i18n";
 
 // Localized "/" command labels (kept here rather than i18n.tsx to avoid dozens
@@ -115,6 +116,18 @@ function editorMarkdown(editor: Editor): string {
   return (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
 }
 
+// markdown-it merges a `::widget{…}` marker into an adjacent paragraph when it's
+// only single-newline separated, which hides it from WidgetNode's parser; on save
+// referencedWidgets then prunes its data. Force a blank line around every marker
+// so each parses as its own block. (Saved articles are already separated this
+// way; this protects AI-authored ones with tighter spacing.)
+function isolateWidgetMarkers(md: string): string {
+  return md
+    .replace(/(::widget\{[^}]*\})/g, "\n\n$1\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/^\n+/, "");
+}
+
 // Widgets still referenced by a node in the doc (drop deleted ones).
 function referencedWidgets(editor: Editor, store: Record<string, unknown>): Record<string, unknown> {
   const ids = new Set<string>();
@@ -171,6 +184,7 @@ export function BlockEditor({
       TableKit,
       CodeBlock,
       WidgetNode,
+      MathNode,
       Markdown.configure({
         html: false,
         tightLists: true,
@@ -199,7 +213,7 @@ export function BlockEditor({
       await onPersist(editorMarkdown(editor), referencedWidgets(editor, api.widgets));
     };
     api.readWidgets = onReadWidgets;
-    editor.commands.setContent(article);
+    editor.commands.setContent(isolateWidgetMarkers(article));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 

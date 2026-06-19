@@ -10344,3 +10344,21 @@ textarea.le-cap {
   background: none;
   padding: 0;
 }
+/* Inline / display LaTeX (KaTeX) rendered in the editor */
+.we-math {
+  cursor: default;
+}
+.we-math.we-math-block {
+  display: block;
+  text-align: center;
+  margin: 10px 0;
+}
+.we-math.selected {
+  outline: 2px solid var(--border-strong);
+  border-radius: 4px;
+}
+.we-math-raw {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  color: var(--text-muted);
+}

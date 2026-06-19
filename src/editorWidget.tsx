@@ -58,7 +58,9 @@ export function defaultWidgetData(wtype: string): Record<string, unknown> {
     case "checkpoint":
       return { type: "checkpoint", question: "", answer: "" };
     case "recall":
-      return { type: "recall", question: "", answer: "" };
+      // Canonical recall uses front/back; the backend mints the SRS card from
+      // them on save and RecallWidget renders them.
+      return { type: "recall", front: "", back: "" };
     default:
       return { type: wtype };
   }
@@ -147,8 +149,10 @@ function WidgetPreview({ id, wtype, w }: { id: string; wtype: string; w: AnyData
     return <span className="we-muted">▶ {(w.title as string) || (w.url as string) || "Видео"}</span>;
   if (wtype === "interactive")
     return <span className="we-muted">🧩 {(w.title as string) || "Интерактив"}</span>;
-  if (wtype === "checkpoint" || wtype === "recall")
+  if (wtype === "checkpoint")
     return <span className="we-muted">❓ {(w.question as string) || "Вопрос"}</span>;
+  if (wtype === "recall")
+    return <span className="we-muted">🗂 {(w.front as string) || "Карточка"}</span>;
   return <span className="we-muted">{wtype}</span>;
 }
 
@@ -332,11 +336,19 @@ function WidgetForm({
       </>
     );
   }
-  if (wtype === "checkpoint" || wtype === "recall") {
+  if (wtype === "checkpoint") {
     return (
       <>
         <Field label="Вопрос" value={w.question} area onChange={(v) => set({ question: v })} />
         <Field label="Ответ" value={w.answer} area onChange={(v) => set({ answer: v })} />
+      </>
+    );
+  }
+  if (wtype === "recall") {
+    return (
+      <>
+        <Field label="Вопрос (лицевая сторона)" value={w.front} area onChange={(v) => set({ front: v })} />
+        <Field label="Ответ (оборот)" value={w.back} area onChange={(v) => set({ back: v })} />
       </>
     );
   }
