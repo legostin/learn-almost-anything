@@ -10310,3 +10310,37 @@ textarea.le-cap {
 .block-editor-content .selectedCell {
   background: var(--surface-hover);
 }
+/* Code blocks in the inline editor (lowlight highlighting + language picker) */
+.we-code-block {
+  margin: 10px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-hover);
+}
+.we-code-head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.we-code-lang {
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.we-code-block pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.we-code-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: none;
+  padding: 0;
+}

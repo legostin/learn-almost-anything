@@ -4,6 +4,7 @@ import { BubbleMenu } from "@tiptap/react/menus";
 import { invoke } from "./transport";
 import StarterKit from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
+import { CodeBlock } from "./editorCode";
 import { Markdown } from "tiptap-markdown";
 import Placeholder from "@tiptap/extension-placeholder";
 import { type Editor } from "@tiptap/core";
@@ -166,8 +167,9 @@ export function BlockEditor({
   const [saving, setSaving] = useState(false);
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({ codeBlock: false }),
       TableKit,
+      CodeBlock,
       WidgetNode,
       Markdown.configure({
         html: false,
