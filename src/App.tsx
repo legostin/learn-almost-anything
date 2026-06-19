@@ -13883,7 +13883,7 @@ function isBlockedWikimediaThumbnail(url: string): boolean {
   }
 }
 
-function resolveWidgetImage(url?: string, source?: string) {
+export function resolveWidgetImage(url?: string, source?: string) {
   const hasUrl = typeof url === "string" && url.length > 0;
   const isLocal = hasUrl && (url!.startsWith("/") || url!.startsWith("file://"));
   const blockedRemote = hasUrl && !isLocal && isBlockedWikimediaThumbnail(url!);
@@ -16598,7 +16598,7 @@ function ImagePlaceholder({
   );
 }
 
-function DiagramWidget({
+export function DiagramWidget({
   id,
   widget,
 }: {

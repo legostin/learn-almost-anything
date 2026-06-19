@@ -251,7 +251,11 @@ export function BlockEditor({
         </button>
       </div>
       {editor && (
-        <BubbleMenu editor={editor} className="bubble-menu">
+        <BubbleMenu
+          editor={editor}
+          options={{ placement: "bottom-start", offset: 8 }}
+          className="bubble-menu"
+        >
           {aiOpen ? (
             <div className="bubble-ai">
               <input

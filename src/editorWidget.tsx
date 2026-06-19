@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { Node, mergeAttributes } from "@tiptap/core";
 import { ReactNodeViewRenderer, NodeViewWrapper, type ReactNodeViewProps } from "@tiptap/react";
-import { convertFileSrc } from "./transport";
-import { ImageItemEditor } from "./App";
+import { ImageItemEditor, DiagramWidget, resolveWidgetImage } from "./App";
 
 // Widget types in the article model (mirrors WidgetData in App.tsx).
 export const WIDGET_TYPES = [
@@ -50,11 +49,11 @@ const parseParam = (params: string, key: string): string => {
   return m ? m[1] : "";
 };
 
-function resolveSrc(url: unknown): string {
-  if (typeof url !== "string" || !url) return "";
-  if (url.startsWith("http")) return url;
-  return convertFileSrc(url);
-}
+const imgSrcOf = (url: unknown, source?: unknown): string =>
+  resolveWidgetImage(
+    typeof url === "string" ? url : undefined,
+    typeof source === "string" ? source : undefined
+  ).imgSrc;
 
 type AnyData = Record<string, unknown>;
 type RunHeavy = (op: () => Promise<void>, opts?: { refresh?: boolean }) => Promise<void>;
@@ -95,9 +94,9 @@ function Field({
   );
 }
 
-function WidgetPreview({ wtype, w }: { wtype: string; w: AnyData }) {
+function WidgetPreview({ id, wtype, w }: { id: string; wtype: string; w: AnyData }) {
   if (wtype === "image") {
-    const src = resolveSrc(w.url);
+    const src = imgSrcOf(w.url, w.source);
     return src ? (
       <img className="we-img" src={src} alt={(w.alt as string) || ""} />
     ) : (
@@ -109,14 +108,21 @@ function WidgetPreview({ wtype, w }: { wtype: string; w: AnyData }) {
     return (
       <div className="we-gallery">
         {items.slice(0, 6).map((it, i) => {
-          const src = resolveSrc(it.url);
+          const src = imgSrcOf(it.url, it.source);
           return src ? <img key={i} src={src} alt="" /> : <span key={i} className="we-cell" />;
         })}
         {!items.length && <span className="we-muted">🖼 Галерея — нажмите, чтобы настроить</span>}
       </div>
     );
   }
-  if (wtype === "diagram") return <pre className="we-code">{(w.source as string) || "diagram"}</pre>;
+  if (wtype === "diagram") {
+    const src = typeof w.source === "string" ? w.source : "";
+    return src.trim() ? (
+      <DiagramWidget id={id} widget={{ source: src, caption: w.caption as string, error: w.error as string }} />
+    ) : (
+      <span className="we-muted">📊 Диаграмма — нажмите, чтобы настроить</span>
+    );
+  }
   if (wtype === "video")
     return <span className="we-muted">▶ {(w.title as string) || (w.url as string) || "Видео"}</span>;
   if (wtype === "interactive")
@@ -151,7 +157,7 @@ function WidgetForm({
     return (
       <ImageItemEditor
         args={baseArgs}
-        imgSrc={resolveSrc(w.url)}
+        imgSrc={imgSrcOf(w.url, w.source)}
         alt={w.alt as string}
         description={w.description as string}
         onDescriptionChange={(v) => set({ description: v })}
@@ -176,7 +182,7 @@ function WidgetForm({
             key={i}
             args={baseArgs}
             itemIndex={i}
-            imgSrc={resolveSrc(it.url)}
+            imgSrc={imgSrcOf(it.url, it.source)}
             alt={it.alt as string}
             description={it.description as string}
             onDescriptionChange={(v) => setItem(i, { description: v })}
@@ -201,9 +207,13 @@ function WidgetForm({
   }
 
   if (wtype === "diagram") {
+    const src = typeof w.source === "string" ? w.source : "";
     return (
       <>
         <Field label="Mermaid-код" value={w.source} area onChange={(v) => set({ source: v })} />
+        {src.trim() && (
+          <DiagramWidget id={id} widget={{ source: src, caption: w.caption as string, error: w.error as string }} />
+        )}
         <Field label="Подпись" value={w.caption} onChange={(v) => set({ caption: v })} />
       </>
     );
@@ -317,7 +327,7 @@ function WidgetBlockView(props: ReactNodeViewProps) {
         </div>
       ) : (
         <div className="we-body">
-          <WidgetPreview wtype={wtype} w={w} />
+          <WidgetPreview id={id} wtype={wtype} w={w} />
         </div>
       )}
     </NodeViewWrapper>
