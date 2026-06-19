@@ -673,23 +673,26 @@ fn count_generated_lessons(conn: &rusqlite::Connection, course_id: &str) -> Resu
 fn course_relative_path(path: &Path, course_root: &Path) -> Option<String> {
     let canon = path.canonicalize().ok();
     let probe = canon.as_deref().unwrap_or(path);
-    if let Ok(rel) = probe.strip_prefix(course_root) {
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        return (!rel.is_empty()).then_some(rel);
-    }
-    let course_id = course_root.file_name()?.to_str()?;
-    let comps: Vec<&str> = path
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-    let idx = comps.iter().rposition(|c| *c == course_id)?;
-    let tail = &comps[idx + 1..];
-    // Reject traversal / relative components so the recovered path can never
-    // escape the course dir (the bytes are read from course_root.join(rel)).
-    if tail.is_empty() || tail.iter().any(|c| *c == ".." || *c == ".") {
+    let rel = if let Ok(stripped) = probe.strip_prefix(course_root) {
+        stripped.to_string_lossy().replace('\\', "/")
+    } else {
+        // Stale absolute path from a prior store location: recover via the shared
+        // <course_id> path segment.
+        let course_id = course_root.file_name()?.to_str()?;
+        let comps: Vec<&str> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        let idx = comps.iter().rposition(|c| *c == course_id)?;
+        comps[idx + 1..].join("/")
+    };
+    // Reject empty or any traversal/relative component so the recovered path can
+    // never escape the course dir. (The caller also enforces a canonicalized
+    // containment check; this keeps course_relative_path sound on its own.)
+    if rel.is_empty() || rel.split('/').any(|c| c == ".." || c == ".") {
         return None;
     }
-    Some(tail.join("/"))
+    Some(rel)
 }
 
 fn rewrite_local_file_refs(
