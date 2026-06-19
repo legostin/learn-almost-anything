@@ -3,6 +3,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { invoke } from "./transport";
 import StarterKit from "@tiptap/starter-kit";
+import { TableKit } from "@tiptap/extension-table";
 import { Markdown } from "tiptap-markdown";
 import Placeholder from "@tiptap/extension-placeholder";
 import { type Editor } from "@tiptap/core";
@@ -23,6 +24,7 @@ const SLASH_LABELS = {
     quote: ["Цитата", "Блок цитаты"],
     code: ["Код", "Блок кода"],
     hr: ["Разделитель", "Горизонтальная линия"],
+    table: ["Таблица", "Таблица 3×3"],
     image: ["Изображение", "Картинка с поиском/загрузкой"],
     gallery: ["Галерея", "Несколько изображений"],
     diagram: ["Диаграмма", "Mermaid-схема"],
@@ -41,6 +43,7 @@ const SLASH_LABELS = {
     quote: ["Quote", "Block quote"],
     code: ["Code", "Code block"],
     hr: ["Divider", "Horizontal rule"],
+    table: ["Table", "3×3 table"],
     image: ["Image", "Picture with search/upload"],
     gallery: ["Gallery", "Multiple images"],
     diagram: ["Diagram", "Mermaid chart"],
@@ -93,6 +96,9 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
     ),
     mk("hr", "divider horizontal rule разделитель линия", (e, r) =>
       e.chain().focus().deleteRange(r).setHorizontalRule().run()
+    ),
+    mk("table", "table таблица", (e, r) =>
+      e.chain().focus().deleteRange(r).insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
     ),
     mk("image", "image picture изображение картинка фото", insertWidget("image")),
     mk("gallery", "gallery images галерея изображения", insertWidget("gallery")),
@@ -161,6 +167,7 @@ export function BlockEditor({
   const editor = useEditor({
     extensions: [
       StarterKit,
+      TableKit,
       WidgetNode,
       Markdown.configure({
         html: false,

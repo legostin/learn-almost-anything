@@ -10289,3 +10289,24 @@ textarea.le-cap {
   font-size: 12px;
   color: var(--text-subtle);
 }
+/* Tables inside the inline editor */
+.block-editor-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  table-layout: fixed;
+}
+.block-editor-content th,
+.block-editor-content td {
+  border: 1px solid var(--border-strong);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.block-editor-content th {
+  background: var(--surface-hover);
+  font-weight: 600;
+}
+.block-editor-content .selectedCell {
+  background: var(--surface-hover);
+}
