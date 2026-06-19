@@ -16049,7 +16049,7 @@ const TEMPLATE_COMPONENTS: Record<string, (p: { params: any }) => ReactNode> = {
   code: CodeTemplate,
 };
 
-function TemplateWidget({
+export function TemplateWidget({
   id,
   widget,
 }: {
@@ -16075,7 +16075,7 @@ function TemplateWidget({
 // Minimal params editor for template widgets in the LessonEditor: a JSON
 // textarea with validate-on-apply (deep validation lives in the sidecar
 // normalizer; here we only guard against unparseable JSON).
-function TplParamsEditor({
+export function TplParamsEditor({
   params,
   disabled,
   onApply,

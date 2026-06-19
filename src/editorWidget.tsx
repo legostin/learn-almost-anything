@@ -1,7 +1,27 @@
 import { useState } from "react";
 import { Node, mergeAttributes } from "@tiptap/core";
 import { ReactNodeViewRenderer, NodeViewWrapper, type ReactNodeViewProps } from "@tiptap/react";
-import { ImageItemEditor, DiagramWidget, resolveWidgetImage } from "./App";
+import { invoke } from "./transport";
+import {
+  ImageItemEditor,
+  DiagramWidget,
+  resolveWidgetImage,
+  TemplateWidget,
+  TplParamsEditor,
+} from "./App";
+
+// Interactive template kinds (mirrors TEMPLATE_COMPONENTS in App.tsx).
+const INTERACTIVE_TEMPLATES = [
+  "quiz",
+  "steps",
+  "match",
+  "fillblank",
+  "order",
+  "slider",
+  "categorize",
+  "flipcards",
+  "code",
+] as const;
 
 // Widget types in the article model (mirrors WidgetData in App.tsx).
 export const WIDGET_TYPES = [
@@ -152,6 +172,38 @@ function WidgetForm({
   runHeavy: RunHeavy;
 }) {
   const baseArgs = { ...ctx, widgetId: id };
+  const [genDesc, setGenDesc] = useState("");
+  const runFix = () =>
+    runHeavy(async () => {
+      const instruction = genDesc.trim();
+      if (!instruction) return;
+      await invoke("fix_widget", { ...baseArgs, instruction });
+      setGenDesc("");
+    });
+  const genRow = (
+    <div className="we-gen-row">
+      <input
+        placeholder="Опишите, что сгенерировать или изменить…"
+        value={genDesc}
+        disabled={busy}
+        onChange={(e) => setGenDesc(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void runFix();
+          }
+        }}
+      />
+      <button
+        type="button"
+        disabled={busy || !genDesc.trim()}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => void runFix()}
+      >
+        {busy ? "…" : "✦ ИИ"}
+      </button>
+    </div>
+  );
 
   if (wtype === "image") {
     return (
@@ -211,6 +263,7 @@ function WidgetForm({
     return (
       <>
         <Field label="Mermaid-код" value={w.source} area onChange={(v) => set({ source: v })} />
+        {genRow}
         {src.trim() && (
           <DiagramWidget id={id} widget={{ source: src, caption: w.caption as string, error: w.error as string }} />
         )}
@@ -232,6 +285,7 @@ function WidgetForm({
   }
   if (wtype === "interactive") {
     const legacy = typeof w.html === "string" || typeof w.css === "string" || typeof w.js === "string";
+    const template = typeof w.template === "string" ? w.template : "";
     return (
       <>
         <Field label="Заголовок" value={w.title} onChange={(v) => set({ title: v })} />
@@ -244,19 +298,35 @@ function WidgetForm({
           </>
         ) : (
           <>
-            <Field label="Шаблон" value={w.template} onChange={(v) => set({ template: v })} />
-            <Field
-              label="Параметры (JSON)"
-              value={typeof w.params === "string" ? w.params : JSON.stringify(w.params ?? {}, null, 2)}
-              area
-              onChange={(v) => {
-                try {
-                  set({ params: JSON.parse(v) });
-                } catch {
-                  set({ params: v });
-                }
-              }}
-            />
+            <label className="we-field">
+              <span className="we-field-label">Тип интерактива</span>
+              <select value={template} onChange={(e) => set({ template: e.target.value })}>
+                <option value="">— выберите —</option>
+                {INTERACTIVE_TEMPLATES.map((tpl) => (
+                  <option key={tpl} value={tpl}>
+                    {tpl}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {genRow}
+            {template && w.params != null && (
+              <div className="we-preview">
+                <TemplateWidget
+                  id={id}
+                  widget={{
+                    template,
+                    params: w.params,
+                    title: w.title as string,
+                    description: w.description as string,
+                  }}
+                />
+              </div>
+            )}
+            <details className="we-advanced">
+              <summary>Параметры (JSON, для продвинутых)</summary>
+              <TplParamsEditor params={w.params} disabled={busy} onApply={(params) => set({ params })} />
+            </details>
           </>
         )}
       </>

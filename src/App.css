@@ -10243,3 +10243,49 @@ textarea.le-cap {
   font: inherit;
   font-size: 13px;
 }
+/* Widget editor: AI describe row, template select, preview, advanced JSON */
+.we-gen-row {
+  display: flex;
+  gap: 6px;
+}
+.we-gen-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.we-gen-row button {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.we-field select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.we-preview {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.we-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-subtle);
+}
