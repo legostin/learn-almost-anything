@@ -3,6 +3,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
 import Placeholder from "@tiptap/extension-placeholder";
+import { type Editor } from "@tiptap/core";
 import { SlashCommands, type SlashCommand } from "./editorSlash";
 import { WidgetNode, WIDGET_TYPES, newWidgetId, defaultWidgetData } from "./editorWidget";
 import { useT, useLang } from "./i18n";
@@ -101,6 +102,29 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
   ];
 }
 
+function editorMarkdown(editor: Editor): string {
+  return (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+}
+
+// Widgets still referenced by a node in the doc (drop deleted ones).
+function referencedWidgets(editor: Editor, store: Record<string, unknown>): Record<string, unknown> {
+  const ids = new Set<string>();
+  editor.state.doc.descendants((node) => {
+    if (node.type.name === "widget" && node.attrs.id) ids.add(node.attrs.id as string);
+  });
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(store)) if (ids.has(k)) out[k] = v;
+  return out;
+}
+
+type WidgetStorage = {
+  widgets: Record<string, unknown>;
+  ctx?: { courseId: string; moduleId: string; submoduleId: string };
+  canGenerate?: boolean;
+  persistNow?: () => Promise<void>;
+  readWidgets?: () => Promise<Record<string, unknown>>;
+};
+
 // LEG-21 — inline WYSIWYG block editor (Tiptap). Edits article prose directly in
 // the rendered layout with a "/" slash menu to insert blocks AND widgets (image,
 // gallery, diagram, video, interactive, checkpoint, recall). Widgets round-trip
@@ -109,14 +133,24 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
 export function BlockEditor({
   article,
   widgets,
+  ctx,
+  canGenerate,
   busy,
   onSave,
+  onPersist,
+  onReadWidgets,
   onClose,
 }: {
   article: string;
   widgets: Record<string, unknown>;
+  ctx: { courseId: string; moduleId: string; submoduleId: string };
+  canGenerate: boolean;
   busy?: boolean;
   onSave: (markdown: string, widgets: Record<string, unknown>) => void | Promise<void>;
+  // Save the current article+widgets to disk WITHOUT closing (so a widget's
+  // backend image/AI op can read it), and re-read widget data after the op.
+  onPersist: (markdown: string, widgets: Record<string, unknown>) => Promise<void>;
+  onReadWidgets: () => Promise<Record<string, unknown>>;
   onClose: () => void;
 }) {
   const t = useT();
@@ -146,9 +180,14 @@ export function BlockEditor({
   // node-views can resolve their data). Once per open.
   useEffect(() => {
     if (!editor) return;
-    (editor.storage as unknown as { widget: { widgets: Record<string, unknown> } }).widget.widgets = {
-      ...widgets,
+    const api = (editor.storage as unknown as { widget: WidgetStorage }).widget;
+    api.widgets = { ...widgets };
+    api.ctx = ctx;
+    api.canGenerate = canGenerate;
+    api.persistNow = async () => {
+      await onPersist(editorMarkdown(editor), referencedWidgets(editor, api.widgets));
     };
+    api.readWidgets = onReadWidgets;
     editor.commands.setContent(article);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
@@ -157,17 +196,9 @@ export function BlockEditor({
     if (!editor || saving) return;
     setSaving(true);
     try {
-      const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
-      // Keep only widgets still referenced in the doc (drop deleted ones).
-      const referenced = new Set<string>();
-      editor.state.doc.descendants((node) => {
-        if (node.type.name === "widget" && node.attrs.id) referenced.add(node.attrs.id as string);
-      });
-      const store = (editor.storage as unknown as { widget: { widgets: Record<string, unknown> } })
-        .widget.widgets;
-      const widgetsOut: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(store)) if (referenced.has(k)) widgetsOut[k] = v;
-      await onSave(md, widgetsOut);
+      const md = editorMarkdown(editor);
+      const store = (editor.storage as unknown as { widget: WidgetStorage }).widget.widgets;
+      await onSave(md, referencedWidgets(editor, store));
     } finally {
       setSaving(false);
     }

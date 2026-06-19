@@ -10148,3 +10148,48 @@ textarea.le-cap {
   color: var(--text-muted);
   font-size: 13px;
 }
+.we-widget.editing {
+  outline: 2px solid var(--border-strong);
+}
+.we-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+.we-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.we-field-label {
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+.we-field input,
+.we-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.we-field textarea {
+  resize: vertical;
+  min-height: 54px;
+}
+.we-add,
+.we-remove {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}

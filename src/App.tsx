@@ -10606,6 +10606,8 @@ function SubmoduleView({
         <BlockEditor
           article={content?.article ?? ""}
           widgets={(content?.widgets as Record<string, unknown>) ?? {}}
+          ctx={{ courseId: course.id, moduleId, submoduleId }}
+          canGenerate={canGenerate}
           busy={enriching}
           onSave={async (md, widgetsOut) => {
             await invoke("save_lesson_content", {
@@ -10619,6 +10621,24 @@ function SubmoduleView({
             setEditing(false);
             await reloadTree();
             await reloadContent();
+          }}
+          onPersist={async (md, widgetsOut) => {
+            await invoke("save_lesson_content", {
+              courseId: course.id,
+              moduleId,
+              submoduleId,
+              article: md,
+              widgets: widgetsOut,
+              markReady: false,
+            });
+          }}
+          onReadWidgets={async () => {
+            const c = await invoke<{ widgets?: Record<string, unknown> }>("read_submodule_article", {
+              courseId: course.id,
+              moduleId,
+              submoduleId,
+            });
+            return c?.widgets ?? {};
           }}
           onClose={() => setEditing(false)}
         />
@@ -13119,7 +13139,7 @@ function LeTextBlock({
 // both search and regeneration, plus upload / search / generate / URL / delete.
 // Each instance owns its own candidates/query/url state so gallery items don't
 // interfere with each other.
-function ImageItemEditor({
+export function ImageItemEditor({
   args,
   itemIndex,
   imgSrc,

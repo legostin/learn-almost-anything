@@ -1,9 +1,10 @@
-import type { ReactNode } from "react";
+import { useState } from "react";
 import { Node, mergeAttributes } from "@tiptap/core";
 import { ReactNodeViewRenderer, NodeViewWrapper, type ReactNodeViewProps } from "@tiptap/react";
 import { convertFileSrc } from "./transport";
+import { ImageItemEditor } from "./App";
 
-// Widget types that exist in the article model (mirrors WidgetData in App.tsx).
+// Widget types in the article model (mirrors WidgetData in App.tsx).
 export const WIDGET_TYPES = [
   "image",
   "gallery",
@@ -49,65 +50,283 @@ const parseParam = (params: string, key: string): string => {
   return m ? m[1] : "";
 };
 
-type AnyWidget = Record<string, unknown> | undefined;
-
 function resolveSrc(url: unknown): string {
   if (typeof url !== "string" || !url) return "";
   if (url.startsWith("http")) return url;
   return convertFileSrc(url);
 }
 
-// Read-only render of a widget block in the editor. Per-widget configuration
-// (image search/upload, diagram/interactive fix, source field) is the next step.
-function WidgetBlockView(props: ReactNodeViewProps) {
-  const { id, wtype } = props.node.attrs as { id: string; wtype: string };
-  const store = (
-    props.editor.storage as unknown as { widget?: { widgets?: Record<string, AnyWidget> } }
-  ).widget?.widgets;
-  const w: AnyWidget = store?.[id];
+type AnyData = Record<string, unknown>;
+type RunHeavy = (op: () => Promise<void>, opts?: { refresh?: boolean }) => Promise<void>;
 
-  let body: ReactNode = null;
+// Shared state/callbacks the editor exposes to widget node-views via
+// editor.storage.widget (set by BlockEditor on open).
+type WidgetApi = {
+  widgets: Record<string, AnyData>;
+  ctx?: { courseId: string; moduleId: string; submoduleId: string };
+  canGenerate?: boolean;
+  persistNow?: () => Promise<void>;
+  readWidgets?: () => Promise<Record<string, AnyData>>;
+};
+
+function Field({
+  label,
+  value,
+  onChange,
+  area,
+  placeholder,
+}: {
+  label: string;
+  value: unknown;
+  onChange: (v: string) => void;
+  area?: boolean;
+  placeholder?: string;
+}) {
+  const v = typeof value === "string" ? value : value == null ? "" : String(value);
+  return (
+    <label className="we-field">
+      <span className="we-field-label">{label}</span>
+      {area ? (
+        <textarea value={v} rows={3} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      ) : (
+        <input value={v} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      )}
+    </label>
+  );
+}
+
+function WidgetPreview({ wtype, w }: { wtype: string; w: AnyData }) {
   if (wtype === "image") {
-    const src = resolveSrc(w?.url);
-    body = src ? (
-      <img className="we-img" src={src} alt={(w?.alt as string) || ""} />
+    const src = resolveSrc(w.url);
+    return src ? (
+      <img className="we-img" src={src} alt={(w.alt as string) || ""} />
     ) : (
-      <span className="we-muted">{(w?.description as string) || "Изображение"}</span>
+      <span className="we-muted">🖼 {(w.description as string) || "Изображение — нажмите, чтобы настроить"}</span>
     );
-  } else if (wtype === "gallery") {
-    const items = Array.isArray(w?.items) ? (w?.items as AnyWidget[]) : [];
-    body = (
+  }
+  if (wtype === "gallery") {
+    const items = Array.isArray(w.items) ? (w.items as AnyData[]) : [];
+    return (
       <div className="we-gallery">
         {items.slice(0, 6).map((it, i) => {
-          const src = resolveSrc(it?.url);
+          const src = resolveSrc(it.url);
           return src ? <img key={i} src={src} alt="" /> : <span key={i} className="we-cell" />;
         })}
-        {!items.length && <span className="we-muted">Галерея</span>}
+        {!items.length && <span className="we-muted">🖼 Галерея — нажмите, чтобы настроить</span>}
       </div>
     );
-  } else if (wtype === "diagram") {
-    body = <pre className="we-code">{(w?.source as string) || "diagram"}</pre>;
-  } else if (wtype === "video") {
-    body = <span className="we-muted">▶ {(w?.title as string) || (w?.url as string) || "Видео"}</span>;
-  } else if (wtype === "interactive") {
-    body = <span className="we-muted">{(w?.title as string) || "Интерактив"}</span>;
-  } else if (wtype === "checkpoint" || wtype === "recall") {
-    body = <span className="we-muted">{(w?.question as string) || "Вопрос"}</span>;
-  } else {
-    body = <span className="we-muted">{wtype}</span>;
+  }
+  if (wtype === "diagram") return <pre className="we-code">{(w.source as string) || "diagram"}</pre>;
+  if (wtype === "video")
+    return <span className="we-muted">▶ {(w.title as string) || (w.url as string) || "Видео"}</span>;
+  if (wtype === "interactive")
+    return <span className="we-muted">🧩 {(w.title as string) || "Интерактив"}</span>;
+  if (wtype === "checkpoint" || wtype === "recall")
+    return <span className="we-muted">❓ {(w.question as string) || "Вопрос"}</span>;
+  return <span className="we-muted">{wtype}</span>;
+}
+
+function WidgetForm({
+  wtype,
+  id,
+  w,
+  set,
+  ctx,
+  canGenerate,
+  busy,
+  runHeavy,
+}: {
+  wtype: string;
+  id: string;
+  w: AnyData;
+  set: (f: AnyData) => void;
+  ctx: { courseId: string; moduleId: string; submoduleId: string };
+  canGenerate: boolean;
+  busy: boolean;
+  runHeavy: RunHeavy;
+}) {
+  const baseArgs = { ...ctx, widgetId: id };
+
+  if (wtype === "image") {
+    return (
+      <ImageItemEditor
+        args={baseArgs}
+        imgSrc={resolveSrc(w.url)}
+        alt={w.alt as string}
+        description={w.description as string}
+        onDescriptionChange={(v) => set({ description: v })}
+        cachedQuery={w.query as string}
+        onQueryResolved={(query) => set({ query })}
+        canGenerate={canGenerate}
+        busy={busy}
+        runHeavy={runHeavy}
+      />
+    );
   }
 
+  if (wtype === "gallery") {
+    const items = Array.isArray(w.items) ? (w.items as AnyData[]) : [];
+    const setItem = (i: number, f: AnyData) =>
+      set({ items: items.map((it, j) => (j === i ? { ...it, ...f } : it)) });
+    return (
+      <>
+        <Field label="Подпись галереи" value={w.caption} onChange={(v) => set({ caption: v })} />
+        {items.map((it, i) => (
+          <ImageItemEditor
+            key={i}
+            args={baseArgs}
+            itemIndex={i}
+            imgSrc={resolveSrc(it.url)}
+            alt={it.alt as string}
+            description={it.description as string}
+            onDescriptionChange={(v) => setItem(i, { description: v })}
+            cachedQuery={it.query as string}
+            onQueryResolved={(query) => setItem(i, { query })}
+            canGenerate={canGenerate}
+            busy={busy}
+            runHeavy={runHeavy}
+            onDelete={() => set({ items: items.filter((_, j) => j !== i) })}
+          />
+        ))}
+        <button
+          type="button"
+          className="we-add"
+          disabled={busy}
+          onClick={() => set({ items: [...items, { placeholder: true }] })}
+        >
+          + Изображение
+        </button>
+      </>
+    );
+  }
+
+  if (wtype === "diagram") {
+    return (
+      <>
+        <Field label="Mermaid-код" value={w.source} area onChange={(v) => set({ source: v })} />
+        <Field label="Подпись" value={w.caption} onChange={(v) => set({ caption: v })} />
+      </>
+    );
+  }
+  if (wtype === "video") {
+    return (
+      <>
+        <Field label="URL (YouTube/Vimeo)" value={w.url} onChange={(v) => set({ url: v })} />
+        <Field label="Название" value={w.title} onChange={(v) => set({ title: v })} />
+        <Field label="Почему стоит посмотреть" value={w.why} onChange={(v) => set({ why: v })} />
+        <Field label="Начало (сек)" value={w.start} onChange={(v) => set({ start: v })} />
+        <Field label="Конец (сек)" value={w.end} onChange={(v) => set({ end: v })} />
+        <Field label="На что обратить внимание" value={w.focus} onChange={(v) => set({ focus: v })} />
+      </>
+    );
+  }
+  if (wtype === "interactive") {
+    const legacy = typeof w.html === "string" || typeof w.css === "string" || typeof w.js === "string";
+    return (
+      <>
+        <Field label="Заголовок" value={w.title} onChange={(v) => set({ title: v })} />
+        <Field label="Описание" value={w.description} area onChange={(v) => set({ description: v })} />
+        {legacy ? (
+          <>
+            <Field label="HTML" value={w.html} area onChange={(v) => set({ html: v })} />
+            <Field label="CSS" value={w.css} area onChange={(v) => set({ css: v })} />
+            <Field label="JS" value={w.js} area onChange={(v) => set({ js: v })} />
+          </>
+        ) : (
+          <>
+            <Field label="Шаблон" value={w.template} onChange={(v) => set({ template: v })} />
+            <Field
+              label="Параметры (JSON)"
+              value={typeof w.params === "string" ? w.params : JSON.stringify(w.params ?? {}, null, 2)}
+              area
+              onChange={(v) => {
+                try {
+                  set({ params: JSON.parse(v) });
+                } catch {
+                  set({ params: v });
+                }
+              }}
+            />
+          </>
+        )}
+      </>
+    );
+  }
+  if (wtype === "checkpoint" || wtype === "recall") {
+    return (
+      <>
+        <Field label="Вопрос" value={w.question} area onChange={(v) => set({ question: v })} />
+        <Field label="Ответ" value={w.answer} area onChange={(v) => set({ answer: v })} />
+      </>
+    );
+  }
+  return <span className="we-muted">Нет настроек для «{wtype}»</span>;
+}
+
+function WidgetBlockView(props: ReactNodeViewProps) {
+  const id = props.node.attrs.id as string;
+  const wtype = props.node.attrs.wtype as string;
+  const api = (props.editor.storage as unknown as { widget?: WidgetApi }).widget;
+  const store = api?.widgets ?? {};
+  const [, force] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const w: AnyData = store[id] ?? {};
+
+  const set = (fields: AnyData) => {
+    store[id] = { ...(store[id] ?? {}), ...fields };
+    force((x) => x + 1);
+  };
+
+  // Persist current state → run a backend image/AI op → re-read widget data.
+  const runHeavy: RunHeavy = async (op, opts) => {
+    setBusy(true);
+    try {
+      await api?.persistNow?.();
+      await op();
+      if (opts?.refresh !== false && api?.readWidgets) {
+        const fresh = await api.readWidgets();
+        Object.assign(store, fresh);
+        force((x) => x + 1);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ctx = api?.ctx ?? { courseId: "", moduleId: "", submoduleId: "" };
+
   return (
-    <NodeViewWrapper className="we-widget" data-wtype={wtype} contentEditable={false}>
+    <NodeViewWrapper
+      className={`we-widget${props.selected ? " editing" : ""}`}
+      data-wtype={wtype}
+      contentEditable={false}
+    >
       <span className="we-badge">{wtype}</span>
-      <div className="we-body">{body}</div>
+      {props.selected ? (
+        <div className="we-form">
+          <WidgetForm
+            wtype={wtype}
+            id={id}
+            w={w}
+            set={set}
+            ctx={ctx}
+            canGenerate={api?.canGenerate ?? false}
+            busy={busy}
+            runHeavy={runHeavy}
+          />
+        </div>
+      ) : (
+        <div className="we-body">
+          <WidgetPreview wtype={wtype} w={w} />
+        </div>
+      )}
     </NodeViewWrapper>
   );
 }
 
 // A widget = one `::widget{type="…" id="…"}` marker line in the article. Renders
 // as an atomic block; round-trips to the exact marker on save. Widget DATA lives
-// in editor.storage.widget.widgets (set by the editor), keyed by id.
+// in editor.storage.widget.widgets (loaded by the editor), keyed by id.
 export const WidgetNode = Node.create({
   name: "widget",
   group: "block",
@@ -124,16 +343,16 @@ export const WidgetNode = Node.create({
 
   addStorage() {
     return {
-      widgets: {} as Record<string, AnyWidget>,
+      widgets: {} as Record<string, AnyData>,
       markdown: {
-        serialize(state: { write: (s: string) => void; closeBlock: (n: unknown) => void }, node: { attrs: { id: string; wtype: string } }) {
+        serialize(
+          state: { write: (s: string) => void; closeBlock: (n: unknown) => void },
+          node: { attrs: { id: string; wtype: string } }
+        ) {
           state.write(`::widget{type="${node.attrs.wtype}" id="${node.attrs.id}"}`);
           state.closeBlock(node);
         },
         parse: {
-          // tiptap-markdown renders markdown → HTML, then runs this on the HTML
-          // before ProseMirror parses it. Turn each `::widget{…}` paragraph into
-          // a widget element that parseHTML below picks up.
           updateDOM(element: HTMLElement) {
             element.querySelectorAll("p").forEach((p) => {
               const m = (p.textContent || "").trim().match(/^::widget\{([^}]*)\}$/);
