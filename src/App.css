@@ -10157,6 +10157,23 @@ textarea.le-cap {
   gap: 8px;
   margin-top: 6px;
 }
+.we-ask-ai {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.we-ask-ai:hover {
+  background: var(--surface-hover);
+}
+.we-ask-ai:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .we-field {
   display: flex;
   flex-direction: column;

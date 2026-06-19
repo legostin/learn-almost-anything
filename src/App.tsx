@@ -10688,6 +10688,7 @@ function SubmoduleView({
             return c?.widgets ?? {};
           }}
           onAskAssistant={(selection) => setEditAssistantSeed({ fragment: selection })}
+          onAskWidget={(target) => setAssistantTarget(target)}
           reloadKey={editorReloadKey}
           onClose={() => setEditing(false)}
         />

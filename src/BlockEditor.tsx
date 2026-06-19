@@ -151,12 +151,14 @@ function referencedWidgets(editor: Editor, store: Record<string, unknown>): Reco
   return out;
 }
 
+type WidgetTarget = { widgetId: string; widgetType: string; summary: string; imagePath?: string };
 type WidgetStorage = {
   widgets: Record<string, unknown>;
   ctx?: { courseId: string; moduleId: string; submoduleId: string };
   canGenerate?: boolean;
   persistNow?: () => Promise<void>;
   readWidgets?: () => Promise<Record<string, unknown>>;
+  askAssistant?: (target: WidgetTarget) => void;
 };
 
 // LEG-21 — inline WYSIWYG block editor (Tiptap). Edits article prose directly in
@@ -174,6 +176,7 @@ export function BlockEditor({
   onPersist,
   onReadWidgets,
   onAskAssistant,
+  onAskWidget,
   reloadKey,
   onClose,
 }: {
@@ -191,6 +194,8 @@ export function BlockEditor({
   // one-shot edit_text). The editor persists the draft first so the assistant
   // operates on current content.
   onAskAssistant: (selection: string) => void | Promise<void>;
+  // Open the assistant focused on a widget (editor "✨ ИИ" on a widget block).
+  onAskWidget: (target: WidgetTarget) => void;
   // Bumped by the parent after the assistant changes the lesson; the editor
   // reloads the article + widgets to reflect it.
   reloadKey?: number;
@@ -234,6 +239,7 @@ export function BlockEditor({
       await onPersist(editorMarkdown(editor), referencedWidgets(editor, api.widgets));
     };
     api.readWidgets = onReadWidgets;
+    api.askAssistant = (target) => onAskWidget(target);
     editor.commands.setContent(isolateWidgetMarkers(article));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);

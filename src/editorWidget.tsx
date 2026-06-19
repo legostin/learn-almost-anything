@@ -88,6 +88,13 @@ type WidgetApi = {
   canGenerate?: boolean;
   persistNow?: () => Promise<void>;
   readWidgets?: () => Promise<Record<string, AnyData>>;
+  // Open the course assistant focused on this widget (editor "✨ ИИ" on a widget).
+  askAssistant?: (target: {
+    widgetId: string;
+    widgetType: string;
+    summary: string;
+    imagePath?: string;
+  }) => void;
 };
 
 function Field({
@@ -387,6 +394,28 @@ function WidgetBlockView(props: ReactNodeViewProps) {
 
   const ctx = api?.ctx ?? { courseId: "", moduleId: "", submoduleId: "" };
 
+  // Open the assistant focused on this widget (persist the draft first so it
+  // reads the current widget from disk, like the reader's "✦ Ask").
+  const askAssistant = async () => {
+    const raw = (w.description ||
+      w.caption ||
+      w.title ||
+      w.alt ||
+      (Array.isArray(w.items) ? (w.items[0] as AnyData)?.description : "") ||
+      wtype) as string;
+    const summary = `${wtype} · ${String(raw).replace(/\s+/g, " ").trim().slice(0, 60)}`;
+    let imagePath: string | undefined;
+    if (
+      wtype === "image" &&
+      typeof w.url === "string" &&
+      (w.url.startsWith("/") || w.url.startsWith("file://"))
+    ) {
+      imagePath = (w.url as string).replace(/^file:\/\//, "");
+    }
+    await api?.persistNow?.();
+    api?.askAssistant?.({ widgetId: id, widgetType: wtype, summary, imagePath });
+  };
+
   return (
     <NodeViewWrapper
       className={`we-widget${props.selected ? " editing" : ""}`}
@@ -396,6 +425,19 @@ function WidgetBlockView(props: ReactNodeViewProps) {
       <span className="we-badge">{wtype}</span>
       {props.selected ? (
         <div className="we-form">
+          {api?.askAssistant && (
+            <button
+              type="button"
+              className="we-ask-ai"
+              disabled={busy}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                void askAssistant();
+              }}
+            >
+              ✨ Изменить через ассистента
+            </button>
+          )}
           <WidgetForm
             wtype={wtype}
             id={id}
