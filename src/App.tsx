@@ -18,6 +18,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
+import { BlockEditor } from "./BlockEditor";
 import hljs from "highlight.js";
 import { basicSetup } from "codemirror";
 import { EditorView, keymap } from "@codemirror/view";
@@ -10332,6 +10333,9 @@ function SubmoduleView({
   const [cardsBusy, setCardsBusy] = useState(false);
   const [editImages, setEditImages] = useState(false);
   const [editing, setEditing] = useState(false);
+  // LEG-21: which editor the "editing" gate shows — the classic block editor or
+  // the new inline WYSIWYG one (beta). Reader stays hidden by `editing` either way.
+  const [editorKind, setEditorKind] = useState<"classic" | "beta">("classic");
   const editingRef = useRef(false);
   editingRef.current = editing;
   const [assistantTarget, setAssistantTarget] = useState<AssistantTarget | null>(null);
@@ -10598,7 +10602,27 @@ function SubmoduleView({
         </div>
       )}
 
-      {editing && (
+      {editing && editorKind === "beta" && (
+        <BlockEditor
+          article={content?.article ?? ""}
+          busy={enriching}
+          onSave={async (md) => {
+            await invoke("save_lesson_content", {
+              courseId: course.id,
+              moduleId,
+              submoduleId,
+              article: md,
+              widgets: (content?.widgets as Record<string, WidgetData>) ?? {},
+              markReady: state !== "ready",
+            });
+            setEditing(false);
+            await reloadTree();
+            await reloadContent();
+          }}
+          onClose={() => setEditing(false)}
+        />
+      )}
+      {editing && editorKind === "classic" && (
         <LessonEditor
           courseId={course.id}
           moduleId={moduleId}
@@ -10681,11 +10705,27 @@ function SubmoduleView({
             {content && !isPodcast && (
               <button
                 className="sub-edit-toggle"
-                onClick={() => setEditing(true)}
+                onClick={() => {
+                  setEditorKind("classic");
+                  setEditing(true);
+                }}
                 disabled={enriching}
                 title={enriching ? t("editLessonBusy") : t("editLessonHint")}
               >
                 ✎ {t("editLesson")}
+              </button>
+            )}
+            {content && !isPodcast && (
+              <button
+                className="sub-edit-toggle"
+                onClick={() => {
+                  setEditorKind("beta");
+                  setEditing(true);
+                }}
+                disabled={enriching}
+                title="Inline block editor (beta)"
+              >
+                ✨ beta
               </button>
             )}
             {course?.course_format === "documentation" && onDocGenRequest ? (
