@@ -19,6 +19,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { BlockEditor } from "./BlockEditor";
+import { ErrorBoundary } from "./ErrorBoundary";
 import hljs from "highlight.js";
 import { basicSetup } from "codemirror";
 import { EditorView, keymap } from "@codemirror/view";
@@ -10679,6 +10680,12 @@ function SubmoduleView({
       )}
 
       {editing && editorKind === "beta" && (
+        <ErrorBoundary
+          // If the beta editor throws while parsing this article, don't white-
+          // screen the app — fall back to the reliable classic editor.
+          onError={() => setEditorKind("classic")}
+          fallback={<div className="placeholder">{t("loadingStructure")}</div>}
+        >
         <BlockEditor
           article={content?.article ?? ""}
           widgets={(content?.widgets as Record<string, unknown>) ?? {}}
@@ -10721,6 +10728,7 @@ function SubmoduleView({
           reloadKey={editorReloadKey}
           onClose={() => setEditing(false)}
         />
+        </ErrorBoundary>
       )}
       {editing && editorKind === "classic" && (
         <LessonEditor

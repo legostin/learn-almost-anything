@@ -206,7 +206,10 @@ export function BlockEditor({
   const [saving, setSaving] = useState(false);
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ codeBlock: false }),
+      // Allow the "course://" scheme so documentation cross-links
+      // [Title](course://article/<Title>) survive parsing instead of being
+      // stripped by the link extension's default protocol allow-list.
+      StarterKit.configure({ codeBlock: false, link: { protocols: ["course"] } }),
       TableKit,
       CodeBlock,
       WidgetNode,
@@ -240,7 +243,15 @@ export function BlockEditor({
     };
     api.readWidgets = onReadWidgets;
     api.askAssistant = (target) => onAskWidget(target);
-    editor.commands.setContent(isolateWidgetMarkers(article));
+    try {
+      editor.commands.setContent(isolateWidgetMarkers(article));
+    } catch (e) {
+      // Surface the real parse failure, then let the error boundary fall back to
+      // the classic editor (where the unparsed article is safe) instead of saving
+      // empty content over it.
+      console.error("[BlockEditor] setContent failed", e);
+      throw e;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
@@ -258,7 +269,11 @@ export function BlockEditor({
     lastReloadKey.current = reloadKey;
     const api = (editor.storage as unknown as { widget: WidgetStorage }).widget;
     api.widgets = { ...widgets };
-    editor.commands.setContent(isolateWidgetMarkers(article));
+    try {
+      editor.commands.setContent(isolateWidgetMarkers(article));
+    } catch (e) {
+      console.error("[BlockEditor] reload setContent failed", e);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, reloadKey]);
 

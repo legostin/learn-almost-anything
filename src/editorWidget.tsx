@@ -488,10 +488,12 @@ export const WidgetNode = Node.create({
         },
         parse: {
           updateDOM(element: HTMLElement) {
+            const doc = element.ownerDocument;
+            if (!doc) return;
             element.querySelectorAll("p").forEach((p) => {
               const m = (p.textContent || "").trim().match(/^::widget\{([^}]*)\}$/);
               if (!m) return;
-              const div = element.ownerDocument.createElement("div");
+              const div = doc.createElement("div");
               div.setAttribute("data-widget", "");
               div.setAttribute("data-wtype", parseParam(m[1], "type"));
               div.setAttribute("data-id", parseParam(m[1], "id"));
