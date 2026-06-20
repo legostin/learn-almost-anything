@@ -1330,6 +1330,12 @@ button {
   flex-direction: column;
   gap: 18px;
 }
+/* LEG-48: the full create form reused as the doc-lesson overlay. */
+.create-course-overlay {
+  width: min(620px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+}
 .create-course h2 {
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border-strong);

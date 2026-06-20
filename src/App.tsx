@@ -1898,20 +1898,33 @@ function App() {
       </main>
 
       {docGen && (
-        <DocLessonModal
-          title={docGen.title}
-          submoduleId={docGen.submoduleId}
-          defaultTier={
-            (courses.find((c) => c.id === docGen.courseId)?.generation_profile
-              ?.tier as GenerationTier) || "balanced"
-          }
-          onClose={() => setDocGen(null)}
-          onSubmit={(instructions, tier) => {
-            const { courseId, submoduleId } = docGen;
-            setDocGen(null);
-            void startSubmoduleGen(courseId, submoduleId, { instructions, tier });
-          }}
-        />
+        <div
+          className="settings-overlay"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setDocGen(null)}
+        >
+          <div className="modal create-course-overlay" onClick={(e) => e.stopPropagation()}>
+            <CreateCourse
+              agentAvail={agentAvail}
+              onCreated={() => {}}
+              onCreatedRoadmap={() => {}}
+              onCancel={() => setDocGen(null)}
+              docLesson={{
+                title: docGen.title,
+                submoduleId: docGen.submoduleId,
+                defaultTier:
+                  (courses.find((c) => c.id === docGen.courseId)?.generation_profile
+                    ?.tier as GenerationTier) || "balanced",
+                onSubmit: (instructions, tier) => {
+                  const { courseId, submoduleId } = docGen;
+                  setDocGen(null);
+                  void startSubmoduleGen(courseId, submoduleId, { instructions, tier });
+                },
+              }}
+            />
+          </div>
+        </div>
       )}
       {settingsOpen && (
         <SettingsModal
@@ -6465,6 +6478,7 @@ function CreateCourse({
   roadmapSkill,
   initialTopic,
   initialFormat,
+  docLesson,
   onCreated,
   onCreatedRoadmap,
   onCancel,
@@ -6476,6 +6490,16 @@ function CreateCourse({
   initialTopic?: string;
   /// "roadmap" preselects the roadmap format in the picker.
   initialFormat?: "roadmap";
+  // LEG-48: reuse this full create screen to generate a single documentation
+  // page. Repurposes the topic field as page instructions, keeps the depth
+  // picker, hides everything inherited from the parent course, and routes submit
+  // to onSubmit instead of creating a course.
+  docLesson?: {
+    title: string;
+    submoduleId: string;
+    defaultTier: GenerationTier;
+    onSubmit: (instructions: string, tier: GenerationTier) => void;
+  };
   onCreated: (id: string) => void;
   onCreatedRoadmap: (id: string) => void;
   onCancel: () => void;
@@ -6520,7 +6544,10 @@ function CreateCourse({
   );
   const isRoadmap = courseFormat === "roadmap";
   const isFactCheck = courseFormat === "fact_check";
-  const [tier, setTier] = useState<GenerationTier>(DEFAULT_GENERATION_TIER);
+  const isDoc = !!docLesson;
+  const [tier, setTier] = useState<GenerationTier>(
+    docLesson?.defaultTier ?? DEFAULT_GENERATION_TIER
+  );
   // Explicit overrides for the tier presets: tests and homework on/off.
   const [withTests, setWithTests] = useState(true);
   const [withAssignments, setWithAssignments] = useState(true);
@@ -6548,6 +6575,21 @@ function CreateCourse({
     else if (agent === "codex" && !agentAvail.codex && agentAvail.claude) setAgent("claude");
   }, [agentAvail, agent]);
 
+  // Doc-lesson mode: pre-fill the instructions (topic field) from any stored
+  // instructions for this page, unless the user has already typed.
+  useEffect(() => {
+    if (!docLesson) return;
+    let alive = true;
+    invoke<string | null>("get_module_instructions", { submoduleId: docLesson.submoduleId })
+      .then((v) => {
+        if (alive && typeof v === "string" && v) setTopic((cur) => cur || v);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [docLesson]);
+
   const claudeOk = agentAvail?.claude !== false;
   const codexOk = agentAvail?.codex !== false;
   const selectedAvail =
@@ -6560,7 +6602,13 @@ function CreateCourse({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!topic.trim() || busy || !selectedAvail || noAgents) return;
+    if (busy) return;
+    if (docLesson) {
+      // Generate one documentation page — instructions are optional.
+      docLesson.onSubmit(topic.trim(), tier);
+      return;
+    }
+    if (!topic.trim() || !selectedAvail || noAgents) return;
     setBusy(true);
     localStorage.setItem(COURSE_LANGUAGE_STORAGE_KEY, language);
     if (isRoadmap) {
@@ -6617,13 +6665,14 @@ function CreateCourse({
 
   return (
     <form className="create-course" onSubmit={submit}>
-      <h2>{t("createTitle")}</h2>
+      <h2>{isDoc ? t("docLessonTitle") : t("createTitle")}</h2>
+      {isDoc && <div className="field-note doc-lesson-page">{docLesson?.title}</div>}
       {roadmapId && <div className="field-note">{t("courseLinkedToRoadmap")}</div>}
       <label>
-        {isFactCheck ? t("factClaimLabel") : t("topicLabel")}
+        {isDoc ? t("docLessonInstructionsLabel") : isFactCheck ? t("factClaimLabel") : t("topicLabel")}
         <textarea
           autoFocus
-          rows={2}
+          rows={isDoc ? 5 : 2}
           value={topic}
           ref={(el) => {
             // Auto-grow: also on mount, since initialTopic can prefill the field.
@@ -6646,14 +6695,17 @@ function CreateCourse({
             }
           }}
           placeholder={
-            isFactCheck
-              ? t("factClaimPlaceholder")
-              : isRoadmap
-                ? t("roadmapTopicPlaceholder")
-                : t("topicPlaceholder")
+            isDoc
+              ? t("docLessonInstructionsPlaceholder")
+              : isFactCheck
+                ? t("factClaimPlaceholder")
+                : isRoadmap
+                  ? t("roadmapTopicPlaceholder")
+                  : t("topicPlaceholder")
           }
         />
       </label>
+      {!isDoc && (
       <label>
         {t("courseFormatLabel")}
         <FieldSelect
@@ -6679,6 +6731,7 @@ function CreateCourse({
         />
         <span className="field-note">{t("courseFormatNote")}</span>
       </label>
+      )}
       {isFactCheck && (
         <>
           <label>
@@ -6750,6 +6803,8 @@ function CreateCourse({
           />
           <span className="field-note">{t("tierNote")}</span>
         </label>
+        {isDoc && <span className="field-note">{t("docLessonNote")}</span>}
+        {!isDoc && (
         <div className="create-toggles">
           {/* Reference formats (encyclopedia/documentation) have no tests or
               homework — the backend skips them regardless, so hide the toggles. */}
@@ -6785,8 +6840,11 @@ function CreateCourse({
             </label>
           )}
         </div>
+        )}
         </>
       )}
+      {!isDoc && (
+      <>
       <label>
         {t("courseLanguageLabel")}
         <FieldSelect
@@ -6887,15 +6945,17 @@ function CreateCourse({
           )}
         </>
       )}
-      {noAgents && (
+      </>
+      )}
+      {!isDoc && noAgents && (
         <div className="form-error">{t("noAgentsBody")}</div>
       )}
       <div className="actions">
         <button
           type="submit"
-          disabled={!topic.trim() || busy || !selectedAvail || noAgents}
+          disabled={busy || (!isDoc && (!topic.trim() || !selectedAvail || noAgents))}
         >
-          {t("create")}
+          {isDoc ? t("subGenerate") : t("create")}
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
           {t("cancel")}
@@ -7602,93 +7662,6 @@ function DeleteCourseModal({
 // Documentation per-page generation modal: the standard create flow minus the
 // course-type picker. Collects what to write on this page (persisted as the
 // node's instructions, pre-filled on regenerate) and a per-generation depth.
-function DocLessonModal({
-  title,
-  submoduleId,
-  defaultTier,
-  onSubmit,
-  onClose,
-}: {
-  title: string;
-  submoduleId: string;
-  defaultTier: GenerationTier;
-  onSubmit: (instructions: string, tier: GenerationTier) => void;
-  onClose: () => void;
-}) {
-  const t = useT();
-  const [instructions, setInstructions] = useState("");
-  const [tier, setTier] = useState<GenerationTier>(defaultTier);
-  const [loaded, setLoaded] = useState(false);
-  // Pre-fill from any stored instructions, unless the user has already typed.
-  const touchedRef = useRef(false);
-  useEffect(() => {
-    let alive = true;
-    invoke<string | null>("get_module_instructions", { submoduleId })
-      .then((v) => {
-        if (alive && typeof v === "string" && !touchedRef.current) setInstructions(v);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (alive) setLoaded(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [submoduleId]);
-  const submit = () => {
-    if (loaded) onSubmit(instructions, tier);
-  };
-  return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="modal doc-lesson-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t("docLessonTitle")}</h2>
-        {title && <div className="field-note doc-lesson-page">{title}</div>}
-        <label>
-          {t("docLessonInstructionsLabel")}
-          <textarea
-            autoFocus
-            rows={5}
-            value={instructions}
-            onChange={(e) => {
-              touchedRef.current = true;
-              setInstructions(e.target.value);
-            }}
-            placeholder={t("docLessonInstructionsPlaceholder")}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                e.preventDefault();
-                submit();
-              }
-            }}
-          />
-        </label>
-        <label>
-          {t("tierLabel")}
-          <FieldSelect
-            value={tier}
-            onChange={(v) => setTier(v as GenerationTier)}
-            options={GENERATION_TIERS.map((item) => ({
-              value: item.value,
-              title: t(item.titleKey),
-              desc: t(item.descKey),
-            }))}
-          />
-          <span className="field-note">{t("tierNote")}</span>
-        </label>
-        <span className="field-note">{t("docLessonNote")}</span>
-        <div className="modal-actions">
-          <button className="ghost" onClick={onClose}>
-            {t("cancel")}
-          </button>
-          <button onClick={submit} disabled={!loaded}>
-            {t("subGenerate")}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // Edit the learner profile (level/goals/time/prior knowledge) that modulates
 // every future generation. Affects newly generated/regenerated lessons only.
 function LearnerProfileModal({
