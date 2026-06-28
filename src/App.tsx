@@ -9465,6 +9465,17 @@ type WidgetData =
   | { type: "gallery"; caption?: string; items?: WidgetImageItem[] }
   | { type: "diagram"; source: string; caption?: string; error?: string }
   | {
+      type: "chart";
+      chartType?: string;
+      title?: string;
+      caption?: string;
+      labels?: (string | number)[];
+      datasets?: any[];
+      options?: Record<string, any>;
+      controls?: any[];
+      domain?: { min: number; max: number; samples?: number; var?: string };
+    }
+  | {
       type: "video";
       url: string;
       title?: string;
@@ -9934,6 +9945,18 @@ function CourseAssistant({
       await runDeepen(q);
       return;
     }
+    // Diagram/interactive: the assistant APPLIES the requested edit (rewrites and
+    // persists the widget via fix_widget) instead of only advising — that's what
+    // "Изменить через ассистента" promises. The target stays so edits can be
+    // iterated; other widget types and untargeted turns keep chatting.
+    if (
+      widgetTarget &&
+      (widgetTarget.widgetType === "diagram" || widgetTarget.widgetType === "interactive")
+    ) {
+      if (!q || busy || actionBusy) return;
+      await applyWidgetFix(q, true);
+      return;
+    }
     if ((!q && !image && !widgetTarget) || busy || actionBusy) return;
     const userMsg: AssistantMsg = {
       role: "user",
@@ -9986,20 +10009,34 @@ function CourseAssistant({
   function note(text: string) {
     setMessages((prev) => [...prev, { role: "assistant", text }]);
   }
-  async function fixTarget() {
+  // Apply an AI edit to the current diagram/interactive target and persist it.
+  // `echo` adds the instruction to the transcript as a user turn (used by chat
+  // send); the "🔧 Fix" button passes echo=false since it shows no chat bubble.
+  async function applyWidgetFix(instruction: string | null, echo: boolean) {
     const args = targetArgs();
     if (!args || actionBusy) return;
+    const wt = widgetTarget;
+    if (echo && instruction) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          text: instruction,
+          widgetRef: wt ? { type: wt.widgetType, summary: wt.summary } : undefined,
+        },
+      ]);
+    }
+    setInput("");
     setActionBusy("fix");
     setError(null);
     try {
       const updated = await invoke<{ error?: string | null } | null>("fix_widget", {
         ...args,
-        instruction: input.trim() || null,
+        instruction,
       });
-      setInput("");
       if (updated?.error) {
         note(t("widgetFixPartial", { error: String(updated.error) }));
-      } else if (widgetTarget?.widgetType === "diagram") {
+      } else if (wt?.widgetType === "diagram") {
         // The diagram is validated only heuristically here; the real Mermaid
         // parser runs in the reader, so don't over-claim success.
         note(t("widgetFixRegenerated"));
@@ -10012,6 +10049,9 @@ function CourseAssistant({
     } finally {
       setActionBusy(null);
     }
+  }
+  async function fixTarget() {
+    await applyWidgetFix(input.trim() || null, false);
   }
   async function searchTarget() {
     const args = targetArgs();
@@ -12946,6 +12986,15 @@ function defaultWidget(kind: string): any {
       return { type: "video", url: "", title: "" };
     case "diagram":
       return { type: "diagram", source: "", caption: "" };
+    case "chart":
+      return {
+        type: "chart",
+        chartType: "bar",
+        title: "",
+        caption: "",
+        labels: ["A", "B", "C"],
+        datasets: [{ label: "Series 1", data: [3, 5, 4] }],
+      };
     case "interactive":
       // New interactive blocks are template widgets (free-form HTML is legacy).
       return {
@@ -13391,6 +13440,96 @@ export function ImageItemEditor({
 // Per-widget editor. Manual fields go into the editor's widgets map (saved
 // wholesale); heavy ops (upload / search / generate / AI-fix) run via runHeavy,
 // which persists first so the widget exists on disk, then re-reads it back.
+// Editor for a chart widget: a live preview + the chart spec as editable JSON
+// (everything except `type`). Valid JSON is patched onto the widget; invalid
+// intermediate text is kept locally so typing is not disrupted.
+function ChartBlockEditor({
+  wid,
+  widget,
+  busy,
+  onPatch,
+  genDesc,
+  setGenDesc,
+  runHeavy,
+  args,
+}: {
+  wid: string;
+  widget: any;
+  busy: boolean;
+  onPatch: (fields: Record<string, any>) => void;
+  genDesc: string;
+  setGenDesc: (v: string) => void;
+  runHeavy: (op: () => Promise<void>, opts?: { refresh?: boolean }) => Promise<void>;
+  args: Record<string, any>;
+}) {
+  const t = useT();
+  const specJson = useMemo(() => {
+    const { type, ...rest } = widget || {};
+    void type;
+    try {
+      return JSON.stringify(rest, null, 2);
+    } catch {
+      return "{}";
+    }
+  }, [widget]);
+  const [text, setText] = useState(specJson);
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  // Re-sync when the widget changes from outside (e.g. an AI edit).
+  useEffect(() => {
+    setText(specJson);
+    setJsonError(null);
+  }, [specJson]);
+
+  function apply(next: string) {
+    setText(next);
+    try {
+      const parsed = JSON.parse(next);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        setJsonError(null);
+        onPatch(parsed);
+      } else {
+        setJsonError("object expected");
+      }
+    } catch (e: any) {
+      setJsonError(String(e?.message ?? "invalid JSON"));
+    }
+  }
+
+  return (
+    <figure className="le-widget">
+      <div className="le-widget-tag">📈 {t("blockChart")}</div>
+      <ChartWidget id={wid} widget={widget} />
+      <textarea
+        className="le-code"
+        placeholder={t("chartSpec")}
+        value={text}
+        disabled={busy}
+        spellCheck={false}
+        onChange={(e) => apply(e.target.value)}
+      />
+      {jsonError && <div className="le-json-error">{jsonError}</div>}
+      <div className="le-gen-row">
+        <input
+          placeholder={t("genDescribePlaceholder")}
+          value={genDesc}
+          onChange={(e) => setGenDesc(e.target.value)}
+        />
+        <button
+          disabled={busy || !genDesc.trim()}
+          onClick={() =>
+            runHeavy(async () => {
+              await invoke("fix_widget", { ...args, instruction: genDesc });
+              setGenDesc("");
+            })
+          }
+        >
+          ✦ {t("widgetGenerate")}
+        </button>
+      </div>
+    </figure>
+  );
+}
+
 function LeWidgetBlock({
   wid,
   widget,
@@ -13473,6 +13612,20 @@ function LeWidgetBlock({
           </button>
         </div>
       </figure>
+    );
+  }
+  if (type === "chart") {
+    return (
+      <ChartBlockEditor
+        wid={wid}
+        widget={widget}
+        busy={busy}
+        onPatch={onPatch}
+        genDesc={genDesc}
+        setGenDesc={setGenDesc}
+        runHeavy={runHeavy}
+        args={args}
+      />
     );
   }
   if (type === "interactive" && widget?.template) {
@@ -13654,6 +13807,7 @@ function InsertBar({ onInsert }: { onInsert: (k: string) => void }) {
     { k: "formula", label: t("blockFormula") },
     { k: "video", label: t("blockVideo") },
     { k: "diagram", label: t("blockDiagram") },
+    { k: "chart", label: t("blockChart") },
     { k: "interactive", label: t("blockInteractive") },
     { k: "code", label: t("blockCode") },
     { k: "checkpoint", label: t("blockCheckpoint") },
@@ -13915,6 +14069,7 @@ function WidgetRenderer({
       />
     );
   } else if (widget.type === "diagram") inner = <DiagramWidget id={id} widget={widget as any} />;
+  else if (widget.type === "chart") inner = <ChartWidget id={id} widget={widget as any} />;
   else if (widget.type === "video") inner = <VideoWidget id={id} widget={widget as any} />;
   else if (widget.type === "interactive")
     // Templated widgets render natively; legacy free-form code keeps the
@@ -13936,7 +14091,7 @@ function WidgetRenderer({
 
   // In the editable reader, wrap visual widgets with an "Ask" affordance that
   // focuses the assistant on this widget (ask / fix / other variants).
-  const askable = ["image", "gallery", "diagram", "video", "interactive"].includes(widget.type);
+  const askable = ["image", "gallery", "diagram", "chart", "video", "interactive"].includes(widget.type);
   if (widgetCtx && askable) {
     return (
       <div className="widget-host">
@@ -14203,18 +14358,26 @@ function VideoWidget({
 }) {
   const t = useT();
   const embed = videoEmbedUrl(widget.url, widget.start, widget.end);
+  // In production the app is served from the `tauri://localhost` custom scheme,
+  // whose origin YouTube rejects with "Error 153" (no valid HTTP Referer). Route
+  // the embed through the always-on local HTTP server (origin http://127.0.0.1,
+  // SHARE_PORT 8787) so the player gets the http referer it needs. Dev
+  // (http://localhost) and the shared web client already have a valid http(s)
+  // origin, so they embed directly.
+  const src = !embed
+    ? undefined
+    : /^https?:$/.test(window.location.protocol)
+      ? embed
+      : `http://127.0.0.1:8787/yt?src=${encodeURIComponent(embed)}`;
   const hasSegment = typeof widget.start === "number" && widget.start > 0;
   return (
     <figure className="widget widget-video">
       {embed ? (
         <div className="widget-video-frame">
           <iframe
-            src={embed}
+            src={src}
             title={widget.title || `video ${id}`}
             allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            // YouTube returns "Error 153" when the embed gets no acceptable HTTP
-            // Referer (the app's custom-scheme origin). Force the origin to be
-            // sent so the player loads inside the webview.
             referrerPolicy="strict-origin-when-cross-origin"
             allowFullScreen
           />
@@ -16681,6 +16844,493 @@ function ImagePlaceholder({
           </div>
         </div>
       )}
+    </figure>
+  );
+}
+
+// ===== Chart widget: data & function charts rendered with Chart.js =====
+// Mirrors the server renderer (legost.in ChartWidget) so a course renders the
+// same in-app and on the web. Chart.js is lazy-imported (code-split, offline).
+
+const CHART_PALETTE = [
+  "#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2",
+  "#db2777", "#65a30d", "#ea580c", "#0d9488", "#9333ea", "#475569",
+];
+const CHART_KINDS = [
+  "line", "bar", "area", "pie", "doughnut", "radar",
+  "polarArea", "scatter", "bubble", "function", "mixed",
+];
+
+type ChartDataset = {
+  label?: string;
+  data: any[];
+  color?: string;
+  fill?: boolean;
+  dashed?: boolean;
+  type?: string;
+  expr?: string;
+  stack?: string;
+  pointRadius?: number;
+};
+type ChartControl = {
+  name: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  unit?: string;
+};
+type ChartSpec = {
+  type: string;
+  title: string;
+  caption: string;
+  labels: string[] | null;
+  datasets: ChartDataset[];
+  options: Record<string, any>;
+  controls: ChartControl[] | null;
+  domain: { min: number; max: number; samples: number; var: string } | null;
+};
+
+function chartNum(v: any): number | null {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function chartColor(v: any): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  if (/^#([0-9a-f]{3,8})$/i.test(s) || /^(rgb|rgba|hsl|hsla)\(/i.test(s) || /^[a-z]{3,20}$/i.test(s)) return s;
+  return undefined;
+}
+const CHART_RESERVED = ["__proto__", "constructor", "prototype"];
+
+// Normalise/clamp a chart widget into the exact shape the renderer expects.
+// Generation already validates, but the reader stays defensive (user edits,
+// older courses). Returns null when nothing is renderable.
+function normalizeChartSpec(widget: any): ChartSpec | null {
+  if (!widget || typeof widget !== "object") return null;
+  let kind = String(widget.chartType ?? widget.chart ?? widget.kind ?? "").toLowerCase().trim();
+  if (!kind || ["chart", "graph", "plot", "widget"].includes(kind)) {
+    kind = String(widget.chart ?? widget.kind ?? widget.chartType ?? "line").toLowerCase().trim();
+  }
+  const alias: Record<string, string> = {
+    donut: "doughnut", polar: "polarArea", polararea: "polarArea",
+    col: "bar", column: "bar", columns: "bar", fn: "function",
+  };
+  kind = alias[kind] ?? kind;
+  if (!CHART_KINDS.includes(kind)) kind = "line";
+
+  let rawDs: any[] | null = Array.isArray(widget.datasets) ? widget.datasets : null;
+  if (!rawDs && Array.isArray(widget.data)) rawDs = [{ data: widget.data, label: widget.label }];
+  if (!rawDs && typeof widget.expr === "string") rawDs = [{ expr: widget.expr, label: widget.label }];
+
+  const pointLike = kind === "scatter" || kind === "bubble";
+  const datasets: ChartDataset[] = [];
+  for (const ds of (rawDs ?? []).slice(0, 16)) {
+    if (!ds || typeof ds !== "object") continue;
+    const expr = typeof ds.expr === "string" && ds.expr.trim() ? ds.expr.trim().slice(0, 240) : undefined;
+    const data: any[] = [];
+    if (Array.isArray(ds.data)) {
+      for (const p of ds.data.slice(0, 2000)) {
+        if (p && typeof p === "object" && ("x" in p || "y" in p)) {
+          const e: any = { x: chartNum(p.x), y: chartNum(p.y) };
+          const r = chartNum(p.r);
+          if (r !== null) e.r = Math.max(0, Math.min(60, r));
+          data.push(e);
+        } else if (pointLike && Array.isArray(p) && p.length >= 2) {
+          data.push({ x: chartNum(p[0]), y: chartNum(p[1]) });
+        } else {
+          data.push(chartNum(p));
+        }
+      }
+    }
+    if (data.length === 0 && !expr) continue;
+    let dsType = typeof ds.type === "string" ? ds.type.toLowerCase() : undefined;
+    if (dsType && !["line", "bar", "area", "scatter", "bubble"].includes(dsType)) dsType = undefined;
+    const pr = chartNum(ds.pointRadius);
+    datasets.push({
+      label: typeof ds.label === "string" ? ds.label.slice(0, 80) : undefined,
+      data,
+      color: chartColor(ds.color ?? ds.borderColor ?? ds.backgroundColor),
+      fill: typeof ds.fill === "boolean" ? ds.fill : undefined,
+      dashed: typeof ds.dashed === "boolean" ? ds.dashed : undefined,
+      type: dsType,
+      expr,
+      stack: typeof ds.stack === "string" ? ds.stack.slice(0, 40) : undefined,
+      pointRadius: pr !== null ? Math.max(0, Math.min(20, pr)) : undefined,
+    });
+  }
+  const hasExpr = datasets.some((d) => d.expr);
+  if (datasets.length === 0 && !hasExpr) return null;
+
+  let labels: string[] | null = null;
+  if (Array.isArray(widget.labels)) {
+    labels = widget.labels
+      .slice(0, 2000)
+      .filter((l: any) => l !== null && typeof l !== "object")
+      .map((l: any) => String(l).slice(0, 120));
+    if (labels && labels.length === 0) labels = null;
+  }
+
+  let controls: ChartControl[] | null = null;
+  if (Array.isArray(widget.controls)) {
+    const seen = new Set<string>();
+    const out: ChartControl[] = [];
+    for (const c of widget.controls.slice(0, 10)) {
+      if (!c || typeof c.name !== "string") continue;
+      const name = c.name.replace(/[^a-zA-Z0-9_]/g, "");
+      if (!name || !/^[a-zA-Z_]/.test(name) || CHART_RESERVED.includes(name) || seen.has(name)) continue;
+      seen.add(name);
+      let min = chartNum(c.min) ?? 0;
+      let max = chartNum(c.max) ?? 10;
+      if (max <= min) max = min + 1;
+      let value = chartNum(c.value ?? c.init ?? c.default) ?? min;
+      value = Math.max(min, Math.min(max, value));
+      const step = chartNum(c.step);
+      out.push({
+        name,
+        label: String(c.label ?? name).slice(0, 60),
+        min,
+        max,
+        step: step && step > 0 ? step : Math.round(((max - min) / 100) * 1e6) / 1e6,
+        value,
+        unit: typeof c.unit === "string" ? c.unit.slice(0, 12) : undefined,
+      });
+    }
+    controls = out.length ? out : null;
+  }
+
+  let domain: ChartSpec["domain"] = null;
+  if (widget.domain && typeof widget.domain === "object") {
+    const dmin = chartNum(widget.domain.min);
+    const dmax = chartNum(widget.domain.max);
+    if (dmin !== null && dmax !== null && dmax > dmin) {
+      const samples = Math.max(2, Math.min(600, Math.round(chartNum(widget.domain.samples) ?? 100)));
+      let v = String(widget.domain.var ?? "x").replace(/[^a-zA-Z_]/g, "") || "x";
+      if (CHART_RESERVED.includes(v)) v = "x";
+      domain = { min: dmin, max: dmax, samples, var: v };
+    }
+  }
+  if (hasExpr && !domain) domain = { min: -10, max: 10, samples: 100, var: "x" };
+
+  const o = widget.options && typeof widget.options === "object" ? widget.options : {};
+  let legend: any = o.legend ?? true;
+  if (typeof legend === "string") {
+    const lp = legend.toLowerCase();
+    legend = ["top", "bottom", "left", "right"].includes(lp) ? lp : lp === "false" || lp === "none" ? false : "top";
+  } else legend = legend ? "top" : false;
+  const ar = chartNum(o.aspectRatio);
+  const options: Record<string, any> = {
+    legend,
+    stacked: typeof o.stacked === "boolean" ? o.stacked : undefined,
+    horizontal: typeof o.horizontal === "boolean" ? o.horizontal : undefined,
+    beginAtZero: typeof o.beginAtZero === "boolean" ? o.beginAtZero : undefined,
+    grid: typeof o.grid === "boolean" ? o.grid : undefined,
+    tooltips: typeof o.tooltips === "boolean" ? o.tooltips : undefined,
+    xLabel: typeof o.xLabel === "string" ? o.xLabel.slice(0, 60) : undefined,
+    yLabel: typeof o.yLabel === "string" ? o.yLabel.slice(0, 60) : undefined,
+    yMin: chartNum(o.yMin),
+    yMax: chartNum(o.yMax),
+    aspectRatio: ar !== null ? Math.max(0.5, Math.min(4, ar)) : undefined,
+  };
+
+  return {
+    type: kind,
+    title: typeof widget.title === "string" ? widget.title.slice(0, 160) : "",
+    caption: typeof widget.caption === "string" ? widget.caption.slice(0, 300) : "",
+    labels,
+    datasets,
+    options,
+    controls,
+    domain,
+  };
+}
+
+function chartAlpha(color: string, alpha: number): string {
+  if (typeof color !== "string") return color;
+  if (color.charAt(0) === "#") {
+    let hex = color.slice(1);
+    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    if (hex.length === 6 || hex.length === 8) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) return `rgba(${r},${g},${b},${alpha})`;
+    }
+    return color;
+  }
+  const m = color.match(/^(rgb|hsl)a?\(([^)]*)\)$/i);
+  if (m) return `${m[1].toLowerCase()}a(${m[2].split(",").slice(0, 3).join(",").trim()},${alpha})`;
+  return color;
+}
+
+function chartComputeExpr(
+  ds: ChartDataset,
+  domain: NonNullable<ChartSpec["domain"]>,
+  scope: Record<string, number>,
+): any[] {
+  const { min: lo, max: hi, samples: n, var: vn } = domain;
+  const local: Record<string, number> = { ...scope };
+  const pts: any[] = [];
+  for (let i = 0; i < n; i++) {
+    const x = n <= 1 ? lo : lo + ((hi - lo) * i) / (n - 1);
+    local[vn] = x;
+    const y = tplEvalExpr(ds.expr!, local);
+    pts.push({ x, y: y === null || !Number.isFinite(y) ? null : y });
+  }
+  return pts;
+}
+
+function chartBaseType(spec: ChartSpec, ds: ChartDataset): string {
+  if (ds.type) return ds.type === "area" ? "line" : ds.type;
+  if (spec.type === "area" || spec.type === "function") return "line";
+  if (spec.type === "mixed") return "bar";
+  return spec.type;
+}
+
+function chartDatasetConfig(spec: ChartSpec, ds: ChartDataset, index: number, data: any[]): any {
+  const t = spec.type;
+  const color = ds.color || CHART_PALETTE[index % CHART_PALETTE.length];
+  const out: any = { label: ds.label || `Series ${index + 1}`, data };
+  if (t === "pie" || t === "doughnut" || t === "polarArea") {
+    out.backgroundColor = data.map((_, k) => CHART_PALETTE[k % CHART_PALETTE.length]);
+    out.borderColor = "#fff";
+    out.borderWidth = 1;
+    return out;
+  }
+  if (t === "radar") {
+    out.borderColor = color;
+    out.backgroundColor = chartAlpha(color, 0.2);
+    out.pointBackgroundColor = color;
+    out.borderWidth = 2;
+    out.fill = true;
+    return out;
+  }
+  const base = chartBaseType(spec, ds);
+  out.type = base;
+  if (base === "line") {
+    out.borderColor = color;
+    out.backgroundColor = chartAlpha(color, 0.18);
+    out.fill = t === "area" || ds.type === "area" || ds.fill === true;
+    out.tension = 0.3;
+    out.borderWidth = 2;
+    out.pointRadius = ds.pointRadius != null ? ds.pointRadius : data.length > 60 ? 0 : 3;
+    out.pointHoverRadius = 5;
+    if (ds.dashed) out.borderDash = [6, 4];
+  } else if (base === "bar") {
+    out.backgroundColor = chartAlpha(color, 0.85);
+    out.borderColor = color;
+    out.borderWidth = 1;
+    out.borderRadius = 4;
+    out.maxBarThickness = 64;
+  } else if (base === "scatter" || base === "bubble") {
+    out.borderColor = color;
+    out.backgroundColor = chartAlpha(color, 0.7);
+    if (ds.pointRadius != null) out.pointRadius = ds.pointRadius;
+  } else {
+    out.backgroundColor = chartAlpha(color, 0.85);
+    out.borderColor = color;
+  }
+  if (ds.stack) out.stack = ds.stack;
+  return out;
+}
+
+function buildChartConfig(spec: ChartSpec, datasets: any[], isDark: boolean): any {
+  const t = spec.type;
+  const o = spec.options;
+  const circular = t === "pie" || t === "doughnut" || t === "polarArea";
+  const radar = t === "radar";
+  const linearX = t === "scatter" || t === "bubble" || t === "function" || spec.datasets.some((d) => d.expr);
+  const legendPos = o.legend === false ? null : typeof o.legend === "string" ? o.legend : "top";
+  const tick = isDark ? "#cbd5e1" : "#475569";
+  const gridColor = isDark ? "rgba(148,163,184,0.18)" : "rgba(100,116,139,0.15)";
+  const options: any = {
+    responsive: true,
+    maintainAspectRatio: true,
+    aspectRatio: o.aspectRatio || (circular ? 1.5 : 2),
+    animation: { duration: 320 },
+    interaction: { intersect: false, mode: linearX ? "nearest" : "index" },
+    plugins: {
+      legend: {
+        display: legendPos !== null,
+        position: legendPos || "top",
+        labels: { usePointStyle: true, boxWidth: 10, padding: 14, color: tick },
+      },
+      title: { display: !!spec.title, text: spec.title, font: { size: 15, weight: "600" }, padding: { bottom: 12 }, color: tick },
+      tooltip: { enabled: o.tooltips !== false },
+    },
+  };
+  if (!circular && !radar) {
+    const grid = o.grid !== false;
+    const beginZero = o.beginAtZero != null ? o.beginAtZero : t === "bar" || t === "area";
+    options.indexAxis = o.horizontal ? "y" : "x";
+    const idxAxis = o.horizontal ? "y" : "x";
+    const valAxis = o.horizontal ? "x" : "y";
+    options.scales = {
+      x: { title: { display: !!o.xLabel, text: o.xLabel || "", color: tick }, grid: { display: grid, color: gridColor }, ticks: { color: tick }, stacked: !!o.stacked },
+      y: { title: { display: !!o.yLabel, text: o.yLabel || "", color: tick }, grid: { display: grid, color: gridColor }, ticks: { color: tick }, stacked: !!o.stacked },
+    };
+    options.scales[idxAxis].type = linearX ? "linear" : "category";
+    options.scales[valAxis].beginAtZero = beginZero;
+    if (o.yMin != null) options.scales[valAxis].min = o.yMin;
+    if (o.yMax != null) options.scales[valAxis].max = o.yMax;
+  } else if (radar) {
+    options.scales = {
+      r: {
+        beginAtZero: o.beginAtZero !== false,
+        ticks: { color: tick, backdropColor: "transparent" },
+        grid: { color: gridColor },
+        angleLines: { color: gridColor },
+        pointLabels: { color: tick },
+      },
+    };
+  }
+  const data: any = { datasets };
+  if (!linearX) {
+    if (spec.labels) data.labels = spec.labels;
+    else {
+      const maxLen = datasets.reduce((m, d) => Math.max(m, (d.data || []).length), 0);
+      data.labels = Array.from({ length: maxLen }, (_, i) => String(i + 1));
+    }
+  }
+  const chartType = circular ? t : radar ? "radar" : t === "area" || t === "function" ? "line" : t === "mixed" ? "bar" : t;
+  return { type: chartType, data, options };
+}
+
+function ChartControls({
+  controls,
+  scope,
+  onChange,
+}: {
+  controls: ChartControl[];
+  scope: Record<string, number>;
+  onChange: (name: string, value: number) => void;
+}) {
+  const fmt = (v: number, step: number) =>
+    step >= 1 ? String(Math.round(v)) : step >= 0.1 ? v.toFixed(1) : v.toFixed(2);
+  return (
+    <div className="laa-chart-controls">
+      {controls.map((c) => (
+        <label key={c.name} className="laa-chart-control">
+          <span className="laa-chart-control-label">{c.label}</span>
+          <input
+            type="range"
+            className="laa-chart-range"
+            min={c.min}
+            max={c.max}
+            step={c.step}
+            value={scope[c.name]}
+            onChange={(e) => onChange(c.name, Number(e.target.value))}
+          />
+          <span className="laa-chart-control-value">
+            {fmt(scope[c.name], c.step)}
+            {c.unit ? ` ${c.unit}` : ""}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function ChartFallback({ spec }: { spec: ChartSpec }) {
+  // Minimal data table so content survives if Chart.js fails to load.
+  const rows = spec.labels ?? spec.datasets[0]?.data.map((_, i) => String(i + 1)) ?? [];
+  return (
+    <figure className="widget widget-chart">
+      <table className="laa-chart-fallback">
+        <thead>
+          <tr>
+            <th></th>
+            {spec.datasets.map((d, i) => (
+              <th key={i}>{d.label || "—"}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 30).map((r, ri) => (
+            <tr key={ri}>
+              <th>{r}</th>
+              {spec.datasets.map((d, di) => (
+                <td key={di}>{typeof d.data[ri] === "number" ? d.data[ri] : ""}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {spec.caption ? <figcaption>{spec.caption}</figcaption> : null}
+    </figure>
+  );
+}
+
+export function ChartWidget({ id, widget }: { id: string; widget: any }) {
+  const spec = useMemo(() => normalizeChartSpec(widget), [widget]);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chartRef = useRef<any>(null);
+  const [scope, setScope] = useState<Record<string, number>>(() => {
+    const s: Record<string, number> = {};
+    (spec?.controls ?? []).forEach((c) => (s[c.name] = c.value));
+    return s;
+  });
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!spec || !canvasRef.current) return;
+    let cancelled = false;
+    setFailed(false);
+    (async () => {
+      try {
+        const mod: any = await import("chart.js/auto");
+        const Chart = mod.default;
+        const ctx = canvasRef.current?.getContext("2d");
+        if (cancelled || !ctx) return;
+        const isDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        const datasets = spec.datasets.map((ds, i) =>
+          chartDatasetConfig(spec, ds, i, ds.expr && spec.domain ? chartComputeExpr(ds, spec.domain, scopeRef.current) : ds.data),
+        );
+        chartRef.current?.destroy();
+        chartRef.current = new Chart(ctx, buildChartConfig(spec, datasets, isDark));
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      chartRef.current?.destroy();
+      chartRef.current = null;
+    };
+  }, [spec]);
+
+  const onControl = useCallback(
+    (name: string, value: number) => {
+      setScope((prev) => {
+        const next = { ...prev, [name]: value };
+        const chart = chartRef.current;
+        if (chart && spec) {
+          spec.datasets.forEach((ds, i) => {
+            if (ds.expr && spec.domain) chart.data.datasets[i].data = chartComputeExpr(ds, spec.domain, next);
+          });
+          chart.update("none");
+        }
+        return next;
+      });
+    },
+    [spec],
+  );
+
+  if (!spec) return null;
+  if (failed) return <ChartFallback spec={spec} />;
+  return (
+    <figure className="widget widget-chart" data-widget-id={id}>
+      <div className="laa-chart-canvas-wrap">
+        <canvas ref={canvasRef} className="laa-chart-canvas" />
+      </div>
+      {spec.controls && spec.controls.length ? (
+        <ChartControls controls={spec.controls} scope={scope} onChange={onControl} />
+      ) : null}
+      {spec.caption ? <figcaption>{spec.caption}</figcaption> : null}
     </figure>
   );
 }

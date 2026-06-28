@@ -472,3 +472,174 @@ for relationships, order for sequences, slider for quantitative intuition, flipc
 for vocabulary. Do NOT invent other templates or extra param fields. Do NOT write
 HTML/CSS/JS.`;
 }
+
+// ===== Chart widgets (type "chart") =====
+// A data/function chart rendered natively (Chart.js) in the app and on the web.
+// normalizeChartWidget clamps/validates and returns null when unrenderable, so
+// both agent backends drop a bad chart and its article marker is cleaned up.
+
+const CHART_KINDS = [
+  "line", "bar", "area", "pie", "doughnut", "radar",
+  "polarArea", "scatter", "bubble", "function", "mixed",
+];
+const CHART_RESERVED = ["__proto__", "constructor", "prototype"];
+
+function chartColorOk(v) {
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  return /^#([0-9a-f]{3,8})$/i.test(s) || /^(rgb|rgba|hsl|hsla)\(/i.test(s) || /^[a-z]{3,20}$/i.test(s);
+}
+
+export function normalizeChartWidget(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  let kind = String(raw.chartType ?? raw.chart ?? raw.kind ?? "").toLowerCase().trim();
+  if (!kind || ["chart", "graph", "plot", "widget"].includes(kind)) {
+    kind = String(raw.chart ?? raw.kind ?? raw.chartType ?? "line").toLowerCase().trim();
+  }
+  const alias = { donut: "doughnut", polar: "polarArea", polararea: "polarArea", col: "bar", column: "bar", columns: "bar", fn: "function" };
+  kind = alias[kind] ?? kind;
+  if (!CHART_KINDS.includes(kind)) kind = "line";
+
+  let rawDs = Array.isArray(raw.datasets) ? raw.datasets : null;
+  if (!rawDs && Array.isArray(raw.data)) rawDs = [{ data: raw.data, label: raw.label }];
+  if (!rawDs && typeof raw.expr === "string") rawDs = [{ expr: raw.expr, label: raw.label }];
+
+  const pointLike = kind === "scatter" || kind === "bubble";
+  const datasets = [];
+  for (const ds of (Array.isArray(rawDs) ? rawDs : []).slice(0, 16)) {
+    if (!ds || typeof ds !== "object") continue;
+    const expr = typeof ds.expr === "string" && ds.expr.trim() ? ds.expr.trim().slice(0, 240) : null;
+    const data = [];
+    if (Array.isArray(ds.data)) {
+      for (const p of ds.data.slice(0, 2000)) {
+        if (p && typeof p === "object" && ("x" in p || "y" in p)) {
+          const e = { x: num(p.x), y: num(p.y) };
+          if (num(p.r) !== null) e.r = Math.max(0, Math.min(60, num(p.r)));
+          data.push(e);
+        } else if (pointLike && Array.isArray(p) && p.length >= 2) {
+          data.push({ x: num(p[0]), y: num(p[1]) });
+        } else {
+          data.push(num(p));
+        }
+      }
+    }
+    if (data.length === 0 && !expr) continue;
+    let dsType = typeof ds.type === "string" ? ds.type.toLowerCase() : null;
+    if (dsType && !["line", "bar", "area", "scatter", "bubble"].includes(dsType)) dsType = null;
+    const out = {};
+    if (str(ds.label)) out.label = str(ds.label).slice(0, 80);
+    if (expr) out.expr = expr;
+    else out.data = data;
+    if (chartColorOk(ds.color)) out.color = ds.color.trim();
+    if (typeof ds.fill === "boolean") out.fill = ds.fill;
+    if (typeof ds.dashed === "boolean") out.dashed = ds.dashed;
+    if (dsType) out.type = dsType;
+    if (str(ds.stack)) out.stack = str(ds.stack).slice(0, 40);
+    if (num(ds.pointRadius) !== null) out.pointRadius = Math.max(0, Math.min(20, num(ds.pointRadius)));
+    datasets.push(out);
+  }
+  const hasExpr = datasets.some((d) => d.expr);
+  if (datasets.length === 0 && !hasExpr) return null;
+
+  let controls = null;
+  if (Array.isArray(raw.controls)) {
+    const seen = new Set();
+    const out = [];
+    for (const c of raw.controls.slice(0, 10)) {
+      if (!c || typeof c.name !== "string") continue;
+      const name = c.name.replace(/[^a-zA-Z0-9_]/g, "");
+      if (!name || !/^[a-zA-Z_]/.test(name) || CHART_RESERVED.includes(name) || seen.has(name)) continue;
+      seen.add(name);
+      let min = num(c.min) ?? 0;
+      let max = num(c.max) ?? 10;
+      if (!(max > min)) max = min + 1;
+      let value = num(c.value ?? c.init ?? c.default);
+      if (value === null) value = min;
+      value = Math.max(min, Math.min(max, value));
+      let step = num(c.step);
+      if (!(step > 0)) step = Math.round(((max - min) / 100) * 1e6) / 1e6;
+      const ctl = { name, label: (str(c.label) || name).slice(0, 60), min, max, step, value };
+      if (str(c.unit)) ctl.unit = str(c.unit).slice(0, 12);
+      out.push(ctl);
+    }
+    controls = out.length ? out : null;
+  }
+
+  let domain = null;
+  if (raw.domain && typeof raw.domain === "object") {
+    const dmin = num(raw.domain.min);
+    const dmax = num(raw.domain.max);
+    if (dmin !== null && dmax !== null && dmax > dmin) {
+      const samples = Math.max(2, Math.min(600, Math.round(num(raw.domain.samples) ?? 100)));
+      let v = String(raw.domain.var ?? "x").replace(/[^a-zA-Z_]/g, "") || "x";
+      if (CHART_RESERVED.includes(v)) v = "x";
+      domain = { min: dmin, max: dmax, samples, var: v };
+    }
+  }
+  if (hasExpr && !domain) domain = { min: -10, max: 10, samples: 100, var: "x" };
+  // Every expression must evaluate (against control initials + the domain var),
+  // otherwise the chart would draw nothing.
+  if (hasExpr) {
+    const scope = {};
+    (controls || []).forEach((c) => (scope[c.name] = c.value));
+    scope[domain.var] = (domain.min + domain.max) / 2;
+    for (const d of datasets) {
+      if (d.expr && evalExpr(d.expr, scope) === null) return null;
+    }
+  }
+
+  let labels = null;
+  if (Array.isArray(raw.labels)) {
+    labels = raw.labels
+      .slice(0, 2000)
+      .filter((l) => l !== null && typeof l !== "object")
+      .map((l) => String(l).slice(0, 120));
+    if (!labels.length) labels = null;
+  }
+
+  const o = raw.options && typeof raw.options === "object" ? raw.options : {};
+  const options = {};
+  if (o.legend !== undefined) {
+    if (typeof o.legend === "string") {
+      const lp = o.legend.toLowerCase();
+      options.legend = ["top", "bottom", "left", "right"].includes(lp) ? lp : lp === "false" || lp === "none" ? false : "top";
+    } else options.legend = o.legend ? "top" : false;
+  }
+  for (const k of ["stacked", "horizontal", "beginAtZero", "grid", "tooltips"]) {
+    if (typeof o[k] === "boolean") options[k] = o[k];
+  }
+  for (const k of ["xLabel", "yLabel"]) {
+    if (str(o[k])) options[k] = str(o[k]).slice(0, 60);
+  }
+  if (num(o.yMin) !== null) options.yMin = num(o.yMin);
+  if (num(o.yMax) !== null) options.yMax = num(o.yMax);
+  if (num(o.aspectRatio) !== null) options.aspectRatio = Math.max(0.5, Math.min(4, num(o.aspectRatio)));
+
+  return {
+    type: "chart",
+    chartType: kind,
+    ...(str(raw.title) ? { title: str(raw.title).slice(0, 160) } : {}),
+    ...(str(raw.caption) ? { caption: str(raw.caption).slice(0, 300) } : {}),
+    ...(labels ? { labels } : {}),
+    datasets,
+    ...(Object.keys(options).length ? { options } : {}),
+    ...(controls ? { controls } : {}),
+    ...(domain ? { domain } : {}),
+  };
+}
+
+// What the model is told about chart widgets (mirrors normalizeChartWidget).
+export function chartCatalogBlock(lang) {
+  return `CHART WIDGET (type "chart"): a data or function chart rendered natively.
+Shape: {"id":"chart-1","type":"chart","chartType":"<kind>","title"?,"caption"?,"labels"?:[...],"datasets":[...],"options"?:{...},"controls"?:[...],"domain"?:{...}}
+chartType: line | bar | area | pie | doughnut | radar | polarArea | scatter | bubble | function | mixed.
+- Category charts (line/bar/area/pie/doughnut/radar/polarArea): "labels":["Jan","Feb",...] and
+  "datasets":[{"label":"Series A","data":[1,2,3],"color"?,"stack"?,"fill"?,"dashed"?,"type"? for mixed (bar|line)}].
+- scatter / bubble: dataset "data":[{"x":1,"y":2,"r"?:5}].
+- function (live, draggable): dataset "expr":"a*x*x + b*x + c" with "controls":[{"name":"a","label":"a","min":-3,"max":3,"step":0.1,"value":1}] (1-6 sliders)
+  and "domain":{"min":-10,"max":10,"samples":120}. expr may use ONLY numbers, the domain var (default x),
+  control names, + - * / ^ ( ), pi, e, and sin cos tan sqrt abs log exp round floor ceil (1 arg), min max pow (2 args).
+options (optional): {"legend":"top|bottom|left|right|false","stacked":bool,"horizontal":bool,"beginAtZero":bool,"xLabel","yLabel","yMin","yMax"}.
+Use a chart for REAL quantitative data or to illustrate a function/relationship — never invent fake numbers.
+All learner-visible strings in language "${lang}". Place the marker ::widget{type="chart" id="chart-1"} in the article where the chart belongs.`;
+}

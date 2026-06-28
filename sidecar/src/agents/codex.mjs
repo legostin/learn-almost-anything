@@ -27,7 +27,9 @@ import {
 } from "../lib/reference-mcp.mjs";
 import {
   templateCatalogBlock,
+  chartCatalogBlock,
   normalizeTemplateWidget,
+  normalizeChartWidget,
   normalizeCodeLang,
   TEMPLATE_NAMES,
 } from "../lib/widget-templates.mjs";
@@ -359,7 +361,7 @@ function podcastNoWidgetGuide(courseFormat) {
   if (normalizeCourseFormat(courseFormat) !== "podcast_series") return "";
   return `PODCAST FORMAT OVERRIDE:
 - Do not insert any ::widget markers.
-- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, and templateWidgets.
+- Return empty arrays for imageWidgets, galleryWidgets, diagramWidgets, videoWidgets, templateWidgets, and chartWidgets.
 - If a map, image, chart, or diagram would normally help, describe it verbally or put a source link in "sources"/show notes instead of making a visual widget.`;
 }
 
@@ -2329,6 +2331,20 @@ const draftSchema = {
         required: ["id", "template", "title", "description", "paramsJson"],
       },
     },
+    chartWidgets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          // Chart spec (chartType, labels, datasets, options, controls, domain)
+          // JSON-encoded AS A STRING; normalizeChartWidget validates it.
+          specJson: { type: "string" },
+        },
+        required: ["id", "specJson"],
+      },
+    },
     sources: {
       type: "array",
       items: {
@@ -2350,6 +2366,7 @@ const draftSchema = {
     "diagramWidgets",
     "videoWidgets",
     "templateWidgets",
+    "chartWidgets",
     "sources",
   ],
 };
@@ -2531,6 +2548,7 @@ points with a single line, alone, with blank lines above and below:
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
   ::widget{type="gallery" id="gal-1"}      (2-6 related images shown together)
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
+  ::widget{type="chart" id="chart-1"}      (a data or function chart — see the chart spec below)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a tiny self-contained mini-app — see below)
 
@@ -2573,6 +2591,8 @@ software-driven craft):
 - Prefer the "steps" template for tool procedures.
 
 ${templateCatalogBlock(lang, category)}
+
+${chartCatalogBlock(lang)}
 
 IMAGE AND GALLERY WIDGETS — set "mode" per image item:
   • "search" — a real, specific, existing thing to FIND not invent: a particular
@@ -2632,7 +2652,7 @@ museum hall, a sequence of historical photos, several portraits of one person
 from a period, before/after examples, or multiple UI states. Keep each gallery
 coherent: one reason to look at all images together, not a random dump.
 
-Return widgets in five separate arrays:
+Return widgets in six separate arrays:
 - imageWidgets: [{id, mode ("search"|"generate"), description (short UI caption in ${lang}), prompt (internal search/generation prompt in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]
 - galleryWidgets: [{id, caption (in ${lang}), items: [{mode ("search"|"generate"), description (short UI caption in ${lang}), prompt (internal search/generation prompt in ${lang}), alt (in ${lang}), url (direct image url or ""), source (page url or "")}]}]
 - diagramWidgets: [{id, source (Mermaid source), caption (in ${lang})}]
@@ -2644,6 +2664,8 @@ Return widgets in five separate arrays:
 - templateWidgets: [{id, template (a catalog name), title (in ${lang}),
   description (in ${lang}), paramsJson (the template's params object
   JSON-encoded AS A STRING)}]
+- chartWidgets: [{id, specJson (the chart spec — chartType, labels, datasets,
+  options, controls, domain — JSON-encoded AS A STRING; see the CHART WIDGET spec above)}]
 
 If a category is unused, return an empty array [].
 
@@ -2730,7 +2752,8 @@ ${languageStyleGuide(lang)}`;
       parsed.galleryWidgets,
       parsed.diagramWidgets,
       parsed.videoWidgets,
-      parsed.templateWidgets
+      parsed.templateWidgets,
+      parsed.chartWidgets
     ),
     sources: normalizeSources(parsed.sources),
   };
@@ -2741,7 +2764,8 @@ function mergeWidgets(
   galleryWidgets,
   diagramWidgets,
   videoWidgets,
-  templateWidgets
+  templateWidgets,
+  chartWidgets
 ) {
   const out = {};
   if (Array.isArray(imageWidgets)) {
@@ -2815,6 +2839,19 @@ function mergeWidgets(
           caption: typeof w.caption === "string" ? w.caption.trim() : "",
         };
       }
+    }
+  }
+  if (Array.isArray(chartWidgets)) {
+    for (const w of chartWidgets) {
+      if (!w || typeof w.id !== "string" || !w.id.trim()) continue;
+      let spec;
+      try {
+        spec = JSON.parse(w.specJson);
+      } catch {
+        continue;
+      }
+      const c = normalizeChartWidget(spec);
+      if (c) out[w.id.trim()] = c;
     }
   }
   if (Array.isArray(videoWidgets)) {

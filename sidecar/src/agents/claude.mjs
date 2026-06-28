@@ -40,7 +40,9 @@ import {
 } from "../lib/pedagogy.mjs";
 import {
   templateCatalogBlock,
+  chartCatalogBlock,
   normalizeTemplateWidget,
+  normalizeChartWidget,
   normalizeCodeLang,
 } from "../lib/widget-templates.mjs";
 import { lintMath, describeMathIssues } from "../lib/math-lint.mjs";
@@ -781,6 +783,7 @@ points with a single line, alone, with blank lines above and below:
   ::widget{type="image" id="img-1"}        (real-world photo or illustration)
   ::widget{type="gallery" id="gal-1"}      (2-6 related images shown together)
   ::widget{type="diagram" id="diag-1"}     (a Mermaid-rendered diagram)
+  ::widget{type="chart" id="chart-1"}      (a data or function chart — see the chart spec below)
   ::widget{type="video" id="vid-1"}        (an embedded video — see below)
   ::widget{type="interactive" id="int-1"}  (a parameterized interactive exercise — see the template catalog below)
   ::widget{type="checkpoint" id="cp-1"}    (a predict-then-reveal check — see below)
@@ -882,6 +885,8 @@ software-driven craft):
 - Prefer the "steps" template for tool procedures.
 
 ${templateCatalogBlock(lang, category)}
+
+${chartCatalogBlock(lang)}
 ${customMcpBlock(customMcp)}
 You have live web access — use it:
 - WebSearch — search the web to verify facts, find concrete examples,
@@ -1039,6 +1044,9 @@ function normalizeWidgets(raw) {
         source: typeof w.source === "string" ? w.source.trim() : "",
         caption: typeof w.caption === "string" ? w.caption.trim() : "",
       };
+    } else if (w.type === "chart") {
+      const c = normalizeChartWidget(w);
+      if (c) out[id] = c;
     } else if (w.type === "video") {
       const url = typeof w.url === "string" ? w.url.trim() : "";
       if (!url) continue;
