@@ -44,6 +44,7 @@ import {
   normalizeTemplateWidget,
   normalizeChartWidget,
   normalizeCodeLang,
+  unwrapStrayMarkdownFences,
 } from "../lib/widget-templates.mjs";
 import { lintMath, describeMathIssues } from "../lib/math-lint.mjs";
 
@@ -973,7 +974,7 @@ If no widgets, use []. If no sources, use [].`;
     throw new Error("LLM returned no article");
   }
   return {
-    article: parsed.article.trim(),
+    article: unwrapStrayMarkdownFences(parsed.article).trim(),
     widgets: normalizeWidgets(parsed.widgets),
     sources: normalizeSources(parsed.sources),
     notes: typeof parsed.notes === "string" ? parsed.notes.trim() : "",
@@ -1196,7 +1197,7 @@ If no new visual is useful, return the unchanged article and "widgets": [].`;
       ? parsed.article.trim()
       : String(article || "");
   return {
-    article: stripUnknownWidgetMarkers(plannedArticle, merged),
+    article: stripUnknownWidgetMarkers(unwrapStrayMarkdownFences(plannedArticle), merged),
     widgets: merged,
   };
 }

@@ -183,6 +183,22 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// The model sometimes wraps real lesson content in a ```markdown / ```md code
+// fence (the whole article, or a section). Inside a fence, ::widget markers stay
+// literal and never render. Unwrap such strays: (1) the whole article being one
+// markdown fence, or (2) any markdown fence whose body holds a ::widget marker
+// (never a legitimate code example).
+export function unwrapStrayMarkdownFences(md) {
+  if (!md || String(md).indexOf("```") === -1) return md;
+  const s = String(md);
+  const whole = s.trim().match(/^```(?:markdown|md)[ \t]*\n([\s\S]*?)\n?```$/i);
+  if (whole) return whole[1];
+  return s.replace(
+    /^[ \t]*```(?:markdown|md)[ \t]*\n([\s\S]*?)\n[ \t]*```[ \t]*$/gim,
+    (full, body) => (/::widget\{/.test(body) ? body : full),
+  );
+}
+
 function normalizeQuiz(p) {
   const items = (Array.isArray(p?.items) ? p.items : [])
     .map((it) => {

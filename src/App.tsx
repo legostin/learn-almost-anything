@@ -11091,7 +11091,23 @@ function encodeArticleLinkHrefs(text: string): string {
   );
 }
 
+// The model sometimes wraps real lesson content in a ```markdown / ```md code
+// fence (whole article, or a section). Inside a fence, ::widget markers stay
+// literal and never render, and headings show as code. Unwrap such strays:
+// (1) the whole article being one markdown fence, or (2) any markdown fence
+// whose body contains a ::widget marker (never a legitimate code example).
+function unwrapStrayMarkdownFence(md: string): string {
+  if (!md || md.indexOf("```") === -1) return md;
+  const whole = md.trim().match(/^```(?:markdown|md)[ \t]*\n([\s\S]*?)\n?```$/i);
+  if (whole) return whole[1];
+  return md.replace(
+    /^[ \t]*```(?:markdown|md)[ \t]*\n([\s\S]*?)\n[ \t]*```[ \t]*$/gim,
+    (full, body) => (/::widget\{/.test(body) ? body : full),
+  );
+}
+
 function buildReaderParts(text: string): ReaderPart[] {
+  text = unwrapStrayMarkdownFence(text);
   text = encodeArticleLinkHrefs(text);
   const out: ReaderPart[] = [];
   const re = /<!--\s*la:new\s*-->([\s\S]*?)<!--\s*la:newend\s*-->/g;
@@ -12912,7 +12928,7 @@ function fencedRanges(md: string): Array<[number, number]> {
 // newlines verbatim and each widget keeps its raw marker line. Leaves the
 // reader's splitWidgetMarkers untouched.
 function parseArticleBlocks(article: string, widgets: Record<string, any>): EditorBlock[] {
-  const md = article ?? "";
+  const md = unwrapStrayMarkdownFence(article ?? "");
   const fences = fencedRanges(md);
   const inFence = (i: number) => fences.some(([a, b]) => i >= a && i < b);
   const out: EditorBlock[] = [];

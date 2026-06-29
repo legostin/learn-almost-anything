@@ -31,6 +31,7 @@ import {
   normalizeTemplateWidget,
   normalizeChartWidget,
   normalizeCodeLang,
+  unwrapStrayMarkdownFences,
   TEMPLATE_NAMES,
 } from "../lib/widget-templates.mjs";
 import {
@@ -2745,7 +2746,7 @@ ${languageStyleGuide(lang)}`;
     throw new Error("Codex returned no article");
   }
   return {
-    article: parsed.article.trim(),
+    article: unwrapStrayMarkdownFences(parsed.article).trim(),
     notes: typeof parsed.notes === "string" ? parsed.notes.trim() : "",
     widgets: mergeWidgets(
       parsed.imageWidgets,
