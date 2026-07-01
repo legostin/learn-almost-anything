@@ -111,8 +111,41 @@ function buildSlashCommands(lang: "ru" | "en"): SlashCommand[] {
   ];
 }
 
+// Encyclopedia cross-links are stored as `[Title](course://article/<raw title>)`
+// with the raw, space-containing title left in the href. markdown-it (the editor's
+// markdown parser) treats a destination containing spaces as invalid and leaves
+// the whole link as literal text, so the editor rendered `[Title](course://…)`
+// raw instead of as a link. Percent-encode the href on the way INTO the editor so
+// it parses as a link…
+function encodeArticleLinkHrefs(md: string): string {
+  return String(md || "").replace(
+    /\]\(course:\/\/article\/([^)]+)\)/gi,
+    (_full, raw: string) => `](course://article/${encodeURIComponent(raw.trim())})`
+  );
+}
+
+// …and decode it back on the way OUT so the stored markdown keeps its canonical
+// raw form (matching the generator and the reader, whose own encoder would
+// otherwise double-encode it). Defensive: a stray `%` makes decode throw, so the
+// href is left untouched in that case.
+function decodeArticleLinkHrefs(md: string): string {
+  return String(md || "").replace(
+    /\]\(course:\/\/article\/([^)]+)\)/gi,
+    (_full, raw: string) => {
+      let title = raw.trim();
+      try {
+        title = decodeURIComponent(title);
+      } catch {
+        /* leave as-is */
+      }
+      return `](course://article/${title})`;
+    }
+  );
+}
+
 function editorMarkdown(editor: Editor): string {
-  return (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+  const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+  return decodeArticleLinkHrefs(md);
 }
 
 // markdown-it merges a `::widget{…}` marker into an adjacent paragraph when it's
@@ -244,7 +277,7 @@ export function BlockEditor({
     api.readWidgets = onReadWidgets;
     api.askAssistant = (target) => onAskWidget(target);
     try {
-      editor.commands.setContent(isolateWidgetMarkers(article));
+      editor.commands.setContent(encodeArticleLinkHrefs(isolateWidgetMarkers(article)));
     } catch (e) {
       // Surface the real parse failure, then let the error boundary fall back to
       // the classic editor (where the unparsed article is safe) instead of saving
@@ -270,7 +303,7 @@ export function BlockEditor({
     const api = (editor.storage as unknown as { widget: WidgetStorage }).widget;
     api.widgets = { ...widgets };
     try {
-      editor.commands.setContent(isolateWidgetMarkers(article));
+      editor.commands.setContent(encodeArticleLinkHrefs(isolateWidgetMarkers(article)));
     } catch (e) {
       console.error("[BlockEditor] reload setContent failed", e);
     }

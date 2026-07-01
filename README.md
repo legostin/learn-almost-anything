@@ -24,6 +24,8 @@ It's the difference between asking a smart friend questions all evening and havi
 
 You pick a topic, language, format and agent. The course can be a full academic course, a compact mini-module, a podcast-style series, a single lesson — or a roadmap that maps the whole journey first.
 
+You also pick a **writing style** — built-in presets like *Academic* (precise scientific terminology) or *Conversational / Pop-sci* (plain language for a broad audience), or your own custom styles. An optional style-review pass (on by default, like the tests/homework toggles) checks every lesson against the chosen style before you see it, and you can change a course's style later.
+
 <p align="center"><img src="screens/new_course.png" alt="Course creation: format, quality tier, tests/homework toggles" width="900"></p>
 
 ## The full learning loop

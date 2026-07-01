@@ -63,6 +63,10 @@ pub struct Settings {
     /// Private self-hosted catalog servers (the public catalog is implicit).
     #[serde(default)]
     pub catalog_servers: Vec<CatalogServerConfig>,
+    /// User-defined writing styles. Built-in presets are NOT stored here — they
+    /// live in `builtin_styles()` and are merged read-only when listing.
+    #[serde(default)]
+    pub custom_styles: Vec<ContentStyle>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -101,6 +105,238 @@ pub struct CustomMcpServer {
 
 fn default_true() -> bool {
     true
+}
+
+/// A reusable writing voice applied to generated course material. The `guidance`
+/// field is a single free-form natural-language instruction the agent follows;
+/// no fixed sub-fields are imposed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContentStyle {
+    /// Slug identifier. Preset ids are reserved with the `preset-` prefix.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub guidance: String,
+    /// Read-only built-in preset. `true` only for `builtin_styles()`; custom
+    /// styles persisted in settings are always `false`.
+    #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Reserved prefix for built-in preset ids; custom styles may not collide.
+pub const PRESET_ID_PREFIX: &str = "preset-";
+
+/// The style applied when a course has no `style_id`, or its `style_id` no longer
+/// resolves (e.g. the custom style was deleted). Preserves today's accessible
+/// default voice.
+pub const DEFAULT_STYLE_ID: &str = "preset-conversational";
+
+fn preset(id: &str, name: &str, description: &str, guidance: &str) -> ContentStyle {
+    ContentStyle {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        guidance: guidance.to_string(),
+        builtin: true,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// Built-in, read-only style presets shipped with the app (FR-002). A broad
+/// curated library covering diverse registers; users duplicate any of these to
+/// customize. `preset-conversational` is the default (DEFAULT_STYLE_ID).
+pub fn builtin_styles() -> Vec<ContentStyle> {
+    vec![
+        preset(
+            "preset-academic",
+            "Academic",
+            "Precise scientific terminology, formal register.",
+            "Write in a formal, academic register for an informed reader. Use precise, correct \
+technical and scientific terminology and define each key term the first time it appears. Prefer \
+full, well-structured sentences and an impartial, objective tone. Avoid slang, contractions, and \
+casual asides. Support claims with clear reasoning; where a concept has an established formal name, \
+use it rather than a colloquial paraphrase.",
+        ),
+        preset(
+            "preset-conversational",
+            "Conversational / Pop-sci",
+            "Plain language for a broad audience.",
+            "Write for a curious general audience with no special background. Use plain, everyday \
+language, short sentences, and a warm, friendly tone. Explain ideas with concrete analogies and \
+relatable examples. Avoid unexplained jargon — if a technical term is genuinely needed, introduce \
+it in plain words first and keep it minimal. Make the topic feel approachable and interesting.",
+        ),
+        preset(
+            "preset-storytelling",
+            "Storytelling",
+            "Teach through stories and examples.",
+            "Teach through narrative. Open with a concrete story, scenario, or character, and let \
+the concepts emerge from it. Use vivid, specific examples and a through-line that ties the lesson \
+together. Keep everything accurate, but lead with story and illustration rather than dry definitions.",
+        ),
+        preset(
+            "preset-socratic",
+            "Socratic",
+            "Question-driven; makes the learner think.",
+            "Lead the learner by asking. Pose a guiding question, give them a moment to consider it, \
+then reason toward the answer together. Use frequent questions and 'what would happen if…' prompts, \
+and reveal conclusions gradually rather than stating them up front. Keep the reasoning rigorous and correct.",
+        ),
+        preset(
+            "preset-handson",
+            "Hands-on / Practical",
+            "Step-by-step, action-oriented, minimal theory.",
+            "Be practical and action-oriented. Favor concrete steps, short numbered procedures, and \
+'do this, then that' instructions over theory. Give just the background needed to act, then get the \
+learner doing. Prefer worked examples the reader can follow along with, and call out common mistakes.",
+        ),
+        preset(
+            "preset-eli5",
+            "Plain words (ELI5)",
+            "Simplest possible, for absolute beginners.",
+            "Explain as if to a curious 12-year-old with no background. Use the simplest words, very \
+short sentences, and one familiar analogy per idea. Avoid all jargon; if a term is unavoidable, \
+explain it in plain words first. Do NOT use mathematical formulas, equations, or symbolic notation \
+(no Greek letters like λ, no exponents, no fractions) — always describe the relationship in ordinary \
+words instead (e.g. 'shorter waves of light scatter much more strongly than longer ones'). Be \
+encouraging, concrete, and patient.",
+        ),
+        preset(
+            "preset-exam",
+            "Exam crib / Concise",
+            "Terse: definitions, key facts, bullets.",
+            "Write as a tight revision crib. Be concise and high-density: short paragraphs, bullet \
+lists, bolded key terms, crisp definitions, and the facts most likely to be tested. Skip storytelling \
+and filler; prioritize clarity and recall.",
+        ),
+        preset(
+            "preset-technical",
+            "Technical / Engineering",
+            "For practitioners: code-first, exact.",
+            "Write for a practitioner. Be precise and exact, use correct technical terminology, and \
+lead with concrete artifacts — code, commands, configs, signatures — over prose. State assumptions, \
+edge cases and gotchas explicitly. Keep explanations dense and unembellished.",
+        ),
+        preset(
+            "preset-journalistic",
+            "Journalistic",
+            "Clear and engaging; key point first.",
+            "Write like a good explanatory journalist. Lead with the key point, then unpack the \
+details (inverted pyramid). Keep sentences clear and active, ground claims in concrete specifics, and \
+stay engaging without hype. Be accurate, brisk, and readable.",
+        ),
+        preset(
+            "preset-business",
+            "Business / Executive",
+            "Outcomes and decisions, no fluff.",
+            "Write for a busy decision-maker. Lead with the takeaway and why it matters. Emphasize \
+outcomes, trade-offs, costs and decisions; cut theory and filler. Use crisp headings and short, \
+skimmable sections.",
+        ),
+        preset(
+            "preset-historical",
+            "Historical / Contextual",
+            "Through the evolution of ideas.",
+            "Teach through the evolution of the idea. Explain how the concept emerged, what problem \
+it solved, and how it changed over time. Use dates, people and context to make it memorable, while \
+keeping the underlying explanation correct and clear.",
+        ),
+        preset(
+            "preset-rigorous",
+            "Rigorous / Proof-based",
+            "Derivations and mathematical rigor.",
+            "Write with mathematical rigor for a STEM reader. State definitions precisely, give \
+derivations and proofs step by step, and justify each claim. Use correct notation and LaTeX. Prefer \
+exactness over hand-waving, while still explaining the underlying intuition.",
+        ),
+        preset(
+            "preset-mentor",
+            "Friendly mentor",
+            "Warm, patient, like a 1:1 tutor.",
+            "Write like a warm, patient one-to-one tutor. Address the learner directly and \
+supportively, anticipate where they might get stuck, and reassure them. Build confidence with small \
+wins and check-ins, while keeping the explanation clear and correct.",
+        ),
+        preset(
+            "preset-motivational",
+            "Motivational / Energetic",
+            "Encouraging, high-energy tone.",
+            "Write with energy and encouragement. Keep the tone upbeat and momentum-building, \
+celebrate progress, and frame challenges as exciting. Stay substantive and accurate — the enthusiasm \
+supports the learning, it never replaces it.",
+        ),
+    ]
+}
+
+/// Length caps for a custom style (defensive: keeps the prompt bounded).
+pub const STYLE_NAME_MAX: usize = 80;
+pub const STYLE_GUIDANCE_MAX: usize = 4000;
+
+/// Validate a custom style before saving (FR-014). Pure — unit-tested.
+pub fn validate_style(style: &ContentStyle) -> Result<(), String> {
+    let name = style.name.trim();
+    let guidance = style.guidance.trim();
+    if name.is_empty() {
+        return Err("Style name cannot be empty.".to_string());
+    }
+    if guidance.is_empty() {
+        return Err("Style guidance cannot be empty.".to_string());
+    }
+    if name.chars().count() > STYLE_NAME_MAX {
+        return Err(format!("Style name is too long (max {STYLE_NAME_MAX} characters)."));
+    }
+    if guidance.chars().count() > STYLE_GUIDANCE_MAX {
+        return Err(format!(
+            "Style guidance is too long (max {STYLE_GUIDANCE_MAX} characters)."
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve a course's `style_id` against the merged preset + custom list. `None`,
+/// blank, or a dangling/deleted id all fall back to the default style so existing
+/// courses never break (FR-005/FR-012). Pure — unit-tested.
+pub fn resolve_style(style_id: Option<&str>, custom: &[ContentStyle]) -> ContentStyle {
+    let id = style_id.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(id) = id {
+        if let Some(found) = builtin_styles().into_iter().find(|s| s.id == id) {
+            return found;
+        }
+        if let Some(found) = custom.iter().find(|s| s.id == id) {
+            return found.clone();
+        }
+    }
+    builtin_styles()
+        .into_iter()
+        .find(|s| s.id == DEFAULT_STYLE_ID)
+        .expect("default preset must exist")
+}
+
+/// Slugify a style name into an id candidate (lowercase, hyphen-separated).
+pub fn slugify_style(name: &str) -> String {
+    let slug: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    let collapsed = slug
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if collapsed.is_empty() {
+        "style".to_string()
+    } else {
+        collapsed
+    }
 }
 
 /// Per-backend model + reasoning choices for each kind of task. Empty
@@ -192,6 +428,14 @@ pub struct GenerationProfile {
     /// spawn a fresh agent per call (more variety, no cache reuse).
     #[serde(default)]
     pub reuse_thread_per_topic: Option<bool>,
+    /// Id of the writing style applied to this course's material. Blank/None or a
+    /// dangling id resolves to `DEFAULT_STYLE_ID`.
+    #[serde(default)]
+    pub style_id: Option<String>,
+    /// Skip the style-review editorial pass. Mirrors `skip_tests`: absent/false
+    /// means the pass runs (toggle default ON, FR-006).
+    #[serde(default)]
+    pub skip_style_review: Option<bool>,
 }
 
 /// Resolved defaults for one cost tier. The model/reasoning cascade is added
@@ -358,6 +602,16 @@ impl GenerationProfile {
 
     pub fn skip_tests(&self) -> bool {
         self.skip_tests.unwrap_or(false)
+    }
+
+    /// Whether the style-review editorial pass runs. Default ON (FR-006).
+    pub fn skip_style_review(&self) -> bool {
+        self.skip_style_review.unwrap_or(false)
+    }
+
+    /// The selected style id, if any (blank treated as None).
+    pub fn style_id(&self) -> Option<String> {
+        nonblank(&self.style_id).map(str::to_string)
     }
 
     pub fn skip_assignments(&self) -> bool {
@@ -769,6 +1023,46 @@ impl SettingsState {
         self.persist()
     }
 
+    /// User-defined custom styles (raw, without presets).
+    pub fn custom_styles(&self) -> Vec<ContentStyle> {
+        self.inner
+            .lock()
+            .map(|s| s.custom_styles.clone())
+            .unwrap_or_default()
+    }
+
+    /// All styles for listing: read-only presets first, then custom styles.
+    pub fn content_styles(&self) -> Vec<ContentStyle> {
+        let mut all = builtin_styles();
+        all.extend(self.custom_styles());
+        all
+    }
+
+    /// Resolve a course's `style_id` to a concrete style (preset or custom),
+    /// falling back to the default for None/blank/dangling ids.
+    pub fn resolve_style(&self, style_id: Option<&str>) -> ContentStyle {
+        resolve_style(style_id, &self.custom_styles())
+    }
+
+    /// Insert or replace (by id) a custom style. The caller is responsible for
+    /// validation and for ensuring `id` is not a preset id.
+    pub fn upsert_custom_style(&self, style: ContentStyle) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.custom_styles.retain(|s| s.id != style.id);
+            guard.custom_styles.push(style);
+        }
+        self.persist()
+    }
+
+    pub fn delete_custom_style(&self, id: &str) -> std::io::Result<()> {
+        {
+            let mut guard = self.inner.lock().expect("settings lock");
+            guard.custom_styles.retain(|s| s.id != id);
+        }
+        self.persist()
+    }
+
     pub fn catalog_servers(&self) -> Vec<CatalogServerConfig> {
         self.inner
             .lock()
@@ -819,4 +1113,91 @@ impl SettingsState {
 
 fn settings_path(data_dir: &PathBuf) -> PathBuf {
     data_dir.join("settings.json")
+}
+
+#[cfg(test)]
+mod content_style_tests {
+    use super::*;
+
+    fn custom(id: &str, name: &str, guidance: &str) -> ContentStyle {
+        ContentStyle {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            guidance: guidance.to_string(),
+            builtin: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_name() {
+        let s = custom("x", "   ", "some guidance");
+        assert!(validate_style(&s).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_guidance() {
+        let s = custom("x", "My Style", "   ");
+        assert!(validate_style(&s).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_valid_style() {
+        let s = custom("x", "My Style", "Write plainly.");
+        assert!(validate_style(&s).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_too_long_name() {
+        let s = custom("x", &"a".repeat(STYLE_NAME_MAX + 1), "ok");
+        assert!(validate_style(&s).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_too_long_guidance() {
+        let s = custom("x", "Name", &"a".repeat(STYLE_GUIDANCE_MAX + 1));
+        assert!(validate_style(&s).is_err());
+    }
+
+    #[test]
+    fn resolve_known_preset_id() {
+        let style = resolve_style(Some("preset-academic"), &[]);
+        assert_eq!(style.id, "preset-academic");
+        assert!(style.builtin);
+    }
+
+    #[test]
+    fn resolve_known_custom_id() {
+        let customs = vec![custom("mine", "Mine", "Casual.")];
+        let style = resolve_style(Some("mine"), &customs);
+        assert_eq!(style.id, "mine");
+        assert!(!style.builtin);
+    }
+
+    #[test]
+    fn resolve_unset_id_returns_default() {
+        let style = resolve_style(None, &[]);
+        assert_eq!(style.id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn resolve_blank_id_returns_default() {
+        let style = resolve_style(Some("   "), &[]);
+        assert_eq!(style.id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn resolve_dangling_id_returns_default() {
+        // A deleted custom style: id present but not in the list.
+        let style = resolve_style(Some("deleted-style"), &[]);
+        assert_eq!(style.id, DEFAULT_STYLE_ID);
+    }
+
+    #[test]
+    fn slugify_basic() {
+        assert_eq!(slugify_style("My Cool Style!"), "my-cool-style");
+        assert_eq!(slugify_style("   "), "style");
+    }
 }

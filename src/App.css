@@ -1901,7 +1901,8 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
-.category-pill {
+.category-pill,
+.style-pill {
   display: inline-flex;
   align-items: center;
   padding: 2px 9px;
@@ -1911,6 +1912,19 @@ button {
   font-weight: 600;
   font-size: 11px;
   letter-spacing: 0.02em;
+}
+/* The writing-style pill is a clickable chip (opens "change style"): a subtle
+   accent tint sets it apart, and it resets the default <button> chrome. */
+.style-pill {
+  color: var(--accent, #6d4bd8);
+  background: color-mix(in srgb, var(--accent, #6d4bd8) 12%, var(--surface-2));
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1.6;
+}
+.style-pill:hover {
+  background: color-mix(in srgb, var(--accent, #6d4bd8) 22%, var(--surface-2));
 }
 .tag-row {
   display: flex;
@@ -2648,7 +2662,9 @@ button {
   padding: 0;
   margin: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(72px, 1fr));
+  /* One equal column per stage, whatever the count (draft/annotate/style/…). */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(56px, 1fr);
   align-items: start;
   width: min(100%, 640px);
 }
@@ -8768,6 +8784,15 @@ button.domain-chip {
 }
 .translate-menu button:hover {
   background: var(--surface-hover);
+}
+/* Nested choices (translate languages, publish targets) under a menu action. */
+.translate-menu .submenu-item {
+  padding-left: 22px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.translate-menu .danger-item {
+  color: var(--danger, #c0392b);
 }
 .translated-badge {
   font-size: 11px;

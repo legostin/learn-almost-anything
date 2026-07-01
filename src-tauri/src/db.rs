@@ -779,6 +779,31 @@ pub fn get_module_instructions(
     .flatten())
 }
 
+/// Per-lesson writing-style override (NULL = inherit the course style).
+pub fn set_module_style_id(
+    conn: &Connection,
+    id: &str,
+    style_id: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE modules SET style_id = ?2 WHERE id = ?1",
+        rusqlite::params![id, style_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_module_style_id(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    Ok(none_on_no_rows(conn.query_row(
+        "SELECT style_id FROM modules WHERE id = ?1",
+        [id],
+        |r| r.get::<_, Option<String>>(0),
+    ))?
+    .flatten())
+}
+
 pub fn first_attempt_ratio(
     conn: &Connection,
     module_id: &str,

@@ -200,12 +200,54 @@ fn handle(app: &AppHandle, mut request: tiny_http::Request) {
         return;
     }
 
+    if method == Method::Get && path == "/yt" {
+        match query_param(query, "src") {
+            Some(src) => serve_youtube_embed(request, &src),
+            None => respond_text(request, 400, "missing src"),
+        }
+        return;
+    }
+
     if method == Method::Get {
         serve_static(app, request, path);
         return;
     }
 
     respond_text(request, 404, "not found");
+}
+
+// Wrap a YouTube/Vimeo embed in a page served from this http origin so the
+// player receives a valid HTTP Referer. In production the app is served from the
+// `tauri://localhost` custom scheme, whose origin YouTube rejects with "Error
+// 153"; loading the embed inside an iframe hosted here (origin http://127.0.0.1)
+// gives the player the http referer it requires. `src` is validated against a
+// fixed allow-list and rejected if it carries characters that could break out of
+// the attribute, so the reflection into HTML is safe.
+fn serve_youtube_embed(request: tiny_http::Request, src: &str) {
+    const ALLOWED: [&str; 3] = [
+        "https://www.youtube.com/embed/",
+        "https://www.youtube-nocookie.com/embed/",
+        "https://player.vimeo.com/video/",
+    ];
+    let safe =
+        ALLOWED.iter().any(|p| src.starts_with(p)) && !src.contains(['"', '\'', '<', '>', ' ']);
+    if !safe {
+        respond_text(request, 400, "unsupported embed url");
+        return;
+    }
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<meta name=\"referrer\" content=\"strict-origin-when-cross-origin\">\
+<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}\
+iframe{{position:fixed;inset:0;width:100%;height:100%;border:0}}</style></head>\
+<body><iframe src=\"{src}\" \
+allow=\"accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture\" \
+allowfullscreen></iframe></body></html>"
+    );
+    let resp =
+        Response::from_string(html).with_header(header("Content-Type", "text/html; charset=utf-8"));
+    let _ = request.respond(resp);
 }
 
 // Dispatch a command name to the matching Tauri command, pulling managed state
@@ -535,6 +577,7 @@ fn dispatch(app: &AppHandle, name: &str, a: &Value) -> Result<Value, String> {
                 app.state(),
                 req("courseId")?,
                 req("submoduleId")?,
+                None,
                 None,
                 None,
             )?;

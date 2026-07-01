@@ -150,6 +150,89 @@ const GENERATION_TIERS = [
   descKey: "tierQuickDesc" | "tierBalancedDesc" | "tierPremiumDesc";
 }>;
 
+// A reusable writing voice (settings.rs ContentStyle). Presets have builtin=true.
+type ContentStyle = {
+  id: string;
+  name: string;
+  description: string;
+  guidance: string;
+  builtin: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+// Localized display labels for the built-in presets, keyed by their stable id.
+// The guidance (the actual agent prompt) stays as shipped by the backend; only
+// the UI-facing name + description are translated. Custom styles fall back to
+// their own name/description.
+const PRESET_LABELS: Record<string, Record<Lang, { name: string; desc: string }>> = {
+  "preset-academic": {
+    en: { name: "Academic", desc: "Precise scientific terminology, formal register." },
+    ru: { name: "Академический", desc: "Точные научные термины, формальный регистр." },
+  },
+  "preset-conversational": {
+    en: { name: "Conversational / Pop-sci", desc: "Plain language for a broad audience." },
+    ru: { name: "Научпоп / разговорный", desc: "Простой язык для широкой аудитории." },
+  },
+  "preset-storytelling": {
+    en: { name: "Storytelling", desc: "Teach through stories and examples." },
+    ru: { name: "Сторителлинг", desc: "Обучение через истории и примеры." },
+  },
+  "preset-socratic": {
+    en: { name: "Socratic", desc: "Question-driven; makes the learner think." },
+    ru: { name: "Сократический", desc: "Ведёт вопросами, заставляет думать." },
+  },
+  "preset-handson": {
+    en: { name: "Hands-on / Practical", desc: "Step-by-step, action-oriented, minimal theory." },
+    ru: { name: "Практический / hands-on", desc: "По шагам, минимум теории." },
+  },
+  "preset-eli5": {
+    en: { name: "Plain words (ELI5)", desc: "Simplest possible, for absolute beginners." },
+    ru: { name: "Простыми словами (ELI5)", desc: "Максимально просто, для новичков с нуля." },
+  },
+  "preset-exam": {
+    en: { name: "Exam crib / Concise", desc: "Terse: definitions, key facts, bullets." },
+    ru: { name: "Экзамен / конспект", desc: "Сжато: определения, ключевые факты, тезисы." },
+  },
+  "preset-technical": {
+    en: { name: "Technical / Engineering", desc: "For practitioners: code-first, exact." },
+    ru: { name: "Технический / инженерный", desc: "Для практиков: code-first, точно." },
+  },
+  "preset-journalistic": {
+    en: { name: "Journalistic", desc: "Clear and engaging; key point first." },
+    ru: { name: "Журналистский", desc: "Ясно и увлекательно, главное — вперёд." },
+  },
+  "preset-business": {
+    en: { name: "Business / Executive", desc: "Outcomes and decisions, no fluff." },
+    ru: { name: "Деловой / executive", desc: "Выводы и решения, без воды." },
+  },
+  "preset-historical": {
+    en: { name: "Historical / Contextual", desc: "Through the evolution of ideas." },
+    ru: { name: "Исторический", desc: "Через эволюцию идей и контекст." },
+  },
+  "preset-rigorous": {
+    en: { name: "Rigorous / Proof-based", desc: "Derivations and mathematical rigor." },
+    ru: { name: "Строгий / доказательный", desc: "Выкладки и математическая строгость." },
+  },
+  "preset-mentor": {
+    en: { name: "Friendly mentor", desc: "Warm, patient, like a 1:1 tutor." },
+    ru: { name: "Дружелюбный наставник", desc: "Тёплый и терпеливый, как 1:1 репетитор." },
+  },
+  "preset-motivational": {
+    en: { name: "Motivational / Energetic", desc: "Encouraging, high-energy tone." },
+    ru: { name: "Вдохновляющий", desc: "Энергичный, мотивирующий тон." },
+  },
+};
+
+// Localized name + description for a style. Built-in presets use PRESET_LABELS
+// (falling back to English, then to the shipped strings); custom styles use their
+// own fields.
+function styleLabel(style: ContentStyle, lang: Lang): { name: string; desc: string } {
+  const preset = style.builtin ? PRESET_LABELS[style.id] : undefined;
+  if (preset) return preset[lang] ?? preset.en;
+  return { name: style.name, desc: style.description };
+}
+
 type Course = {
   id: string;
   topic: string;
@@ -160,7 +243,11 @@ type Course = {
   agent: Agent;
   created_at: number;
   updated_at: number;
-  generation_profile?: { tier?: string } | null;
+  generation_profile?: {
+    tier?: string;
+    style_id?: string | null;
+    skip_style_review?: boolean | null;
+  } | null;
   catalog_origin_id?: string | null;
   catalog_version?: number;
   catalog_synced_at?: number | null;
@@ -530,7 +617,7 @@ type SpaceSource = {
   enabled: boolean;
 };
 
-type StageName = "draft" | "annotate" | "illustrate" | "test";
+type StageName = "draft" | "annotate" | "style_review" | "illustrate" | "test";
 
 type TestQuestion = {
   text: string;
@@ -1218,11 +1305,27 @@ function App() {
   }, []);
 
   const openCourse = useCallback(
-    (courseId: string) => {
+    async (courseId: string) => {
       rememberCourseOpen(courseId);
+      // Single-lesson courses (single_lesson / fact_check) skip the course screen
+      // once ready — open the one lesson directly.
+      const c = courses.find((x) => x.id === courseId);
+      if (c && isSingleLessonFormat(c.course_format) && c.status === "ready") {
+        try {
+          const tree = await invoke<StructureFile>("get_structure", { courseId });
+          const mod = tree.modules?.[0];
+          const sub = mod?.submodules?.[0];
+          if (mod && sub) {
+            setView({ kind: "submodule", courseId, moduleId: mod.id, submoduleId: sub.id });
+            return;
+          }
+        } catch {
+          // fall through to the course screen
+        }
+      }
       setView({ kind: "course", id: courseId });
     },
-    [rememberCourseOpen]
+    [rememberCourseOpen, courses]
   );
 
   const openSubmodule = useCallback(
@@ -1893,6 +1996,12 @@ function App() {
             onOpenSubmodule={(moduleId, submoduleId) =>
               openSubmodule(view.courseId, moduleId, submoduleId)
             }
+            onOpenCourse={openCourse}
+            onChanged={refresh}
+            onDeleted={async () => {
+              setView({ kind: "empty" });
+              await refresh();
+            }}
           />
         )}
         </div>
@@ -3996,6 +4105,12 @@ function SettingsModal({
   const [geminiTtsModel, setGeminiTtsModel] = useState("gemini-2.5-flash-preview-tts");
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
   const [catalogServers, setCatalogServers] = useState<CatalogServerStatus[]>([]);
+  const [contentStyles, setContentStyles] = useState<ContentStyle[]>([]);
+  const [styleMgrOpen, setStyleMgrOpen] = useState(false);
+  useEffect(() => {
+    if (styleMgrOpen) return;
+    invoke<ContentStyle[]>("list_content_styles").then(setContentStyles).catch(() => {});
+  }, [styleMgrOpen]);
   const [imageModelList, setImageModelList] = useState<{ id: string; label: string }[]>([]);
   const [ttsModelList, setTtsModelList] = useState<{ id: string; label: string }[]>([]);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -4413,6 +4528,14 @@ function SettingsModal({
         </div>
 
         <div className="setting-group">
+          <div className="setting-label">{t("styleManagerTitle")}</div>
+          <button type="button" className="ghost" onClick={() => setStyleMgrOpen(true)}>
+            {t("styleManagerOpen")}
+          </button>
+          <div className="setting-note">{t("styleManagerNote")}</div>
+        </div>
+
+        <div className="setting-group">
           <div className="setting-label">{t("claudeMcpTitle")}</div>
           <CourseMcpSection catalogServers={catalogServers} />
         </div>
@@ -4760,6 +4883,9 @@ function SettingsModal({
           </div>
         </div>
       </div>
+      {styleMgrOpen && (
+        <StyleManager styles={contentStyles} onClose={() => setStyleMgrOpen(false)} />
+      )}
     </div>
   );
 }
@@ -6472,6 +6598,283 @@ function FieldSelect({
   );
 }
 
+// Manage the local writing-style library: presets are read-only (duplicate to
+// customize); custom styles can be created, edited, duplicated and deleted.
+function StyleManager({
+  styles,
+  onClose,
+}: {
+  styles: ContentStyle[];
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [list, setList] = useState<ContentStyle[]>(styles);
+  const [draft, setDraft] = useState<{
+    id: string;
+    name: string;
+    description: string;
+    guidance: string;
+  } | null>(null);
+  const [viewing, setViewing] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const presets = list.filter((s) => s.builtin);
+  const customs = list.filter((s) => !s.builtin);
+
+  // One row for a style: localized name + description, a "view prompt" toggle
+  // that reveals the guidance (what's sent to the agent), and the given actions.
+  function StyleRow({ style, actions }: { style: ContentStyle; actions: React.ReactNode }) {
+    const lbl = styleLabel(style, uiLang);
+    const open = viewing === style.id;
+    return (
+      <div style={{ padding: "6px 0", borderBottom: "1px solid var(--border, #eee)" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <div>
+            <strong>{lbl.name}</strong>
+            {lbl.desc ? ` — ${lbl.desc}` : ""}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setViewing(open ? null : style.id)}
+            >
+              {open ? t("styleHidePrompt") : t("styleViewPrompt")}
+            </button>
+            {actions}
+          </div>
+        </div>
+        {open && (
+          <div style={{ marginTop: 6 }}>
+            <div className="field-note" style={{ marginBottom: 4 }}>
+              {t("stylePromptTitle")}
+            </div>
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: "var(--surface-2, #f5f5f4)",
+                borderRadius: 6,
+                padding: "8px 10px",
+                margin: 0,
+                fontSize: 13,
+                lineHeight: 1.5,
+              }}
+            >
+              {style.guidance}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  async function refresh() {
+    const s = await invoke<ContentStyle[]>("list_content_styles").catch(() => list);
+    setList(s);
+  }
+
+  async function save() {
+    if (!draft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke<ContentStyle>("upsert_content_style", {
+        style: {
+          id: draft.id,
+          name: draft.name,
+          description: draft.description,
+          guidance: draft.guidance,
+          builtin: false,
+          created_at: 0,
+          updated_at: 0,
+        },
+      });
+      setDraft(null);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function duplicate(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const s = await invoke<ContentStyle>("duplicate_content_style", {
+        sourceId: id,
+        newName: null,
+      });
+      await refresh();
+      setDraft({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        guidance: s.guidance,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("delete_content_style", { id });
+      if (draft?.id === id) setDraft(null);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        style={{ width: 640, maxWidth: "92vw", maxHeight: "85vh", overflowY: "auto" }}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <div
+          style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+        >
+          <h2 style={{ margin: 0 }}>{t("styleManagerTitle")}</h2>
+          <button type="button" className="ghost" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <p className="field-note">{t("styleManagerNote")}</p>
+        {error && (
+          <div className="setting-note" style={{ color: "var(--danger, #c0392b)" }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ fontWeight: 600, marginTop: 12 }}>{t("stylePresetsLabel")}</div>
+        {presets.map((s) => (
+          <StyleRow
+            key={s.id}
+            style={s}
+            actions={
+              <button type="button" className="ghost" disabled={busy} onClick={() => duplicate(s.id)}>
+                {t("styleDuplicate")}
+              </button>
+            }
+          />
+        ))}
+
+        <div style={{ fontWeight: 600, marginTop: 12 }}>{t("styleCustomLabel")}</div>
+        {customs.map((s) => (
+          <StyleRow
+            key={s.id}
+            style={s}
+            actions={
+              <>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    setDraft({
+                      id: s.id,
+                      name: s.name,
+                      description: s.description,
+                      guidance: s.guidance,
+                    })
+                  }
+                >
+                  {t("styleEdit")}
+                </button>
+                <button type="button" className="ghost" disabled={busy} onClick={() => duplicate(s.id)}>
+                  {t("styleDuplicate")}
+                </button>
+                <button type="button" className="ghost" disabled={busy} onClick={() => remove(s.id)}>
+                  {t("styleDelete")}
+                </button>
+              </>
+            }
+          />
+        ))}
+
+        {draft ? (
+          <div
+            style={{
+              marginTop: 16,
+              borderTop: "1px solid var(--border, #ddd)",
+              paddingTop: 12,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            <input
+              value={draft.name}
+              placeholder={t("styleNamePlaceholder")}
+              maxLength={80}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            />
+            <input
+              value={draft.description}
+              placeholder={t("styleDescPlaceholder")}
+              maxLength={200}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+            />
+            <textarea
+              value={draft.guidance}
+              placeholder={t("styleGuidancePlaceholder")}
+              rows={6}
+              maxLength={4000}
+              onChange={(e) => setDraft({ ...draft, guidance: e.target.value })}
+            />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" disabled={busy} onClick={save}>
+                {t("styleSave")}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setDraft(null);
+                  setError(null);
+                }}
+              >
+                {t("styleCancel")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            style={{ marginTop: 12 }}
+            onClick={() => setDraft({ id: "", name: "", description: "", guidance: "" })}
+          >
+            {t("styleNew")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CreateCourse({
   agentAvail,
   spaceId,
@@ -6554,9 +6957,50 @@ function CreateCourse({
   const [withAssignments, setWithAssignments] = useState(true);
   // Off => skip the clarifying-questions interview (title only, straight to plan).
   const [askQuestions, setAskQuestions] = useState(true);
+  // Writing style: "" => default style (resolved by the backend). The extra
+  // style-review pass defaults ON (mirrors the tests/homework toggles).
+  const [styleId, setStyleId] = useState<string>("");
+  const [withStyleReview, setWithStyleReview] = useState(true);
+  const [styles, setStyles] = useState<ContentStyle[]>([]);
+  const [styleManagerOpen, setStyleManagerOpen] = useState(false);
+  const [stylePreview, setStylePreview] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  useEffect(() => {
+    // Reload after the Style Manager closes so new/edited styles show up.
+    if (styleManagerOpen) return;
+    let alive = true;
+    invoke<ContentStyle[]>("list_content_styles")
+      .then((s) => {
+        if (!alive) return;
+        setStyles(s);
+        // Drop a selection that no longer exists (deleted in the manager).
+        setStyleId((cur) => (cur && !s.some((x) => x.id === cur) ? "" : cur));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [styleManagerOpen]);
   const [language, setLanguage] = useState(initialCourseLanguage);
   const [agent, setAgent] = useState<Agent>(initialAgent);
   const [busy, setBusy] = useState(false);
+  async function runStylePreview() {
+    setPreviewing(true);
+    setStylePreview(null);
+    try {
+      const p = await invoke<string>("preview_style", {
+        styleId: styleId || null,
+        topic: topic.trim(),
+        language,
+        agent,
+      });
+      setStylePreview(p || "");
+    } catch (e) {
+      setStylePreview(String(e));
+    } finally {
+      setPreviewing(false);
+    }
+  }
   // Fact-check source attachments: an optional URL and an optional image. The
   // image only works with codex (claude's generation can't see images here).
   const [factUrl, setFactUrl] = useState("");
@@ -6642,6 +7086,9 @@ function CreateCourse({
         skip_assignments: !withAssignments,
         // Fact-check has no interview: the claim is the input.
         skip_wizard: isFactCheck ? true : !askQuestions,
+        // "" => default style (resolved server-side). Style-review toggle ON by default.
+        style_id: styleId || null,
+        skip_style_review: !withStyleReview,
       },
     }).catch(() => {});
     if (isFactCheck) {
@@ -6804,6 +7251,64 @@ function CreateCourse({
           />
           <span className="field-note">{t("tierNote")}</span>
         </label>
+        {!isDoc && (
+          <label>
+            {t("styleLabel")}
+            <FieldSelect
+              value={styleId}
+              onChange={setStyleId}
+              options={[
+                { value: "", title: t("styleDefaultOption") },
+                ...styles.map((s) => {
+                  const lbl = styleLabel(s, uiLang);
+                  return {
+                    value: s.id,
+                    title: s.builtin
+                      ? `${lbl.name} · ${t("stylePresetBadge")}`
+                      : lbl.name,
+                    desc: lbl.desc || undefined,
+                  };
+                }),
+              ]}
+            />
+            <span className="field-note">
+              {t("styleNote")}{" "}
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setStyleManagerOpen(true)}
+              >
+                {t("styleManagerOpen")}
+              </button>{" "}
+              <button
+                type="button"
+                className="ghost"
+                disabled={previewing}
+                onClick={runStylePreview}
+              >
+                {previewing ? t("stylePreviewGenerating") : t("stylePreviewButton")}
+              </button>
+            </span>
+            {stylePreview && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "8px 10px",
+                  borderRadius: 6,
+                  background: "var(--surface-2, #f5f5f4)",
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {stylePreview}
+              </div>
+            )}
+          </label>
+        )}
+        {styleManagerOpen && (
+          <StyleManager styles={styles} onClose={() => setStyleManagerOpen(false)} />
+        )}
         {isDoc && <span className="field-note">{t("docLessonNote")}</span>}
         {!isDoc && (
         <div className="create-toggles">
@@ -6829,6 +7334,14 @@ function CreateCourse({
               </label>
             </>
           )}
+          <label className="create-toggle">
+            <input
+              type="checkbox"
+              checked={withStyleReview}
+              onChange={(e) => setWithStyleReview(e.target.checked)}
+            />
+            {t("styleReviewLabel")}
+          </label>
           {/* Fact-check skips the interview entirely — the claim is the input. */}
           {!isFactCheck && (
             <label className="create-toggle">
@@ -7165,6 +7678,49 @@ function CourseView({
   const [uiLang] = useLang();
   const [translateOpen, setTranslateOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [styleOpen, setStyleOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  // Close the "⋯" menu (and its nested translate/publish submenus) on any click
+  // outside it.
+  useEffect(() => {
+    if (!moreOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+        setTranslateOpen(false);
+        setPublishOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [moreOpen]);
+  // Localized display name of the course's writing style (null => default voice,
+  // no pill). Presets resolve synchronously; custom ids load the library once.
+  const courseStyleId = course?.generation_profile?.style_id || "";
+  const [styleName, setStyleName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!courseStyleId) {
+      setStyleName(null);
+      return;
+    }
+    const preset = PRESET_LABELS[courseStyleId];
+    if (preset) {
+      setStyleName((preset[uiLang] ?? preset.en).name);
+      return;
+    }
+    let alive = true;
+    invoke<ContentStyle[]>("list_content_styles")
+      .then((all) => {
+        if (alive) setStyleName(all.find((s) => s.id === courseStyleId)?.name ?? null);
+      })
+      .catch(() => {
+        if (alive) setStyleName(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [courseStyleId, uiLang]);
   const [courseTab, setCourseTab] = useState<"plan" | "mastery">("plan");
   const [translating, setTranslating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -7343,12 +7899,22 @@ function CourseView({
           {categoryLabel(course.category, uiLang) && (
             <span className="category-pill">{categoryLabel(course.category, uiLang)}</span>
           )}
+          <button
+            type="button"
+            className="style-pill"
+            onClick={() => setStyleOpen(true)}
+            title={t("styleChange")}
+          >
+            {styleName ?? t("styleDefaultOption")}
+          </button>
           {(course.tags ?? []).map((tag) => (
             <span className="tag-pill" key={tag}>{tag}</span>
           ))}
-          <span className={`status-pill status-${course.status}`}>
-            {courseLifecycleStatusLabel(course.status, t)}
-          </span>
+          {course.status !== "ready" && (
+            <span className={`status-pill status-${course.status}`}>
+              {courseLifecycleStatusLabel(course.status, t)}
+            </span>
+          )}
           {course.translated_from && (
             <span className="translated-badge">🌐 {t("translatedBadge")}</span>
           )}
@@ -7372,79 +7938,101 @@ function CourseView({
             <option value="claude">claude</option>
             <option value="codex">codex</option>
           </select>
-          <div className="translate-wrap">
+          <div className="translate-wrap" ref={moreRef}>
             <button
-              className="meta-action translate-btn"
-              onClick={() => setTranslateOpen((v) => !v)}
-              disabled={translating}
+              className="meta-action"
+              onClick={() => {
+                setMoreOpen((v) => !v);
+                setTranslateOpen(false);
+                setPublishOpen(false);
+              }}
+              title={t("moreActions")}
+              aria-label={t("moreActions")}
             >
-              {translating ? t("translating") : t("translateButton")}
+              ⋯
             </button>
-            {translateOpen && (
+            {moreOpen && (
               <div className="translate-menu">
-                {COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
-                  <button key={l.code} onClick={() => translateCourse(l.code)} disabled={translating}>
-                    {l.nativeName}
-                  </button>
-                ))}
+                <button
+                  onClick={() => {
+                    setMoreOpen(false);
+                    setProfileOpen(true);
+                  }}
+                >
+                  {t("profileTitle")}
+                </button>
+                <button onClick={() => setTranslateOpen((v) => !v)} disabled={translating}>
+                  {translating ? t("translating") : t("translateButton")}
+                </button>
+                {translateOpen &&
+                  COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
+                    <button
+                      key={l.code}
+                      className="submenu-item"
+                      onClick={() => translateCourse(l.code)}
+                      disabled={translating}
+                    >
+                      {l.nativeName}
+                    </button>
+                  ))}
+                {course.status === "ready" &&
+                  !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id) &&
+                  (catalogServers.length === 0 ? (
+                    <button
+                      onClick={() => {
+                        setMoreOpen(false);
+                        publishCourse();
+                      }}
+                      disabled={publishing}
+                    >
+                      {publishing ? t("catalogPublishing") : t("catalogPublish")}
+                    </button>
+                  ) : (
+                    <>
+                      <button onClick={() => setPublishOpen((v) => !v)} disabled={publishing}>
+                        {publishing ? t("catalogPublishing") : t("catalogPublish")}
+                      </button>
+                      {publishOpen && (
+                        <>
+                          <button
+                            className="submenu-item"
+                            onClick={() => publishCourse(null)}
+                            disabled={publishing || !publicTokenConfigured}
+                            title={publicTokenConfigured ? undefined : t("catalogPublishNoToken")}
+                          >
+                            {t("catalogSourcePublic")}
+                            {!course.catalog_server_url ? " ✓" : ""}
+                          </button>
+                          {catalogServers.map((s) => {
+                            const current =
+                              !!course.catalog_server_url && boundServerLabel === s.name;
+                            return (
+                              <button
+                                key={s.id}
+                                className="submenu-item"
+                                onClick={() => publishCourse(s.id)}
+                                disabled={publishing || !s.has_token}
+                                title={s.has_token ? undefined : t("catalogPublishNoToken")}
+                              >
+                                {s.name}
+                                {current ? " ✓" : ""}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                    </>
+                  ))}
               </div>
             )}
           </div>
-          {course.status === "ready" &&
-            !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id) &&
-            (catalogServers.length === 0 ? (
-              <button
-                className="meta-action"
-                onClick={() => publishCourse()}
-                disabled={publishing}
-              >
-                {publishing ? t("catalogPublishing") : t("catalogPublish")}
-              </button>
-            ) : (
-              <div className="translate-wrap">
-                <button
-                  className="meta-action"
-                  onClick={() => setPublishOpen((v) => !v)}
-                  disabled={publishing}
-                >
-                  {publishing ? t("catalogPublishing") : t("catalogPublish")}
-                </button>
-                {publishOpen && (
-                  <div className="translate-menu">
-                    <button
-                      onClick={() => publishCourse(null)}
-                      disabled={publishing || !publicTokenConfigured}
-                      title={publicTokenConfigured ? undefined : t("catalogPublishNoToken")}
-                    >
-                      {t("catalogSourcePublic")}
-                      {!course.catalog_server_url ? " ✓" : ""}
-                    </button>
-                    {catalogServers.map((s) => {
-                      const current =
-                        !!course.catalog_server_url && boundServerLabel === s.name;
-                      return (
-                        <button
-                          key={s.id}
-                          onClick={() => publishCourse(s.id)}
-                          disabled={publishing || !s.has_token}
-                          title={s.has_token ? undefined : t("catalogPublishNoToken")}
-                        >
-                          {s.name}
-                          {current ? " ✓" : ""}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ))}
-          <button className="meta-action" onClick={() => setProfileOpen(true)}>
-            {t("profileTitle")}
-          </button>
         </div>
       </div>
       {profileOpen && (
         <LearnerProfileModal course={course} onClose={() => setProfileOpen(false)} />
+      )}
+      {styleOpen && (
+        <CourseStyleModal course={course} onClose={() => setStyleOpen(false)} />
       )}
       {(translateStatus ||
         (course.status === "ready" &&
@@ -7656,6 +8244,503 @@ function DeleteCourseModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Change a course's writing style. Applies to lessons generated afterward; on
+// save, offers to regenerate the already-generated lessons into the new style.
+function CourseStyleModal({
+  course,
+  onClose,
+}: {
+  course: Course;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [styles, setStyles] = useState<ContentStyle[]>([]);
+  const [styleId, setStyleId] = useState<string>("");
+  const [profile, setProfile] = useState<Record<string, unknown>>({});
+  const [readyIds, setReadyIds] = useState<string[]>([]);
+  const [phase, setPhase] = useState<"edit" | "regen">("edit");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [p, s, tree] = await Promise.all([
+          invoke<Record<string, unknown>>("get_course_profile", { courseId: course.id }),
+          invoke<ContentStyle[]>("list_content_styles"),
+          invoke<StructureFile>("get_structure", { courseId: course.id }).catch(() => null),
+        ]);
+        if (!alive) return;
+        setProfile(p || {});
+        setStyleId(typeof p?.style_id === "string" ? p.style_id : "");
+        setStyles(s);
+        const ready: string[] = [];
+        const walk = (nodes: ModuleNode[]) => {
+          for (const n of nodes) {
+            if (n.submodules && n.submodules.length) walk(n.submodules);
+            else if (n.generation_state === "ready") ready.push(n.id);
+          }
+        };
+        if (tree) walk(tree.modules);
+        setReadyIds(ready);
+      } catch (e) {
+        if (alive) setError(String(e));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [course.id]);
+
+  async function applyStyle() {
+    setBusy(true);
+    setError(null);
+    try {
+      // Preserve the rest of the profile; change only the style.
+      await invoke("set_course_profile", {
+        courseId: course.id,
+        profile: { ...profile, style_id: styleId || null },
+      });
+      if (readyIds.length > 0) {
+        // Re-enable the buttons for the regenerate choice (busy was set above).
+        setBusy(false);
+        setPhase("regen");
+      } else {
+        onClose();
+      }
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  async function regenerate(yes: boolean) {
+    if (yes) {
+      setBusy(true);
+      for (const id of readyIds) {
+        await invoke("start_generate_submodule", {
+          courseId: course.id,
+          submoduleId: id,
+          instructions: null,
+          tier: null,
+        }).catch(() => {});
+      }
+    }
+    onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        {phase === "edit" ? (
+          <>
+            <h2>{t("styleChange")}</h2>
+            {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+            <label>
+              {t("courseStyleLabel")}
+              <FieldSelect
+                value={styleId}
+                onChange={setStyleId}
+                options={[
+                  { value: "", title: t("styleDefaultOption") },
+                  ...styles.map((s) => {
+                    const lbl = styleLabel(s, uiLang);
+                    return {
+                      value: s.id,
+                      title: s.builtin
+                        ? `${lbl.name} · ${t("stylePresetBadge")}`
+                        : lbl.name,
+                      desc: lbl.desc || undefined,
+                    };
+                  }),
+                ]}
+              />
+            </label>
+            <div className="modal-actions">
+              <button onClick={onClose} disabled={busy}>
+                {t("styleCancel")}
+              </button>
+              <button onClick={applyStyle} disabled={busy}>
+                {t("styleSave")}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h2>{t("styleChange")}</h2>
+            <p className="setting-note">{t("styleChangeRegen")}</p>
+            <div className="modal-actions">
+              <button onClick={() => regenerate(false)} disabled={busy}>
+                {t("styleRegenNo")}
+              </button>
+              <button onClick={() => regenerate(true)} disabled={busy}>
+                {t("styleRegenYes")}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Change the writing style of ONE lesson (per-submodule override) and regenerate
+// just that lesson. Empty selection reverts the lesson to the course style.
+function LessonStyleModal({
+  course,
+  submoduleId,
+  onClose,
+  onApplied,
+}: {
+  course: Course;
+  submoduleId: string;
+  onClose: () => void;
+  onApplied: () => void;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [styles, setStyles] = useState<ContentStyle[]>([]);
+  const [styleId, setStyleId] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [all, override] = await Promise.all([
+          invoke<ContentStyle[]>("list_content_styles"),
+          invoke<string | null>("get_module_style", { submoduleId }),
+        ]);
+        if (!alive) return;
+        setStyles(all);
+        setStyleId(override || course.generation_profile?.style_id || "");
+      } catch (e) {
+        if (alive) setError(String(e));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [submoduleId, course.generation_profile?.style_id]);
+
+  async function apply() {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("start_generate_submodule", {
+        courseId: course.id,
+        submoduleId,
+        styleOverride: styleId || "",
+      });
+      onApplied();
+      onClose();
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <h2>{t("styleChange")}</h2>
+        <p className="setting-note">{t("lessonStyleNote")}</p>
+        {error && <p className="error-banner">{t("errorPrefix", { error })}</p>}
+        <label>
+          {t("courseStyleLabel")}
+          <FieldSelect
+            value={styleId}
+            onChange={setStyleId}
+            options={[
+              { value: "", title: t("styleDefaultOption") },
+              ...styles.map((s) => {
+                const lbl = styleLabel(s, uiLang);
+                return {
+                  value: s.id,
+                  title: s.builtin ? `${lbl.name} · ${t("stylePresetBadge")}` : lbl.name,
+                  desc: lbl.desc || undefined,
+                };
+              }),
+            ]}
+          />
+        </label>
+        <div className="modal-actions">
+          <button onClick={onClose} disabled={busy}>
+            {t("styleCancel")}
+          </button>
+          <button onClick={apply} disabled={busy}>
+            {busy ? t("stylePreviewGenerating") : t("lessonStyleApply")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The course-level controls (agent, style, translate, publish, learner-profile,
+// delete) surfaced on the lesson page. Style is scoped to the single lesson;
+// the other actions operate on the whole course.
+function LessonMetaActions({
+  course,
+  submoduleId,
+  onChanged,
+  onOpenCourse,
+  onRegenerated,
+  onDeleted,
+}: {
+  course: Course;
+  submoduleId: string;
+  onChanged: () => void | Promise<void>;
+  onOpenCourse: (id: string) => void;
+  onRegenerated: () => void;
+  onDeleted: () => void;
+}) {
+  const t = useT();
+  const [uiLang] = useLang();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const [translateOpen, setTranslateOpen] = useState(false);
+  const [translating, setTranslating] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishNote, setPublishNote] = useState<string | null>(null);
+  const [catalogServers, setCatalogServers] = useState<CatalogServerStatus[]>([]);
+  const [publicTokenConfigured, setPublicTokenConfigured] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [styleOpen, setStyleOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [styleName, setStyleName] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<SettingsStatus>("get_settings_status")
+      .then((s) => {
+        setCatalogServers(s.catalog_servers ?? []);
+        setPublicTokenConfigured(!!s.catalog_upload_token_configured);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+        setTranslateOpen(false);
+        setPublishOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [moreOpen]);
+
+  // Effective lesson style: per-lesson override, else the course style.
+  const courseStyleId = course.generation_profile?.style_id || "";
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const override = await invoke<string | null>("get_module_style", { submoduleId }).catch(
+        () => null
+      );
+      const effective = override || courseStyleId;
+      if (!effective) {
+        if (alive) setStyleName(null);
+        return;
+      }
+      const preset = PRESET_LABELS[effective];
+      if (preset) {
+        if (alive) setStyleName((preset[uiLang] ?? preset.en).name);
+        return;
+      }
+      const all = await invoke<ContentStyle[]>("list_content_styles").catch(
+        () => [] as ContentStyle[]
+      );
+      if (alive) setStyleName(all.find((s) => s.id === effective)?.name ?? null);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [submoduleId, courseStyleId, uiLang, styleOpen]);
+
+  async function translateCourse(lang: string) {
+    if (translating) return;
+    setTranslating(true);
+    try {
+      const newId = await invoke<string>("translate_course", {
+        courseId: course.id,
+        targetLanguage: lang,
+      });
+      setTranslateOpen(false);
+      setMoreOpen(false);
+      await onChanged();
+      onOpenCourse(newId);
+    } catch (e) {
+      console.error("translate_course failed", e);
+    } finally {
+      setTranslating(false);
+    }
+  }
+
+  async function publishCourse(serverId: string | null = null) {
+    if (publishing) return;
+    setPublishing(true);
+    setPublishOpen(false);
+    setPublishNote(null);
+    try {
+      const result = await invoke<{ id: string; url: string }>("publish_course_to_catalog", {
+        courseId: course.id,
+        serverId,
+      });
+      setPublishNote(result.url);
+      await onChanged();
+    } catch (e) {
+      setPublishNote(String(e));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  const canPublish =
+    course.status === "ready" &&
+    !(!!course.catalog_origin_id && course.catalog_origin_id !== course.id);
+
+  return (
+    <div className="course-meta-actions">
+      <button
+        type="button"
+        className="style-pill"
+        onClick={() => setStyleOpen(true)}
+        title={t("styleChange")}
+      >
+        {styleName ?? t("styleDefaultOption")}
+      </button>
+      <select
+        className={`agent-pill agent-select agent-${course.agent}`}
+        value={course.agent}
+        title={t("switchProvider")}
+        onChange={async (e) => {
+          await invoke("set_course_agent", { courseId: course.id, agent: e.target.value });
+          await onChanged();
+        }}
+      >
+        <option value="claude">claude</option>
+        <option value="codex">codex</option>
+      </select>
+      <div className="translate-wrap" ref={moreRef}>
+        <button
+          className="meta-action"
+          onClick={() => {
+            setMoreOpen((v) => !v);
+            setTranslateOpen(false);
+            setPublishOpen(false);
+          }}
+          title={t("moreActions")}
+          aria-label={t("moreActions")}
+        >
+          ⋯
+        </button>
+        {moreOpen && (
+          <div className="translate-menu">
+            <button
+              onClick={() => {
+                setMoreOpen(false);
+                setProfileOpen(true);
+              }}
+            >
+              {t("profileTitle")}
+            </button>
+            <button onClick={() => setTranslateOpen((v) => !v)} disabled={translating}>
+              {translating ? t("translating") : t("translateButton")}
+            </button>
+            {translateOpen &&
+              COURSE_LANGUAGES.filter((l) => l.code !== course.language).map((l) => (
+                <button
+                  key={l.code}
+                  className="submenu-item"
+                  onClick={() => translateCourse(l.code)}
+                  disabled={translating}
+                >
+                  {l.nativeName}
+                </button>
+              ))}
+            {canPublish &&
+              (catalogServers.length === 0 ? (
+                <button
+                  onClick={() => {
+                    setMoreOpen(false);
+                    publishCourse();
+                  }}
+                  disabled={publishing}
+                >
+                  {publishing ? t("catalogPublishing") : t("catalogPublish")}
+                </button>
+              ) : (
+                <>
+                  <button onClick={() => setPublishOpen((v) => !v)} disabled={publishing}>
+                    {publishing ? t("catalogPublishing") : t("catalogPublish")}
+                  </button>
+                  {publishOpen && (
+                    <>
+                      <button
+                        className="submenu-item"
+                        onClick={() => publishCourse(null)}
+                        disabled={publishing || !publicTokenConfigured}
+                        title={publicTokenConfigured ? undefined : t("catalogPublishNoToken")}
+                      >
+                        {t("catalogSourcePublic")}
+                      </button>
+                      {catalogServers.map((s) => (
+                        <button
+                          key={s.id}
+                          className="submenu-item"
+                          onClick={() => publishCourse(s.id)}
+                          disabled={publishing || !s.has_token}
+                          title={s.has_token ? undefined : t("catalogPublishNoToken")}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </>
+              ))}
+            <button
+              className="danger-item"
+              onClick={() => {
+                setMoreOpen(false);
+                setConfirmDelete(true);
+              }}
+            >
+              {t("deleteConfirm")}
+            </button>
+          </div>
+        )}
+      </div>
+      {publishNote && <span className="field-note">{publishNote}</span>}
+      {styleOpen && (
+        <LessonStyleModal
+          course={course}
+          submoduleId={submoduleId}
+          onClose={() => setStyleOpen(false)}
+          onApplied={onRegenerated}
+        />
+      )}
+      {profileOpen && (
+        <LearnerProfileModal course={course} onClose={() => setProfileOpen(false)} />
+      )}
+      {confirmDelete && (
+        <DeleteCourseModal
+          course={course}
+          onCancel={() => setConfirmDelete(false)}
+          onDeleted={onDeleted}
+        />
+      )}
     </div>
   );
 }
@@ -10412,6 +11497,9 @@ function SubmoduleView({
   onStartGen,
   onDocGenRequest,
   onOpenSubmodule,
+  onOpenCourse,
+  onChanged,
+  onDeleted,
 }: {
   course?: Course;
   moduleId: string;
@@ -10424,12 +11512,15 @@ function SubmoduleView({
   // Documentation only: open the per-page generation modal instead of generating.
   onDocGenRequest?: (submoduleId: string, title: string) => void;
   onOpenSubmodule: (moduleId: string, submoduleId: string) => void;
+  // Course-level controls surfaced on the lesson page.
+  onOpenCourse: (id: string) => void;
+  onChanged: () => void | Promise<void>;
+  onDeleted: () => void;
 }) {
   const t = useT();
   const [tree, setTree] = useState<StructureFile | null>(null);
   const [content, setContent] = useState<SubmoduleContent | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmingRegen, setConfirmingRegen] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
   const [retryingImages, setRetryingImages] = useState(false);
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
@@ -10702,6 +11793,18 @@ function SubmoduleView({
       </div>
       <h1 className="sub-h1">{sub.title}</h1>
       {sub.summary && <div className="sub-lead">{sub.summary}</div>}
+      {course && (
+        <div className="sub-meta">
+          <LessonMetaActions
+            course={course}
+            submoduleId={submoduleId}
+            onChanged={onChanged}
+            onOpenCourse={onOpenCourse}
+            onRegenerated={reloadTree}
+            onDeleted={onDeleted}
+          />
+        </div>
+      )}
       {prereqLinks.length > 0 && (
         <div className="sub-prereq-hint">
           <span className="sub-prereq-label">{t("prereqHint")}</span>{" "}
@@ -10876,34 +11979,14 @@ function SubmoduleView({
                 ✨ beta
               </button>
             )}
-            {course?.course_format === "documentation" && onDocGenRequest ? (
-              // Documentation: the modal subsumes the confirm step (it lets the
-              // user edit instructions/depth before overwriting the page).
+            {course?.course_format === "documentation" && onDocGenRequest && (
+              // Documentation: the modal lets the user edit instructions/depth
+              // before overwriting the page. Plain regenerate is now done via the
+              // lesson style modal (apply = regenerate).
               <button
                 className="sub-regenerate"
                 onClick={() => onDocGenRequest(submoduleId, sub?.title ?? "")}
               >
-                ↻ {t("subRegenerate")}
-              </button>
-            ) : confirmingRegen ? (
-              <>
-                <span className="sub-regen-warn">{t("subRegenerateConfirm")}</span>
-                <button
-                  className="sub-regenerate danger"
-                  onClick={async () => {
-                    setConfirmingRegen(false);
-                    await onStartGen(submoduleId);
-                    await reloadTree();
-                  }}
-                >
-                  ↻ {t("subRegenerate")}
-                </button>
-                <button className="sub-regenerate" onClick={() => setConfirmingRegen(false)}>
-                  {t("cancel")}
-                </button>
-              </>
-            ) : (
-              <button className="sub-regenerate" onClick={() => setConfirmingRegen(true)}>
                 ↻ {t("subRegenerate")}
               </button>
             )}
@@ -12525,7 +13608,7 @@ function AssignmentTurnView({ turn }: { turn: AssignmentTurn }) {
   );
 }
 
-const STAGE_ORDER: StageName[] = ["draft", "annotate", "illustrate", "test"];
+const STAGE_ORDER: StageName[] = ["draft", "annotate", "style_review", "illustrate", "test"];
 
 const TEST_PASS_THRESHOLD = 0.7;
 
@@ -12557,6 +13640,7 @@ const KIND_ICON: Record<string, string> = {
 const STAGE_LABEL_KEYS: Record<string, string> = {
   draft: "stageDraft",
   annotate: "stageAnnotate",
+  style_review: "stageStyleReview",
   illustrate: "stageIllustrate",
   test: "stageTest",
   roadmap: "stageRoadmap",
@@ -12636,6 +13720,7 @@ function StageStrip({ current }: { current: StageName }) {
   const labels: Record<StageName, string> = {
     draft: t("stageDraft"),
     annotate: t("stageAnnotate"),
+    style_review: t("stageStyleReview"),
     illustrate: t("stageIllustrate"),
     test: t("stageTest"),
   };

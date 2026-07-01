@@ -1867,13 +1867,15 @@ fn spawn_generate_submodule(
     }
 
     let course_md = courses::read_course_md(&paths, &course.id).map_err(|e| e.to_string())?;
-    let (structure, user_instructions) = {
+    let (structure, user_instructions, module_style) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let s = courses::load_structure(&conn, &course.id).map_err(|e| e.to_string())?;
         // Per-page generation instructions (documentation lessons). Read from the
         // DB so every path (modal, queue, bulk regen) honors stored directions.
         let instr = db::get_module_instructions(&conn, &submodule_id).map_err(|e| e.to_string())?;
-        (s, instr)
+        // Per-lesson style override (NULL = inherit the course style).
+        let style = db::get_module_style_id(&conn, &submodule_id).map_err(|e| e.to_string())?;
+        (s, instr, style)
     };
     let (mod_node, sub_node) = courses::find_submodule_path(&structure, &submodule_id)
         .ok_or_else(|| format!("submodule not found: {submodule_id}"))?;
@@ -1964,6 +1966,22 @@ fn spawn_generate_submodule(
         let writing_model = apply_tier_reasoning(writing_model, &profile, "writing");
         let tests_model = apply_tier_reasoning(tests_model, &profile, "tests");
         let verify_model = apply_tier_reasoning(verify_model, &profile, "verify");
+        // Resolve the course's writing style (preset or custom; None/dangling id
+        // falls back to the default). Passed to the draft for voice, and reused by
+        // the gated style-review pass below.
+        let style = {
+            let settings = app2.state::<Arc<SettingsState>>();
+            // Per-lesson override wins over the course style.
+            let course_style = profile.style_id();
+            let effective = module_style
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or(course_style.as_deref());
+            settings.resolve_style(effective)
+        };
+        let style_json = json!({ "name": style.name, "guidance": style.guidance });
+        let skip_style_review = profile.skip_style_review();
         let total_started = Instant::now();
         let (space_sources, space_links, space_dirs, space_strict) = match db.0.lock() {
             Ok(conn) => course_space_context(&paths, &conn, &course),
@@ -1990,6 +2008,7 @@ fn spawn_generate_submodule(
             "learnerProfile": course.learner_profile.clone(),
             "researchPack": research_pack,
             "customMcp": custom_mcp,
+            "style": style_json.clone(),
         });
         if let Some(ref key) = brave_api_key {
             common["braveApiKey"] = json!(key);
@@ -2185,6 +2204,66 @@ fn spawn_generate_submodule(
         let widgets = if is_podcast { json!({}) } else { widgets };
         log_timing(&app2, &cid, &sid, "annotate", annotate_started);
 
+        // Style-review editorial pass (gated, default ON): check the article
+        // against the selected style and revise any drift before publish. Soft-
+        // fail — on error keep the annotated article so the lesson still becomes
+        // readable; the failure is recorded in the review notes.
+        let (final_article, notes) = if skip_style_review {
+            (final_article, notes)
+        } else {
+            emit_stage_event(&app2, &cid, &sid, "style_review");
+            let style_started = Instant::now();
+            let params = json!({
+                "backend": course.agent,
+                "article": final_article,
+                "language": course.language,
+                "topic": course.topic,
+                "style": style_json.clone(),
+                "modelConfig": writing_model,
+            });
+            let result = match sidecar.call_with_progress(
+                "submodule_style_review",
+                params,
+                Duration::from_secs(600),
+                make_progress_cb("style_review"),
+            ) {
+                Ok(v) => {
+                    let revised = v
+                        .get("article")
+                        .and_then(|a| a.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or(final_article);
+                    let extra = v
+                        .get("notes")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut combined = notes;
+                    if !extra.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push_str("\n\n");
+                        }
+                        combined.push_str(&extra);
+                    }
+                    (revised, combined)
+                }
+                Err(e) => {
+                    eprintln!("[generate_submodule] style-review stage failed (soft): {e}");
+                    let mut n = notes;
+                    if !n.is_empty() {
+                        n.push_str("\n\n");
+                    }
+                    n.push_str(&format!(
+                        "_Стадия проверки стиля не выполнена: {e}. Статья сохранена без проверки стиля._"
+                    ));
+                    (final_article, n)
+                }
+            };
+            log_timing(&app2, &cid, &sid, "style_review", style_started);
+            result
+        };
+
         // The article is the primary artifact — persist it and mark the
         // submodule readable NOW. Illustrations and the comprehension test are
         // enrichment: they backfill in the background and refresh the reader
@@ -2274,6 +2353,7 @@ fn spawn_generate_submodule(
                 "category": course.category,
                 "structure": structure_value,
                 "learnerProfile": course.learner_profile.clone(),
+                "style": style_json.clone(),
             });
             Some(thread::spawn(move || {
                 let test_started = Instant::now();
@@ -2329,6 +2409,7 @@ fn spawn_generate_submodule(
                 "genProfile": gen_profile.clone(),
                 "category": course.category,
                 "learnerProfile": course.learner_profile.clone(),
+                "style": style_json.clone(),
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -2384,6 +2465,7 @@ fn spawn_generate_submodule(
                 "genProfile": gen_profile.clone(),
                 "category": course.category,
                 "learnerProfile": course.learner_profile.clone(),
+                "style": style_json.clone(),
             });
             Some(thread::spawn(move || {
                 let started = Instant::now();
@@ -3986,6 +4068,173 @@ fn set_custom_mcp_enabled(
     Ok(settings_status(&settings_state))
 }
 
+/// Validate, normalize, assign id/timestamps, and persist a custom writing style.
+/// Shared by `upsert_content_style` (create/edit) and `duplicate_content_style`.
+fn persist_custom_style(
+    state: &Arc<SettingsState>,
+    mut style: settings::ContentStyle,
+) -> Result<settings::ContentStyle, String> {
+    style.builtin = false;
+    style.name = style.name.trim().to_string();
+    style.description = style.description.trim().to_string();
+    style.guidance = style.guidance.trim().to_string();
+    settings::validate_style(&style)?;
+
+    let now = now_unix_secs()?;
+    let id = style.id.trim().to_string();
+    if id.is_empty() {
+        // Create: generate a unique slug that collides with no preset or custom id.
+        let existing: std::collections::HashSet<String> =
+            state.content_styles().into_iter().map(|s| s.id).collect();
+        let base = settings::slugify_style(&style.name);
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while existing.contains(&candidate)
+            || candidate.starts_with(settings::PRESET_ID_PREFIX)
+        {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        style.id = candidate;
+        style.created_at = now;
+        style.updated_at = now;
+    } else {
+        if id.starts_with(settings::PRESET_ID_PREFIX) {
+            return Err(
+                "Built-in preset styles cannot be edited. Duplicate it to customize."
+                    .to_string(),
+            );
+        }
+        // Edit: preserve the original created_at when the style already exists.
+        let prior_created = state
+            .custom_styles()
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|p| p.created_at)
+            .filter(|c| *c > 0);
+        style.id = id;
+        style.created_at = prior_created.unwrap_or(now);
+        style.updated_at = now;
+    }
+    // Reject a display name already used by a DIFFERENT style (preset or custom),
+    // so the picker never shows two indistinguishable entries.
+    let name_key = style.name.to_lowercase();
+    if state
+        .content_styles()
+        .iter()
+        .any(|s| s.id != style.id && s.name.trim().to_lowercase() == name_key)
+    {
+        return Err("A style with this name already exists.".to_string());
+    }
+    state
+        .upsert_custom_style(style.clone())
+        .map_err(|e| e.to_string())?;
+    Ok(style)
+}
+
+/// List all writing styles: read-only presets first, then custom styles.
+#[tauri::command]
+fn list_content_styles(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+) -> Vec<settings::ContentStyle> {
+    settings_state.content_styles()
+}
+
+/// Create or update a custom writing style. Rejects empty name/guidance and any
+/// attempt to edit a preset (FR-009/FR-011/FR-013/FR-014).
+#[tauri::command]
+fn upsert_content_style(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    style: settings::ContentStyle,
+) -> Result<settings::ContentStyle, String> {
+    persist_custom_style(settings_state.inner(), style)
+}
+
+/// Duplicate any style (preset or custom) into a new editable custom copy (FR-010).
+#[tauri::command]
+fn duplicate_content_style(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    source_id: String,
+    new_name: Option<String>,
+) -> Result<settings::ContentStyle, String> {
+    let source = settings_state
+        .content_styles()
+        .into_iter()
+        .find(|s| s.id == source_id)
+        .ok_or_else(|| "Style not found.".to_string())?;
+    let name = new_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{} (copy)", source.name));
+    persist_custom_style(
+        settings_state.inner(),
+        settings::ContentStyle {
+            id: String::new(),
+            name,
+            description: source.description,
+            guidance: source.guidance,
+            builtin: false,
+            created_at: 0,
+            updated_at: 0,
+        },
+    )
+}
+
+/// Delete a custom writing style. Presets cannot be deleted; courses referencing
+/// a deleted style fall back to the default at generation time (FR-012).
+#[tauri::command]
+fn delete_content_style(
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    id: String,
+) -> Result<(), String> {
+    if id.trim().starts_with(settings::PRESET_ID_PREFIX) {
+        return Err("Built-in preset styles cannot be deleted.".to_string());
+    }
+    settings_state
+        .delete_custom_style(&id)
+        .map_err(|e| e.to_string())
+}
+
+/// Generate a short sample paragraph in the given style so the user can preview a
+/// style before committing to it. Resolves the style id server-side.
+#[tauri::command]
+async fn preview_style(
+    sidecar_state: tauri::State<'_, Arc<Sidecar>>,
+    settings_state: tauri::State<'_, Arc<SettingsState>>,
+    style_id: Option<String>,
+    topic: String,
+    language: String,
+    agent: Option<String>,
+) -> Result<String, String> {
+    let sidecar = sidecar_state.inner().clone();
+    let agent = match agent.as_deref() {
+        Some("codex") => "codex".to_string(),
+        _ => "claude".to_string(),
+    };
+    let style = settings_state.resolve_style(style_id.as_deref());
+    let model_config = settings_state.stage_model(&agent, "assistant");
+    tauri::async_runtime::spawn_blocking(move || {
+        let params = json!({
+            "backend": agent,
+            "topic": topic,
+            "language": language,
+            "style": { "name": style.name, "guidance": style.guidance },
+            "modelConfig": model_config,
+        });
+        sidecar
+            .call("generate_style_preview", params, Duration::from_secs(120))
+            .map(|v| {
+                v.get("preview")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Spawn an MCP server once and list its tools (validation before saving).
 #[tauri::command]
 async fn probe_mcp_server(
@@ -5552,6 +5801,11 @@ fn start_generate_assignments(
             .ok_or_else(|| format!("submodule not found: {submodule_id}"))?
     };
     let tests_model = settings_state.stage_model(&course.agent, "tests");
+    let style = {
+        let profile = resolve_course_profile(&settings_state, &course);
+        settings_state.resolve_style(profile.style_id().as_deref())
+    };
+    let style_json = json!({ "name": style.name, "guidance": style.guidance });
     let sidecar = sidecar_state.inner().clone();
     let app2 = app.clone();
     let article = content.article;
@@ -5574,6 +5828,7 @@ fn start_generate_assignments(
             "article": article,
             "modelConfig": tests_model,
             "category": course.category,
+            "style": style_json,
         });
         let out = match sidecar.call_with_progress(
             "generate_assignments",
@@ -5629,6 +5884,8 @@ fn start_generate_flashcards(
     };
     let profile = resolve_course_profile(&settings_state, &course);
     let gen_profile = gen_profile_json(&profile, course.category.as_deref());
+    let style = settings_state.resolve_style(profile.style_id().as_deref());
+    let style_json = json!({ "name": style.name, "guidance": style.guidance });
     let tests_model = settings_state.stage_model(&course.agent, "tests");
     let sidecar = sidecar_state.inner().clone();
     let db = db_state.inner().clone();
@@ -5655,6 +5912,7 @@ fn start_generate_flashcards(
             "genProfile": gen_profile,
             "category": course.category,
             "learnerProfile": course.learner_profile,
+            "style": style_json,
         });
         let out = match sidecar.call_with_progress(
             "generate_flashcards",
@@ -5906,6 +6164,17 @@ fn get_module_instructions(
     db::get_module_instructions(&conn, &submodule_id).map_err(|e| e.to_string())
 }
 
+/// The per-lesson style override id, or None if the lesson inherits the course
+/// style. Used to show the effective style on the lesson page.
+#[tauri::command]
+fn get_module_style(
+    db_state: tauri::State<'_, Arc<Db>>,
+    submodule_id: String,
+) -> Result<Option<String>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::get_module_style_id(&conn, &submodule_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn start_generate_submodule(
     app: AppHandle,
@@ -5919,6 +6188,9 @@ fn start_generate_submodule(
     // depth override. Both optional; absent for every non-documentation caller.
     instructions: Option<String>,
     tier: Option<String>,
+    // Lesson style modal: per-lesson style override to persist before regenerating.
+    // Blank clears it (revert to the course style); absent leaves it untouched.
+    style_override: Option<String>,
 ) -> Result<(), String> {
     let course = {
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
@@ -5941,6 +6213,18 @@ fn start_generate_submodule(
         let conn = db_state.0.lock().map_err(|e| e.to_string())?;
         let trimmed = instr.trim();
         db::set_module_instructions(
+            &conn,
+            &submodule_id,
+            if trimmed.is_empty() { None } else { Some(trimmed) },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // Persist the per-lesson style override before generating (blank clears it,
+    // reverting the lesson to the course style). Spawn reads it back from the DB.
+    if let Some(style) = style_override.as_deref() {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let trimmed = style.trim();
+        db::set_module_style_id(
             &conn,
             &submodule_id,
             if trimmed.is_empty() { None } else { Some(trimmed) },
@@ -9540,6 +9824,7 @@ pub fn run() {
             accept_structure_refinement,
             start_generate_submodule,
             get_module_instructions,
+            get_module_style,
             start_first_pending_submodule,
             start_full_course_generation,
             start_lesson_generation,
@@ -9611,6 +9896,11 @@ pub fn run() {
             add_custom_mcp,
             delete_custom_mcp,
             set_custom_mcp_enabled,
+            list_content_styles,
+            upsert_content_style,
+            duplicate_content_style,
+            delete_content_style,
+            preview_style,
             probe_mcp_server,
             discover_course_mcp,
             set_course_mcp,

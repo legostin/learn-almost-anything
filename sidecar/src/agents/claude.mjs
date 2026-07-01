@@ -247,6 +247,27 @@ ${text}
 `;
 }
 
+// Selected writing style (preset or custom). Governs tone/register/terminology
+// of the lesson prose; never overrides accuracy, formatting, or language.
+function writingStyleBlock(style, lang) {
+  const guidance = typeof style?.guidance === "string" ? style.guidance.trim() : "";
+  if (!guidance) return "";
+  const name =
+    typeof style?.name === "string" && style.name.trim() ? style.name.trim() : "custom";
+  return `Writing style — "${name}". Apply this voice consistently throughout the material:
+<writing-style>
+${guidance}
+</writing-style>
+This governs tone, register, terminology and how much formal notation to use. It
+does NOT override factual accuracy, the ::widget markers, or the target language
+"${lang}". If the style and a necessary technical term conflict, keep the term. If
+this style asks to avoid formulas or symbolic notation, that OVERRIDES the default
+"write every mathematical expression as LaTeX" guidance — express the relationship
+in plain words instead; any math you do keep must still be valid LaTeX.
+
+`;
+}
+
 // Documentation only: this page's place in the outline plus the other pages'
 // titles/summaries/snippets, so an evolving doc set stays consistent.
 function docPagesContextBlock(courseFormat, docPagesContext) {
@@ -674,6 +695,7 @@ async function draftArticleInternal(
     factInput,
     userInstructions,
     docPagesContext,
+    style,
   },
   onProgress
 ) {
@@ -724,7 +746,7 @@ code APIs, image/video URLs, fine-grained numbers).
 ${courseFormatGuide(courseFormat, lang)}
 ${podcastNoWidgetGuide(courseFormat)}
 ${factCheckInputBlock(courseFormat, factInput)}${userInstructionsBlock(userInstructions)}
-Course brief (wizard Q&A):
+${writingStyleBlock(style, lang)}Course brief (wizard Q&A):
 <course-md>
 ${courseMd}
 </course-md>
@@ -1218,6 +1240,83 @@ function normalizeSources(raw) {
 /** Stage 2 — editor + fact-check + consistency pass. */
 export async function submoduleReview(params, ctx) {
   return await reviewArticle(params, ctx?.progress);
+}
+
+// Generate a short sample paragraph in a given style so the user can preview a
+// style before committing. Returns { preview }.
+export async function generateStylePreview({ topic, language, style, modelConfig }, ctx) {
+  const lang = (language || "en").trim();
+  const guidance = typeof style?.guidance === "string" ? style.guidance.trim() : "";
+  const subject = typeof topic === "string" && topic.trim() ? topic.trim() : "why the sky is blue";
+  const styleBlock = guidance
+    ? `Write in this style:\n<writing-style>\n${guidance}\n</writing-style>\n\n`
+    : "";
+  const prompt = `${styleBlock}Write a SHORT sample paragraph (3-4 sentences, about 60-80 words) in language "${lang}" that teaches a small idea about "${subject}". This is a STYLE PREVIEW so the reader can feel the voice — make the chosen writing style clearly recognizable. Output ONLY the paragraph: no title, no preamble, no markdown headings.`;
+  ctx?.progress?.({ label: "writing" });
+  const text = await runStreamed(prompt, ctx?.progress, { modelConfig });
+  return { preview: (text || "").trim() };
+}
+
+// Style-review editorial pass: check the article against the selected writing
+// style and revise drift, without harming accuracy or formatting. Returns the
+// (possibly revised) article plus a short notes line recording any unresolved
+// style/accuracy trade-offs.
+export async function submoduleStyleReview(params, ctx) {
+  const { article, language, topic, style, modelConfig } = params || {};
+  const onProgress = ctx?.progress;
+  const lang = (language || "en").trim();
+  const guidance = typeof style?.guidance === "string" ? style.guidance.trim() : "";
+  const name =
+    typeof style?.name === "string" && style.name.trim() ? style.name.trim() : "selected";
+  // No style guidance => nothing to enforce; return the article untouched.
+  if (!guidance) {
+    return { article: typeof article === "string" ? article : "", notes: "" };
+  }
+  const prompt = `You are a style editor for one submodule article from a course on
+"${topic}" (language: ${lang}). Revise the article so it conforms to the
+"${name}" writing style described below.
+
+<writing-style>
+${guidance}
+</writing-style>
+
+Rules:
+1. Adjust tone, register, vocabulary and terminology level so the whole article
+   reads in this style. Fix passages that drift from it (e.g. jargon in a plain
+   style, or casual phrasing in a formal one).
+2. Preserve factual accuracy. If the style and a NECESSARY technical term
+   conflict (e.g. a required term in a plain-language style), keep the term and
+   note the trade-off — never sacrifice correctness for tone.
+3. Do NOT change the meaning, the facts, or the structure beyond what the style
+   requires. Keep all Markdown headings and the article's organization.
+4. Preserve every ::widget{...} marker line EXACTLY as-is (never remove, move,
+   reword, or translate them, and keep the blank lines around them).
+5. Math must follow the style. If the style calls for plain language without
+   formulas, rewrite any formula or symbolic notation (Greek letters, exponents,
+   fractions, etc.) into plain words instead of keeping it — e.g. turn
+   "scattering ~ 1/λ⁴" into "shorter waves scatter much more strongly". Otherwise,
+   keep every mathematical expression as valid LaTeX. Never leave malformed math.
+6. Write in language "${lang}".
+
+Article to revise:
+<article>
+${article}
+</article>
+
+${languageStyleGuide(lang)}
+
+Output ONLY a JSON object on a single line:
+{"article":"<full revised article markdown>","notes":"<1-3 sentences on what you changed for style, plus any UNRESOLVED style/accuracy trade-off; empty string if nothing changed>"}`;
+  onProgress?.({ label: "reviewing" });
+  const text = await runStreamed(prompt, onProgress, { modelConfig });
+  const parsed = extractJson(text);
+  return {
+    article:
+      typeof parsed?.article === "string" && parsed.article.trim()
+        ? parsed.article.trim()
+        : article,
+    notes: typeof parsed?.notes === "string" ? parsed.notes.trim() : "",
+  };
 }
 
 async function reviewArticle(
@@ -2671,7 +2770,7 @@ export async function detectImageTextLanguage({ imagePath, sourceLang, targetLan
   return { hasText, language: parsed.language || "", translate };
 }
 
-export async function generateTest({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, structure, learnerProfile }, ctx) {
+export async function generateTest({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, structure, learnerProfile, style }, ctx) {
   if (typeof article !== "string" || !article.trim()) {
     throw new Error("article required for test generation");
   }
@@ -2694,7 +2793,7 @@ export async function generateTest({ topic, language, courseFormat, submodulePat
 a course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}${recallGuide}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}${writingStyleBlock(style, lang)}${recallGuide}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 ${isPodcast ? "Episode transcript the test must be based on" : "Article the test must be based on"}:
@@ -2791,7 +2890,7 @@ function normalizeFlashcards(raw) {
 }
 
 export async function generateFlashcards(
-  { topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, learnerProfile },
+  { topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, learnerProfile, style },
   ctx
 ) {
   if (typeof article !== "string" || !article.trim()) {
@@ -2804,7 +2903,7 @@ export async function generateFlashcards(
   const prompt = `You are extracting active-recall FLASHCARDS for a submodule of a
 course on "${topic}" (language: ${lang}).
 
-${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}${writingStyleBlock(style, lang)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The ${source} the learner just studied:
@@ -3095,7 +3194,7 @@ function normalizeReview(parsed) {
  * Design a short chain of practical homework assignments for a submodule.
  * @returns {Promise<{assignments: Array<{id,title,prompt,type,criteria}>}>}
  */
-export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, learnerProfile }, ctx) {
+export async function generateAssignments({ topic, language, courseFormat, submodulePath, article, modelConfig, category, genProfile, learnerProfile, style }, ctx) {
   if (["podcast_series", "encyclopedia", "documentation"].includes(normalizeCourseFormat(courseFormat))) {
     return { assignments: [] };
   }
@@ -3130,7 +3229,7 @@ only; each run finishes in under 5 seconds.\n`
 course on "${topic}" (language: ${lang}).
 
 ${courseFormatGuide(courseFormat, lang)}
-${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}
+${categoryPedagogyBlock(category, lang, intensity)}${learnerProfileBlock(learnerProfile)}${writingStyleBlock(style, lang)}
 Submodule: ${submodulePath?.title || ""}${submodulePath?.summary ? ` — ${submodulePath.summary}` : ""}
 
 The article the learner just studied:
