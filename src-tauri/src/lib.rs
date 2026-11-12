@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+mod agents;
 mod coderun;
 mod courses;
 mod roadmaps;
@@ -206,7 +207,7 @@ fn create_course(
     roadmap_skill: Option<String>,
 ) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| "claude".to_string());
-    if agent != "claude" && agent != "codex" {
+    if !agents::is_known(&agent) {
         return Err(format!("unknown agent: {agent}"));
     }
     let course_format = db::normalize_course_format(course_format.as_deref());
@@ -312,7 +313,7 @@ fn set_course_agent(
     course_id: String,
     agent: String,
 ) -> Result<(), String> {
-    if agent != "claude" && agent != "codex" {
+    if !agents::is_known(&agent) {
         return Err(format!("unknown agent: {agent}"));
     }
     let now = now_unix_secs()?;
@@ -350,20 +351,19 @@ fn pick_course_suggestion_backend(requested: Option<String>) -> Result<String, S
         .map(str::trim)
         .filter(|s| !s.is_empty());
     if let Some(name) = requested {
-        if name != "claude" && name != "codex" {
+        if !agents::is_known(name) {
             return Err(format!("unknown agent: {name}"));
         }
-        if cli_present(name) {
+        if agents::available(name) {
             return Ok(name.to_string());
         }
     }
-    if cli_present("claude") {
-        Ok("claude".to_string())
-    } else if cli_present("codex") {
-        Ok("codex".to_string())
-    } else {
-        Err("no agent available".to_string())
-    }
+    agents::AGENTS
+        .iter()
+        .map(|a| a.id)
+        .find(|id| agents::available(id))
+        .map(str::to_string)
+        .ok_or_else(|| "no agent available".to_string())
 }
 
 #[tauri::command]
@@ -920,7 +920,7 @@ fn create_roadmap(
     agent: Option<String>,
 ) -> Result<db::Roadmap, String> {
     let agent = agent.unwrap_or_else(|| "claude".to_string());
-    if agent != "claude" && agent != "codex" {
+    if !agents::is_known(&agent) {
         return Err(format!("unknown agent: {agent}"));
     }
     let topic = topic.trim().to_string();
@@ -2507,9 +2507,7 @@ fn spawn_generate_submodule(
         // to find public source pages when Brave is not.
         let can_illustrate = !is_podcast
             && !illustration_off
-            && (brave_api_key.is_some()
-                || gemini_key.is_some()
-                || matches!(course.agent.as_str(), "claude" | "codex"));
+            && (brave_api_key.is_some() || gemini_key.is_some() || agents::is_known(&course.agent));
         let widgets = if can_illustrate {
             emit_stage_event(&app2, &cid, &sid, "illustrate");
             let illustrate_started = Instant::now();
@@ -3005,7 +3003,7 @@ fn generate_image_bytes(
         }
     }
 
-    if provider != "gemini" && course.agent == "codex" {
+    if provider != "gemini" && agents::can_generate_images(&course.agent) {
         let params = json!({ "backend": "codex", "prompt": prompt });
         match sidecar.call("generate_image", params, Duration::from_secs(3000)) {
             Ok(v) => {
@@ -3051,11 +3049,11 @@ fn illustrate_widgets(
     let provider = app.state::<Arc<SettingsState>>().image_provider();
     let engine_available = match provider.as_str() {
         "gemini" => gemini_key.is_some(),
-        "codex" => course.agent == "codex",
-        _ => gemini_key.is_some() || course.agent == "codex",
+        "codex" => agents::can_generate_images(&course.agent),
+        _ => gemini_key.is_some() || agents::can_generate_images(&course.agent),
     };
     let can_generate = generate_images && engine_available;
-    let can_agent_search = matches!(course.agent.as_str(), "claude" | "codex");
+    let can_agent_search = agents::is_known(&course.agent);
     if brave_key.is_none() && !can_generate && !can_agent_search {
         return widgets;
     }
@@ -3800,6 +3798,8 @@ struct SettingsStatus {
     image_provider: String,
     claude_enabled: bool,
     codex_enabled: bool,
+    opencode_enabled: bool,
+    commandcode_enabled: bool,
 }
 
 /// Private catalog server as exposed to the UI — the token itself never
@@ -3827,7 +3827,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         McpServerStatus {
             id: "context7".to_string(),
             name: "Context7".to_string(),
-            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            enabled_for: agents::labels(),
             tools: vec![
                 "resolve-library-id".to_string(),
                 "query-docs".to_string(),
@@ -3837,7 +3837,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         McpServerStatus {
             id: "mediawiki".to_string(),
             name: "Wikimedia / MediaWiki".to_string(),
-            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            enabled_for: agents::labels(),
             tools: vec![
                 "search-page".to_string(),
                 "get-page".to_string(),
@@ -3852,7 +3852,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
     mcp_servers.push(McpServerStatus {
         id: "arxiv".to_string(),
         name: "arXiv".to_string(),
-        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        enabled_for: agents::labels(),
         tools: vec![
             "arxiv_search".to_string(),
             "arxiv_get_metadata".to_string(),
@@ -3863,7 +3863,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
     mcp_servers.push(McpServerStatus {
         id: "openalex".to_string(),
         name: "OpenAlex".to_string(),
-        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        enabled_for: agents::labels(),
         tools: vec![
             "search_works".to_string(),
             "get_work".to_string(),
@@ -3875,7 +3875,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
     mcp_servers.push(McpServerStatus {
         id: "semanticscholar".to_string(),
         name: "Semantic Scholar".to_string(),
-        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        enabled_for: agents::labels(),
         tools: vec![
             "search_papers".to_string(),
             "get_paper".to_string(),
@@ -3887,7 +3887,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
     mcp_servers.push(McpServerStatus {
         id: "ytt".to_string(),
         name: "YouTube Transcripts".to_string(),
-        enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+        enabled_for: agents::labels(),
         tools: vec![
             "get-transcript".to_string(),
             "get-transcript-languages".to_string(),
@@ -3898,7 +3898,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         mcp_servers.push(McpServerStatus {
             id: "brave".to_string(),
             name: "Brave Search".to_string(),
-            enabled_for: vec!["Claude".to_string(), "Codex".to_string()],
+            enabled_for: agents::labels(),
             tools: vec![
                 "brave_web_search".to_string(),
                 "brave_image_search".to_string(),
@@ -3910,11 +3910,7 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         mcp_servers.push(McpServerStatus {
             id: s.id.clone(),
             name: s.name.clone(),
-            enabled_for: if s.enabled {
-                vec!["Claude".to_string(), "Codex".to_string()]
-            } else {
-                vec![]
-            },
+            enabled_for: if s.enabled { agents::labels() } else { vec![] },
             tools: s.tools.clone(),
             source: "custom".to_string(),
         });
@@ -3949,6 +3945,8 @@ fn settings_status(state: &SettingsState) -> SettingsStatus {
         image_provider: state.image_provider(),
         claude_enabled: state.agent_enabled("claude"),
         codex_enabled: state.agent_enabled("codex"),
+        opencode_enabled: state.agent_enabled("opencode"),
+        commandcode_enabled: state.agent_enabled("commandcode"),
     }
 }
 
@@ -4207,10 +4205,7 @@ async fn preview_style(
     agent: Option<String>,
 ) -> Result<String, String> {
     let sidecar = sidecar_state.inner().clone();
-    let agent = match agent.as_deref() {
-        Some("codex") => "codex".to_string(),
-        _ => "claude".to_string(),
-    };
+    let agent = agents::normalize(agent.as_deref());
     let style = settings_state.resolve_style(style_id.as_deref());
     let model_config = settings_state.stage_model(&agent, "assistant");
     tauri::async_runtime::spawn_blocking(move || {
@@ -4269,10 +4264,7 @@ async fn discover_course_mcp(
     agent: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let sidecar = sidecar_state.inner().clone();
-    let agent = match agent.as_deref() {
-        Some("codex") => "codex".to_string(),
-        _ => "claude".to_string(),
-    };
+    let agent = agents::normalize(agent.as_deref());
     let model_config = settings_state.stage_model(&agent, "utility");
     tauri::async_runtime::spawn_blocking(move || {
         let params = json!({
@@ -4293,10 +4285,12 @@ async fn discover_course_mcp(
 struct AgentAvailability {
     claude: bool,
     codex: bool,
+    opencode: bool,
+    commandcode: bool,
 }
 
-fn cli_present(cmd: &str) -> bool {
-    sidecar::command_path(cmd).is_absolute()
+fn cli_present(agent: &str) -> bool {
+    agents::available(agent)
 }
 
 #[tauri::command]
@@ -4306,6 +4300,8 @@ fn check_agent_availability(state: tauri::State<'_, Arc<SettingsState>>) -> Agen
     AgentAvailability {
         claude: cli_present("claude") && state.agent_enabled("claude"),
         codex: cli_present("codex") && state.agent_enabled("codex"),
+        opencode: cli_present("opencode") && state.agent_enabled("opencode"),
+        commandcode: cli_present("commandcode") && state.agent_enabled("commandcode"),
     }
 }
 
@@ -6659,7 +6655,7 @@ fn set_agent_enabled(
     agent: String,
     enabled: bool,
 ) -> Result<SettingsStatus, String> {
-    if agent != "claude" && agent != "codex" {
+    if !agents::is_known(&agent) {
         return Err(format!("unknown agent: {agent}"));
     }
     settings_state
@@ -7494,8 +7490,9 @@ async fn ask_course_assistant(
                 }
             }
         }
-        // Both agents do vision on a local image (Claude via base64, Codex via a
-        // local_image input item), so keep the course's own agent.
+        // Every backend supports a local image (Claude via base64, Codex via a
+        // local_image item, the CLI transports via attachment/path), so keep the
+        // course's own agent.
         let profile = resolve_course_profile(&settings, &course);
         let model = apply_tier_reasoning(
             settings.stage_model(&course.agent, "assistant"),
@@ -7506,7 +7503,7 @@ async fn ask_course_assistant(
         // tool; gate it behind the global toggle. Claude's generateImage is a
         // stub, so only offer it for Codex courses. Chat generation always goes
         // through Codex, so skip it when the user pinned the Gemini engine.
-        let allow_image_gen = course.agent == "codex"
+        let allow_image_gen = agents::can_generate_images(&course.agent)
             && settings.image_generation()
             && settings.image_provider() != "gemini";
         let params = json!({
@@ -8414,7 +8411,7 @@ fn image_generation_available(
     let course = db::get_course(&conn, &course_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("course not found: {course_id}"))?;
-    Ok(settings_state.gemini_api_key().is_some() || course.agent == "codex")
+    Ok(settings_state.gemini_api_key().is_some() || agents::can_generate_images(&course.agent))
 }
 
 // ===== Spaces: knowledge containers + their sources =====
@@ -9180,7 +9177,11 @@ async fn ask_space_assistant(
             let (docs, links, dirs) = space_context(&paths, &conn, &space_id);
             (space, docs, links, dirs)
         };
-        let backend = if cli_present("claude") { "claude" } else { "codex" };
+        let backend = agents::AGENTS
+            .iter()
+            .map(|a| a.id)
+            .find(|id| agents::available(id))
+            .unwrap_or("claude");
         let model = settings.stage_model(backend, "assistant");
         let params = json!({
             "backend": backend,

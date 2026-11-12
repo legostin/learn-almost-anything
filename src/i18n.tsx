@@ -24,7 +24,7 @@ const STRINGS = {
       "Для генерации курсов нужен установленный Node.js. Установите его с nodejs.org (LTS) и перезапустите приложение. Уже открытые курсы можно читать и без него.",
     noAgentsTitle: "Нет ни одного агента",
     noAgentsBody:
-      "Чтобы генерировать курсы, нужен хотя бы один установленный и авторизованный CLI: claude (Pro/Max) или codex (ChatGPT Plus/Pro). Установите CLI, войдите в аккаунт и вернитесь сюда.",
+      "Чтобы генерировать курсы, нужен хотя бы один установленный и авторизованный CLI: claude, codex, opencode или commandcode. Установите CLI, войдите в аккаунт и вернитесь сюда.",
     agentUnavailable: "недоступен",
     agentAvailable: "доступен",
     braveMissingWarning:
@@ -384,6 +384,8 @@ const STRINGS = {
     agentLabel: "Агент",
     claudeDesc: "Anthropic, подписка Pro/Max",
     codexDesc: "OpenAI, ChatGPT-подписка, веб-поиск",
+    opencodeDesc: "OpenCode, любая подключённая модель",
+    commandcodeDesc: "Command Code, подписка или BYOK-модели",
     create: "Создать",
     cancel: "Отмена",
 
@@ -431,7 +433,7 @@ const STRINGS = {
     agentsTitle: "Агенты",
     agentsNote:
       "Отключённый агент скрывается из выбора при создании курса и из подсказок. Уже созданные с ним курсы продолжают работать.",
-    agentsAllOffWarn: "Оба агента отключены — создавать новые курсы будет нельзя.",
+    agentsAllOffWarn: "Все агенты отключены — создавать новые курсы будет нельзя.",
     spacesNav: "Пространства",
     spacesManage: "Все пространства →",
     spacesShortHint: "источники для курсов",
@@ -746,7 +748,7 @@ const STRINGS = {
     mcpTitle: "MCP",
     mcpEmpty: "Добавленных MCP пока нет.",
     mcpNote:
-      "Здесь показаны MCP-серверы, которые приложение добавляет в Claude/Codex sidecar. Глобальные MCP из личных настроек агентов не подключаются к генерации, чтобы не зависеть от внешних разрешений.",
+      "Здесь показаны MCP-серверы, которые приложение добавляет в sidecar. Глобальные MCP из личных настроек агентов не подключаются к генерации, чтобы не зависеть от внешних разрешений.",
     customMcpTitle: "Свои MCP-серверы",
     customMcpEnabled: "включён",
     customMcpDisabled: "выключен",
@@ -774,7 +776,7 @@ const STRINGS = {
     geminiNote:
       "API-ключ Google Gemini для генерации иллюстраций (Nano Banana, gemini-2.5-flash-image). Агент сам решает, что делать с изображением: реальные объекты, например картину да Винчи, искать; сложные кастомные иллюстрации — генерировать. Без ключа всё идёт через поиск.",
     imgGenerated: "Сгенерировано ИИ",
-    switchProvider: "Сменить провайдера (Claude/Codex)",
+    switchProvider: "Сменить провайдера",
     translateButton: "Перевести",
     moreActions: "Ещё",
     translating: "Перевожу…",
@@ -922,7 +924,7 @@ const STRINGS = {
     modelsReasoningDefault: "Рассуждение: по умолчанию",
     modelsLoading: "Загрузка…",
     modelsNote:
-      "Модель и уровень рассуждения для каждого вида задач, отдельно для Claude и Codex. Пусто = модель агента по умолчанию. Низкий уровень рассуждения ускоряет работу, высокий — повышает качество.",
+      "Модель и уровень рассуждения для каждого вида задач, отдельно для каждого агента. Пусто = модель агента по умолчанию. Низкий уровень рассуждения ускоряет работу, высокий — повышает качество.",
     shareNote:
       "Запускает ngrok-туннель к локальному серверу. Откройте ссылку на другом устройстве, чтобы создавать и проходить курсы. При первом заходе ngrok покажет страницу-предупреждение — нажмите «Visit Site». Доступ открыт, пока приложение запущено.",
   },
@@ -940,7 +942,7 @@ const STRINGS = {
       "Course generation needs Node.js installed. Install it from nodejs.org (LTS) and restart the app. Courses you've already opened are still readable without it.",
     noAgentsTitle: "No agents installed",
     noAgentsBody:
-      "To generate courses, install and sign in to at least one local CLI: claude (Pro/Max) or codex (ChatGPT Plus/Pro). Then come back here.",
+      "To generate courses, install and sign in to at least one local CLI: claude, codex, opencode or commandcode. Then come back here.",
     agentUnavailable: "unavailable",
     agentAvailable: "available",
     braveMissingWarning:
@@ -1300,6 +1302,8 @@ const STRINGS = {
     agentLabel: "Agent",
     claudeDesc: "Anthropic, Pro/Max subscription",
     codexDesc: "OpenAI, ChatGPT subscription, web search",
+    opencodeDesc: "OpenCode, any connected model",
+    commandcodeDesc: "Command Code, subscription or BYOK models",
     create: "Create",
     cancel: "Cancel",
 
@@ -1347,7 +1351,7 @@ const STRINGS = {
     agentsTitle: "Agents",
     agentsNote:
       "A disabled agent is hidden from the course-creation picker and suggestions. Courses already created with it keep working.",
-    agentsAllOffWarn: "Both agents are disabled — new courses cannot be created.",
+    agentsAllOffWarn: "All agents are disabled — new courses cannot be created.",
     spacesNav: "Spaces",
     spacesManage: "All spaces →",
     spacesShortHint: "sources for courses",
@@ -1662,7 +1666,7 @@ const STRINGS = {
     mcpTitle: "MCP",
     mcpEmpty: "No added MCP servers yet.",
     mcpNote:
-      "These are MCP servers the app adds to the Claude/Codex sidecar. Global MCPs from personal agent settings are not attached to generation, so runs do not depend on external permission prompts.",
+      "These are MCP servers the app adds to the sidecar. Global MCPs from personal agent settings are not attached to generation, so runs do not depend on external permission prompts.",
     customMcpTitle: "Custom MCP servers",
     customMcpEnabled: "enabled",
     customMcpDisabled: "disabled",
@@ -1690,7 +1694,7 @@ const STRINGS = {
     geminiNote:
       "Google Gemini API key for generating illustrations (Nano Banana, gemini-2.5-flash-image). The agent decides per image: search for real subjects, such as a da Vinci painting; generate complex custom illustrations. Without a key, everything goes through search.",
     imgGenerated: "AI-generated",
-    switchProvider: "Switch provider (Claude/Codex)",
+    switchProvider: "Switch provider",
     translateButton: "Translate",
     moreActions: "More",
     translating: "Translating…",
@@ -1839,7 +1843,7 @@ const STRINGS = {
     modelsReasoningDefault: "Reasoning: default",
     modelsLoading: "Loading…",
     modelsNote:
-      "Model and reasoning level for each kind of task, separately for Claude and Codex. Empty = the agent's default model. Lower reasoning is faster, higher is more thorough.",
+      "Model and reasoning level for each kind of task, separately for each agent. Empty = the agent's default model. Lower reasoning is faster, higher is more thorough.",
     shareNote:
       "Starts an ngrok tunnel to the local server. Open the link on another device to create and take courses. On first visit, ngrok shows a warning page — click “Visit Site”. Sharing stays on while the app is running.",
   },

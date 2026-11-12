@@ -6,7 +6,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/legostin/learn-almost-anything/release.yml?label=build)](https://github.com/legostin/learn-almost-anything/actions/workflows/release.yml)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://github.com/legostin/learn-almost-anything/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB)](https://tauri.app)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-7c3aed)](#your-subscription-is-the-engine)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20OpenCode%20%7C%20Command%20Code-7c3aed)](#your-subscription-is-the-engine)
 
 <p align="center"><img src="screens/main.png" alt="A generated lesson with sourced images and a multilingual course sidebar" width="900"></p>
 
@@ -14,7 +14,7 @@
 
 Everyone "learns with ChatGPT" now — and a week later all that's left is a chat transcript you'll never reopen. Chats answer questions; they don't teach. Real learning needs structure, practice, feedback and repetition.
 
-Learn (Almost) Anything turns "I want to understand X" into an actual course: an agent interviews you, researches the topic, designs a curriculum, writes illustrated lessons, quizzes you, grades your homework, and schedules flashcard reviews so the material sticks. Everything lives on your disk. There's no platform, no subscription of ours, no server with your data — the engine is the Claude Code or Codex CLI you already have.
+Learn (Almost) Anything turns "I want to understand X" into an actual course: an agent interviews you, researches the topic, designs a curriculum, writes illustrated lessons, quizzes you, grades your homework, and schedules flashcard reviews so the material sticks. Everything lives on your disk. There's no platform, no subscription of ours, no server with your data — the engine is the agent CLI you already have (Claude Code, Codex, OpenCode, or Command Code).
 
 It's the difference between asking a smart friend questions all evening and having that friend sit down and *teach you properly*.
 
@@ -103,15 +103,17 @@ The app is free and runs no paid backend. Every LLM call goes through an agent C
 |---|---|---|
 | Claude Pro / Max | Claude Code CLI | `npm i -g @anthropic-ai/claude-code` → `claude login` |
 | ChatGPT / Codex plan | Codex CLI | `npm i -g @openai/codex` → `codex login` |
+| OpenCode (any connected provider) | OpenCode CLI | `curl -fsSL https://opencode.ai/install \| bash` → `opencode auth login` |
+| Command Code subscription / BYOK | Command Code CLI | `npm i -g command-code` → `commandcode login` |
 
-Install both and pick per course. Optional extras, each off by default: Brave Search API (web/image grounding), Gemini API (generated illustrations, premium TTS). A quality/cost tier per course (quick / balanced / premium) controls research depth, reasoning effort and how much material gets generated — so a quick mini-course stays cheap and a premium deep-dive goes all in.
+Install any that you have and pick one per course (and per stage in Settings). Optional extras, each off by default: Brave Search API (web/image grounding), Gemini API (generated illustrations, premium TTS). A quality/cost tier per course (quick / balanced / premium) controls research depth, reasoning effort and how much material gets generated — so a quick mini-course stays cheap and a premium deep-dive goes all in.
 
 Provider pricing changes; check [Claude Code plans](https://support.claude.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan), [Codex pricing](https://chatgpt.com/codex/pricing/), [Gemini API](https://ai.google.dev/gemini-api/docs/pricing), [Brave Search API](https://brave.com/search/api/).
 
 ## Get started
 
 1. **Download** the latest build from [Releases](https://github.com/legostin/learn-almost-anything/releases) — macOS `.dmg` (Apple Silicon / Intel, signed and notarized) or Windows `.msi`/`.exe` (unsigned for now, SmartScreen may warn).
-2. **Make sure Node.js 20+ is installed** — the local sidecar runs the agent SDKs through it.
+2. **Make sure Node.js 20+ is installed** (22+ for Command Code) — the local sidecar runs the agent CLIs/SDKs through it.
 3. **Have at least one agent CLI** logged in (table above), then launch the app and create your first course.
 
 The UI ships in English and Russian; course content can be generated in any language you pick — a single library happily mixes English, Russian and Chinese courses.
@@ -123,7 +125,7 @@ Installed builds self-update: the app checks GitHub Releases, downloads a signed
 <details>
 <summary>The generation pipeline (click to expand)</summary>
 
-You pick one agent (Claude or Codex) when creating the course; every LLM step then runs through it via a local Node sidecar:
+You pick one agent when creating the course; every LLM step then runs through it via a local Node sidecar:
 
 1. **Interview** — a few adaptive clarifying questions become the course brief (skippable).
 2. **Plan** — the agent researches (web / Context7 / MediaWiki / arXiv / OpenAlex / your Space), designs the module tree and classifies the subject category.
@@ -132,7 +134,7 @@ You pick one agent (Claude or Codex) when creating the course; every LLM step th
 ```mermaid
 flowchart TD
   U["Topic, language, format, agent, space"] --> CC["create_course"]
-  CC --> SC[["Node sidecar (Claude Code / Codex)"]]
+  CC --> SC[["Node sidecar (agent CLI)"]]
   SC --> WQ["Interview → course brief"]
   WQ --> BS["Plan: research → curriculum → category"]
   BS --> LOOP{"For each lesson"}
@@ -153,7 +155,7 @@ flowchart TD
 
 </details>
 
-**Stack:** Tauri 2 (desktop shell) · React 19 + TypeScript + Vite · Node sidecar calling `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk` · SQLite + files for local storage · Playwright + system Chrome for visual widget checks · bundled MCP servers for controlled research tools.
+**Stack:** Tauri 2 (desktop shell) · React 19 + TypeScript + Vite · Node sidecar calling `@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`, and headless OpenCode / Command Code · SQLite + files for local storage · Playwright + system Chrome for visual widget checks · bundled MCP servers for controlled research tools.
 
 ## Local data and privacy
 
