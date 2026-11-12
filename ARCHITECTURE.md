@@ -1,8 +1,8 @@
 # Architecture — Learn (Almost) Anything
 
 > A local-first desktop tutor that turns any topic into a personalised course.
-> Courses are authored by Claude or Codex through the user's own subscription —
-> no API keys, no servers, no telemetry.
+> Courses are authored by Claude, Codex, OpenCode or Command Code through the
+> user's own subscription — no API keys, no servers, no telemetry.
 
 This document describes the codebase as it actually is, not as it was once
 planned. Each section names the files it talks about so the doc can be checked
@@ -79,8 +79,17 @@ Progress frames are emitted zero or more times **before** the matching
 `Response`. The Rust side (`sidecar::Sidecar::call_with_progress`) forwards them
 into `agent_stage` Tauri events so the UI sees live status without polling.
 
-Backend selection is a `backend: "claude" | "codex"` field on every LLM
-method's params. The dispatcher routes to the matching agent module.
+Backend selection is a `backend` field on every LLM method's params. The
+supported ids live in `src-tauri/src/agents.rs` (the single registry used by
+Rust) and in the sidecar's `agents` map:
+
+```
+"claude" | "codex" | "opencode" | "commandcode"
+```
+
+The dispatcher routes to the matching agent module and runs the handler inside
+a per-request `AsyncLocalStorage` backend context (`agents/backends.mjs`), so
+concurrent calls for courses on different backends never interfere.
 
 Methods exposed (`sidecar/src/index.mjs`):
 
@@ -95,12 +104,16 @@ Methods exposed (`sidecar/src/index.mjs`):
 | `generate_test`             | Multiple-choice comprehension test                      |
 | `generate_assignments`      | Homework assignment chain                               |
 | `review_assignment`         | Grade a learner submission (text / image / archive / GitHub) |
-| `generate_image`            | Codex `$imagegen` wrapper (Claude has no image gen)     |
+| `generate_image`            | Codex `$imagegen` wrapper (only Codex can generate images) |
 | `list_models`               | Live model catalog from the CLI                         |
 | `chat`, `claude_chat`       | One-shot smoke-test                                     |
 
-Both backends implement the same surface in `sidecar/src/agents/claude.mjs` and
-`sidecar/src/agents/codex.mjs`.
+`sidecar/src/agents/claude.mjs` implements the full surface against the Claude
+Agent SDK. The other three share **one** stage pipeline in
+`sidecar/src/agents/pipeline.mjs`: every prompt, normalizer, widget check and
+model-resolution rule is defined once. `pipeline.mjs` defaults to the Codex
+SDK transport; `opencode.mjs` and `commandcode.mjs` re-export it and supply a
+[CLI transport](#23-cli-backends-opencode--command-code) instead.
 
 ### 2.1 Claude isolation
 
@@ -131,7 +144,49 @@ the Brave MCP server is added on top via `sidecar/src/lib/brave.mjs`; it
 resolves the installed package directly to avoid a per-call `npx` cold start.
 
 Codex has native `webSearchEnabled: true` on every thread, so its web access
-is unconditional.
+is unconditional. OpenCode and Command Code expose built-in web fetch/search
+tools headlessly; the CLI transport allows them (shell/edit stay denied) and
+attaches the Brave MCP server when a key is configured.
+
+### 2.3 CLI backends (OpenCode / Command Code)
+
+Both backends run their own installed CLI headlessly, with the prompt on
+**stdin** (long articles would otherwise hit the OS argv limit) and a
+Codex-shaped event stream on stdout:
+
+```
+opencode run --format json
+commandcode -p --output-format json
+```
+
+`agents/cli-agent.mjs` maps those events onto the same `Thread` interface the
+Codex SDK exposes, so `pipeline.mjs` needs no per-provider branching. When a
+stage requests a JSON Schema, the runner appends the schema to the prompt and
+extracts/validates the JSON before returning it (these CLIs have no native
+structured-output mode).
+
+Isolation matches the other backends — the user's personal agent setup must
+never leak into a lesson run:
+
+- **OpenCode**: `--pure` disables plugins; external/Claude skills are disabled
+  by env; project configs are ignored; the user's global MCP servers are read
+  once (`opencode debug config`) and explicitly disabled in the generated
+  config, while the app's own MCP servers are attached. Permissions
+  default-allow (MCP tool names are server-defined, so a blanket deny would
+  hide them) but explicitly deny shell/edit/write/patch/subagents and the
+  interactive question/plan tools — the same read-only posture as the Codex
+  sandbox. The session DB lives in a temporary directory.
+- **Command Code**: each call gets a temporary `HOME` whose `.commandcode`
+  contains a symlink to the real `auth.json` (so the user's login works) but no
+  settings/hooks/sessions; only the app's MCP servers are written into
+  `mcp.json`. `--safe-mode --no-skills --no-session --no-auto-update
+  --skip-onboarding` keep it non-interactive, and `-p` refuses writes by
+  default. Its headless mode treats the current directory as the read-only
+  workspace and ignores `--add-dir`, so the runner starts the CLI from the
+  narrowest common ancestor of the space/attachment paths the stage needs.
+  (Consequence: when a stage deliberately explores a Space directory, the CLI
+  also discovers a project-level `.mcp.json` there if the repo has one.) The
+  temp home is deleted after the run.
 
 ---
 
@@ -148,7 +203,8 @@ progress (module_id, test_passed_at, marked_done_at)
 jobs    (id, course_id, module_id, kind, status, agent, …)
 ```
 
-`agent` is per-course (Claude or Codex) and was added by `V2__add_course_agent.sql`.
+`agent` is per-course (one of the ids in `src-tauri/src/agents.rs`) and was added by
+`V2__add_course_agent.sql`.
 `generation_state ∈ { pending, generating, ready, failed }`. The `jobs` table
 exists for future job inspection but the live pipeline streams progress via
 events rather than polling rows.
@@ -267,13 +323,16 @@ Before launching, the orchestrator decides whether illustration is even
 possible:
 
 ```rust
-let can_illustrate = brave_api_key.is_some() || gemini_key.is_some() || course.agent == "codex";
+let can_illustrate = brave_api_key.is_some()
+    || gemini_key.is_some()
+    || agents::is_known(&course.agent);
 ```
 
 If none is available the stage is skipped entirely and the article keeps its
 placeholder widgets. Generate mode prefers Gemini (`media::gemini_generate_image`)
-and falls back to Codex `$imagegen` when the course is Codex. Search mode
-needs a Brave key.
+and falls back to Codex `$imagegen` when the course's agent can generate images
+(`agents::can_generate_images`, currently Codex only). Search mode needs a
+Brave key or an agent that can browse.
 
 ---
 
@@ -460,22 +519,33 @@ unless the user has stored another choice in `localStorage`.
 `SettingsState::stage_model(backend, category)` (`settings.rs`) returns a
 JSON blob `{model, reasoning}` for the requested combination, e.g.
 `("claude", "planning")` for structure / wizard, `("claude", "writing")` for
-the article draft, `("claude", "tests")` for tests and assignments.
+the article draft, `("claude", "tests")` for tests and assignments. The same
+per-stage settings exist for every agent id.
+
+The `ModelConfig` struct carries one `BackendModels` block per agent
+(`claude`, `codex`, `opencode`, `commandcode`); unknown ids fall back to
+Claude so older settings files keep working.
 
 The sidecar maps `reasoning` onto SDK-specific fields:
 
 - Claude (`modelOptions` in `claude.mjs`):
   `off | none | disabled` → `thinking: {type: "disabled"}`;
   `low | medium | high | xhigh | max` → `effort: <value>`.
-- Codex (`modelThreadOptions` in `codex.mjs`): the same vocabulary maps onto
+- Codex (`modelThreadOptions` in `pipeline.mjs`): the same vocabulary maps onto
   Codex's `reasoning.effort` (or disables it).
+- OpenCode (`cli-agent.mjs`): maps onto `--variant` (using the model's own
+  variant list from `opencode models --verbose`).
+- Command Code (`cli-agent.mjs`): maps onto `--effort` (`max`/`xhigh` → `max`,
+  `off`/`none` → `low`).
 
 Empty fields are dropped so the agent falls back to its built-in default —
 the user only sets the levers they care about.
 
-The model picklists in Settings come from `sidecar.list_models` — a cached
-call to the CLI's `supportedModels()` so each entry carries the effort levels
-that specific model actually supports.
+The model picklists in Settings come from `sidecar.list_models`: Claude uses
+the SDK's `supportedModels()`, Codex reads `~/.codex/models_cache.json`,
+OpenCode parses `opencode models --verbose`, and Command Code parses
+`commandcode --list-models`. Each entry carries the effort/variant levels that
+specific model actually supports.
 
 ---
 
@@ -502,13 +572,13 @@ that specific model actually supports.
 - **Not multi-user.** No accounts, no sync, no shared cloud state. Sharing is
   a transient tunnel to your own machine, not a service.
 - **Not server-backed.** The app is the server. There is no SaaS.
-- **Not vendor-locked to a model.** Claude and Codex are interchangeable; the
-  user picks per course.
+- **Not vendor-locked to a model.** Claude, Codex, OpenCode and Command Code
+  are interchangeable; the user picks per course.
 - **Not a sandbox for arbitrary code execution.** Interactive widgets are
   vanilla DOM/JS only, validated and rendered inside a sandboxed iframe with
   a strict CSP. There is no plugin system.
 - **Not free of dependencies the user already has.** It relies on the local
-  `claude` and/or `codex` CLI for subscription auth, optionally on a
+  `claude`, `codex`, `opencode` or `commandcode` CLI for subscription auth, optionally on a
   Brave Search key, optionally on a Gemini key, optionally on the system
   Chrome for widget visual checks, optionally on `ngrok` for sharing. Each
   one is checked at start (`check_agent_availability`,

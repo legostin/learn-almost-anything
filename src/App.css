@@ -2016,6 +2016,14 @@ button {
   background: transparent;
   color: #2f6b56;
 }
+.agent-pill.agent-opencode {
+  background: transparent;
+  color: #4d5b8f;
+}
+.agent-pill.agent-commandcode {
+  background: transparent;
+  color: #7a4a7e;
+}
 .agent-pill.agent-select {
   border: none;
   border-bottom: 1px solid var(--border-strong);

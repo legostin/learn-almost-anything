@@ -55,6 +55,10 @@ pub struct Settings {
     pub agent_claude_enabled: Option<bool>,
     #[serde(default)]
     pub agent_codex_enabled: Option<bool>,
+    #[serde(default)]
+    pub agent_opencode_enabled: Option<bool>,
+    #[serde(default)]
+    pub agent_commandcode_enabled: Option<bool>,
     /// User-registered third-party MCP servers (attachable to courses during
     /// generation). Adding one is an explicit code-execution approval: the
     /// command is shown verbatim in the UI before saving.
@@ -347,6 +351,10 @@ pub struct ModelConfig {
     pub claude: BackendModels,
     #[serde(default)]
     pub codex: BackendModels,
+    #[serde(default)]
+    pub opencode: BackendModels,
+    #[serde(default)]
+    pub commandcode: BackendModels,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -451,7 +459,7 @@ pub struct TierPreset {
     // Reasoning-effort cascade per stage. None == leave the agent default
     // (balanced). Model NAMES are deliberately not set — they're dynamic per the
     // user's CLI install, so reasoning effort is the safe cost lever (mirrors
-    // fast_model_config in lib.rs). Both agents accept off/low/medium/high/...
+    // fast_model_config in lib.rs). Every agent accepts off/low/medium/high/...
     pub planning_reasoning: Option<&'static str>,
     pub writing_reasoning: Option<&'static str>,
     pub tests_reasoning: Option<&'static str>,
@@ -849,6 +857,8 @@ impl SettingsState {
         let models = self.models();
         let bm = match backend {
             "codex" => models.codex,
+            "opencode" => models.opencode,
+            "commandcode" => models.commandcode,
             _ => models.claude,
         };
         let stage = match category {
@@ -960,7 +970,7 @@ impl SettingsState {
         self.persist()
     }
 
-    /// Whether the agent is enabled in settings ("claude" | "codex").
+    /// Whether the agent is enabled in settings (see agents::AGENTS).
     /// Defaults to on; independent of whether the agent's CLI is installed.
     pub fn agent_enabled(&self, agent: &str) -> bool {
         self.inner
@@ -969,6 +979,8 @@ impl SettingsState {
             .and_then(|s| match agent {
                 "claude" => s.agent_claude_enabled,
                 "codex" => s.agent_codex_enabled,
+                "opencode" => s.agent_opencode_enabled,
+                "commandcode" => s.agent_commandcode_enabled,
                 _ => None,
             })
             .unwrap_or(true)
@@ -980,6 +992,8 @@ impl SettingsState {
             match agent {
                 "claude" => guard.agent_claude_enabled = Some(enabled),
                 "codex" => guard.agent_codex_enabled = Some(enabled),
+                "opencode" => guard.agent_opencode_enabled = Some(enabled),
+                "commandcode" => guard.agent_commandcode_enabled = Some(enabled),
                 _ => {}
             }
         }
@@ -1199,5 +1213,27 @@ mod content_style_tests {
     fn slugify_basic() {
         assert_eq!(slugify_style("My Cool Style!"), "my-cool-style");
         assert_eq!(slugify_style("   "), "style");
+    }
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+
+    #[test]
+    fn per_backend_models_accept_new_agents_and_default_old_files() {
+        // Older settings files only have claude/codex; the new backends default.
+        let old: ModelConfig = serde_json::from_str(r#"{"claude":{},"codex":{}}"#).unwrap();
+        assert!(old.opencode.planning.model.is_none());
+        assert!(old.commandcode.planning.model.is_none());
+
+        let new: ModelConfig =
+            serde_json::from_str(r#"{"opencode":{"planning":{"model":"openai/gpt-5.6-luna"}}}"#)
+                .unwrap();
+        assert_eq!(
+            new.opencode.planning.model.as_deref(),
+            Some("openai/gpt-5.6-luna")
+        );
+        assert!(new.claude.planning.model.is_none());
     }
 }

@@ -462,11 +462,7 @@ fn write_package_to_course(
         Some(&title),
         &package.course.language,
         db::normalize_course_format(Some(&package.course.course_format)),
-        if package.course.agent == "claude" {
-            "claude"
-        } else {
-            "codex"
-        },
+        &crate::agents::normalize(Some(&package.course.agent)),
         "ready",
         package.course.created_at,
         now,
