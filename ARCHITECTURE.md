@@ -195,12 +195,14 @@ never leak into a lesson run:
   only if the real file is unchanged) plus the user's `permissions.deny`/`ask`
   rules, but no hooks, allow rules, or personal MCP servers. Only the app's
   MCP servers are written into `mcp.json`; their environment keeps the real
-  `HOME` so custom servers
-  retain credentials and caches. The CLI runs from a temporary workspace, which
-  avoids `/`, `$HOME`, and project `.mcp.json` files; the real space directories
-  are granted with `--add-dir`, and attached images are copied into the
-  temporary workspace. `--permission-mode plan` makes the run read-only across
-  the tool surface, not just the headless blocklist.
+  `HOME` so custom servers retain credentials and caches. The CLI runs from a
+  temporary workspace, which avoids `/`, `$HOME`, and project `.mcp.json` files;
+  the real space directories are granted with `--add-dir`, and attached images
+  are copied into the temporary workspace. `--permission-mode dont-ask` runs
+  only a generated read-only allow list (local read/grep/glob, web fetch/search,
+  tool discovery, and each attached MCP server); writes and shell calls are
+  denied. Plan mode is not used because it hides all MCP tools, which the
+  research stages need.
   `--safe-mode --no-skills --no-session --no-auto-update --skip-onboarding`
   keep it non-interactive, and `taste-learning=false` prevents files being
   written into the learner's space. The temp home is deleted after the run.

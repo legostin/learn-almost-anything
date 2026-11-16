@@ -444,6 +444,26 @@ function commandCodeUserPermissions() {
   }
 }
 
+function commandCodeAllowRules(servers) {
+  // dont-ask mode only runs tools on this list. Keep it read-only: local file
+  // inspection, web research, tool discovery, and the attached MCP servers.
+  const rules = [
+    "read_file",
+    "read_multiple_files",
+    "read_directory",
+    "glob",
+    "grep",
+    "get_diagnostics",
+    "web_search",
+    "web_fetch",
+    "search_tools",
+  ];
+  for (const name of Object.keys(servers)) {
+    if (name) rules.push(`mcp__${name}__*`);
+  }
+  return rules;
+}
+
 function commandCodeHome(servers) {
   const home = mkdtempSync(join(tmpdir(), "laa-cmd-"));
   const configDir = join(home, ".commandcode");
@@ -476,11 +496,8 @@ function commandCodeHome(servers) {
   }
 
   const userPermissions = commandCodeUserPermissions();
-  if (userPermissions) {
-    writeFileSync(join(configDir, "settings.json"), JSON.stringify({ permissions: userPermissions }), {
-      mode: 0o600,
-    });
-  }
+  const permissions = { allow: commandCodeAllowRules(servers), ...(userPermissions || {}) };
+  writeFileSync(join(configDir, "settings.json"), JSON.stringify({ permissions }), { mode: 0o600 });
 
   const mcpServers = {};
   for (const [name, s] of Object.entries(servers)) {
@@ -549,10 +566,10 @@ function commandCodeArgs(opts, addDirs = []) {
     "--safe-mode",
     "--no-auto-update",
     "--skip-onboarding",
-    // Read-only mode: the headless blocklist only covers a handful of tools,
-    // while plan mode denies writes/shell across the whole tool surface.
+    // dont-ask only runs tools on the generated allow list. Plan mode is
+    // stronger but hides all MCP tools, which the research stages need.
     "--permission-mode",
-    "plan",
+    "dont-ask",
     // Taste learning writes `.commandcode/taste` into the workspace; a lesson
     // run must never leave files in the learner's space directory.
     "--config",
@@ -1182,5 +1199,6 @@ export const __test = {
   reasoningVariant,
   commandCodeEffort,
   commandCodeArgs,
+  commandCodeAllowRules,
   windowsCommandLine,
 };

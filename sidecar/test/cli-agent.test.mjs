@@ -236,16 +236,26 @@ test("reasoning values are validated before becoming CLI flags", () => {
   assert.equal(__test.commandCodeEffort("high"), "high");
 });
 
-test("Command Code args use plan mode and deduplicate added dirs", () => {
+test("Command Code args use dont-ask mode and deduplicate added dirs", () => {
   const args = __test.commandCodeArgs(
     { modelConfig: { model: "test/model", reasoning: "--print-logs" } },
     ["/a", "/a/", "/b"]
   );
   assert.equal(args[0], "-p");
   assert.ok(args.includes("--permission-mode"));
-  assert.equal(args[args.indexOf("--permission-mode") + 1], "plan");
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dont-ask");
   assert.ok(!args.includes("--effort"));
   assert.equal(args.filter((arg) => arg === "--add-dir").length, 2);
+});
+
+test("Command Code allow rules are read-only and cover attached MCP servers", () => {
+  const rules = __test.commandCodeAllowRules({ context7: {}, "my-server": {} });
+  assert.ok(rules.includes("read_file"));
+  assert.ok(rules.includes("web_fetch"));
+  assert.ok(rules.includes("search_tools"));
+  assert.ok(rules.includes("mcp__context7__*"));
+  assert.ok(rules.includes("mcp__my-server__*"));
+  assert.ok(!rules.some((rule) => /write|edit|shell|bash|agent/.test(rule)));
 });
 
 test("OpenCode transport concatenates split JSON and runs in a temp cwd", async () => {
