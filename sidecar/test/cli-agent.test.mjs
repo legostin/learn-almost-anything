@@ -18,6 +18,7 @@ writeFileSync(
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
+  if (process.env.LAA_STUB_VERSION_FAIL === "1") process.exit(1);
   console.log(process.env.LAA_STUB_OPENCODE_VERSION || "1.18.31");
   process.exit(0);
 }
@@ -88,6 +89,7 @@ const originalCommandCode = process.env.LEARN_ANYTHING_COMMANDCODE_CLI;
 const originalRecord = process.env.LAA_TEST_RECORD;
 const originalMcpFail = process.env.LAA_STUB_MCP_FAIL;
 const originalOpencodeVersion = process.env.LAA_STUB_OPENCODE_VERSION;
+const originalVersionFail = process.env.LAA_STUB_VERSION_FAIL;
 const originalOpencodeRecord = process.env.LAA_TEST_OPENCODE_RECORD;
 
 test.before(() => {
@@ -100,6 +102,7 @@ test.before(() => {
 test.beforeEach(() => {
   delete process.env.LAA_STUB_MCP_FAIL;
   delete process.env.LAA_STUB_OPENCODE_VERSION;
+  delete process.env.LAA_STUB_VERSION_FAIL;
   process.env.LAA_TEST_RECORD = recordPath;
   process.env.LAA_TEST_OPENCODE_RECORD = opencodeRecordPath;
   resetCliCaches();
@@ -116,6 +119,8 @@ test.after(() => {
   else process.env.LAA_STUB_MCP_FAIL = originalMcpFail;
   if (originalOpencodeVersion === undefined) delete process.env.LAA_STUB_OPENCODE_VERSION;
   else process.env.LAA_STUB_OPENCODE_VERSION = originalOpencodeVersion;
+  if (originalVersionFail === undefined) delete process.env.LAA_STUB_VERSION_FAIL;
+  else process.env.LAA_STUB_VERSION_FAIL = originalVersionFail;
   if (originalOpencodeRecord === undefined) delete process.env.LAA_TEST_OPENCODE_RECORD;
   else process.env.LAA_TEST_OPENCODE_RECORD = originalOpencodeRecord;
   rmSync(root, { recursive: true, force: true });
@@ -152,27 +157,41 @@ test("OpenCode text parts in one message are concatenated, new messages reset", 
   assert.equal(state.final, "final");
 });
 
+test("Command Code text resets between assistant messages", () => {
+  const state = { backend: "commandcode", final: "" };
+  __test.parseCommandCodeLine(
+    JSON.stringify({ type: "event", event: { type: "text_delta", delta: "draft " } }),
+    state
+  );
+  __test.parseCommandCodeLine(JSON.stringify({ type: "event", event: { type: "message_start" } }), state);
+  __test.parseCommandCodeLine(
+    JSON.stringify({ type: "event", event: { type: "text_delta", delta: "final" } }),
+    state
+  );
+  assert.equal(state.final, "final");
+});
+
 test("OpenCode permission is a deny-first allowlist", () => {
   const permission = __test.opencodePermission(
     { context7: {}, "my-server": {} },
     ["/data/space"]
   );
-  assert.equal(permission["*"], "deny");
-  assert.equal(permission.edit, "deny");
-  assert.equal(permission.bash, "deny");
-  assert.equal(permission.skill, "deny");
+  assert.equal(permission["**"], "deny");
+  assert.equal(permission.edit, undefined);
+  assert.equal(permission.bash, undefined);
   assert.equal(permission["context7_*"], "allow");
   assert.equal(permission["my-server_*"], "allow");
-  assert.equal(permission.read["*"], "allow");
-  assert.equal(permission.read["*.env"], "deny");
-  assert.equal(permission.external_directory["*"], "deny");
-  assert.equal(permission.external_directory["/data/space/*"], "allow");
+  assert.equal(permission["read*"]["*"], "allow");
+  assert.equal(permission["read*"]["*.env"], "deny");
+  assert.equal(permission["external_directory*"]["*"], "deny");
+  assert.equal(permission["external_directory*"]["/data/space/*"], "allow");
 });
 
 test("OpenCode config disables personal MCP and defines a run-only agent", () => {
   const config = __test.opencodeConfig({ context7: { command: "true" } }, ["personal"], [], "laa-test");
   assert.equal(config.mcp.personal.enabled, false);
-  assert.equal(config.agent["laa-test"].permission["*"], "deny");
+  assert.equal(config.permission["**"], "deny");
+  assert.equal(config.agent["laa-test"].permission["**"], "deny");
   assert.equal(config.agent["laa-test"].permission["context7_*"], "allow");
   assert.equal(config.agent.build, undefined);
 });
@@ -216,6 +235,14 @@ test("OpenCode transport concatenates split JSON and runs in a temp cwd", async 
   assert.ok(record.cwd.startsWith(tmpdir()));
   assert.ok(!record.args.includes("--dir"));
   assert.match(record.args[record.args.indexOf("--agent") + 1], /^laa-ro-/);
+});
+
+test("a failed OpenCode version probe is not cached", async () => {
+  process.env.LAA_STUB_VERSION_FAIL = "1";
+  resetCliCaches();
+  assert.equal((await __test.opencodeVersion()).major, 0);
+  delete process.env.LAA_STUB_VERSION_FAIL;
+  assert.equal((await __test.opencodeVersion()).major, 1);
 });
 
 test("OpenCode v2 fails with an actionable error", async () => {

@@ -487,6 +487,9 @@ function openThread(opts) {
     : codex.startThread(threadOptions(opts));
 }
 function rememberThread(opts, thread) {
+  // The reuse map is a Codex resume-id cache. CLI transports also expose an
+  // `id`, but it is not a Codex thread id and must not be resumed by Codex.
+  if ((currentBackend() ?? "codex") !== "codex") return;
   if (opts?.reuseKey && thread?.id) reuseThreads.set(opts.reuseKey, thread.id);
 }
 export function evictReuseThread(key) {

@@ -18,6 +18,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -141,25 +142,22 @@ function mcpPermissionName(name) {
 // global `bash: allow` or a wildcard allow. The first rule is the deny-all;
 // every entry after it is an explicit capability.
 function opencodePermission(servers, dirs) {
+  // Use wildcard keys ("**", "read*") instead of exact keys ("*", "read").
+  // Exact keys can already exist in the user's global config, in which case a
+  // deep merge preserves their earlier position; these keys are new, so they
+  // are appended after every global rule and remain last-match-wins.
   const permission = {
-    "*": "deny",
-    edit: "deny",
-    bash: "deny",
-    task: "deny",
-    question: "deny",
-    plan_enter: "deny",
-    plan_exit: "deny",
-    skill: "deny",
-    read: {
+    "**": "deny",
+    "read*": {
       "*": "allow",
       "*.env": "deny",
       "*.env.*": "deny",
       "*.env.example": "allow",
     },
-    glob: "allow",
-    grep: "allow",
-    webfetch: "allow",
-    websearch: "allow",
+    "glob*": "allow",
+    "grep*": "allow",
+    "webfetch*": "allow",
+    "websearch*": "allow",
   };
 
   // MCP tools are server-defined, so allow each attached server explicitly.
@@ -167,21 +165,22 @@ function opencodePermission(servers, dirs) {
     permission[`${mcpPermissionName(name)}_*`] = "allow";
   }
 
-  // External paths are limited to the learner's attached space directories and
-  // the directory holding an attached image. Everything else stays denied.
+  // External paths are limited to the learner's attached space directories.
+  // Attached images are copied into the temporary cwd, so they need no root.
   const roots = new Set();
   for (const dir of dirs) {
     if (typeof dir === "string" && dir.trim()) roots.add(resolve(dir.trim()));
   }
   if (roots.size === 0) {
-    permission.external_directory = "deny";
+    permission["external_directory*"] = "deny";
   } else {
     const external = { "*": "deny" };
     for (const root of roots) {
-      external[`${root}/*`] = "allow";
-      external[root] = "allow";
+      const pattern = process.platform === "win32" ? root.replace(/\\/g, "/") : root;
+      external[`${pattern}/*`] = "allow";
+      external[pattern] = "allow";
     }
-    permission.external_directory = external;
+    permission["external_directory*"] = external;
   }
   return permission;
 }
@@ -269,8 +268,9 @@ async function opencodeVersion() {
   } catch {
     /* the run itself will report a missing/broken CLI */
   }
-  opencodeVersionCache = { raw, major };
-  return opencodeVersionCache;
+  const version = { raw, major };
+  if (raw) opencodeVersionCache = version;
+  return version;
 }
 
 function opencodeConfig(servers, disabledNames, dirs, agentName) {
@@ -285,8 +285,10 @@ function opencodeConfig(servers, disabledNames, dirs, agentName) {
     };
   }
   return {
-    // A per-run agent name cannot collide with a user-defined agent, so the
-    // generated permission list is the only one applied to this run.
+    // The top-level rules are a fallback if OpenCode cannot resolve the agent
+    // (it falls back to the default agent with a warning). The run-scoped agent
+    // is the normal path and cannot collide with a user-defined agent.
+    permission: opencodePermission(servers, dirs),
     agent: { [agentName]: { mode: "primary", permission: opencodePermission(servers, dirs) } },
     mcp,
   };
@@ -371,8 +373,12 @@ function parseOpencodeLine(line, state) {
 }
 
 function opencodeEnv(config, workDir) {
+  // Keep MCP credentials out of the process environment: an MCP child can
+  // inherit env vars, but it cannot read this 0600 file just by existing.
+  const configPath = join(workDir, "opencode.json");
+  writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   return {
-    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+    OPENCODE_CONFIG: configPath,
     OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
@@ -414,12 +420,14 @@ function commandCodeHome(servers) {
   // symlink also lets the CLI refresh a token in place when needed.
   const realHome = homedir();
   const auth = join(realHome, ".commandcode", "auth.json");
+  let authCopy = null;
   if (existsSync(auth)) {
     const target = join(configDir, "auth.json");
     try {
       symlinkSync(auth, target);
     } catch {
       copyFileSync(auth, target);
+      authCopy = target;
     }
   }
   const cache = join(realHome, ".commandcode", "cache");
@@ -457,7 +465,7 @@ function commandCodeHome(servers) {
   if (Object.keys(mcpServers).length) {
     writeFileSync(join(configDir, "mcp.json"), JSON.stringify({ mcpServers }), { mode: 0o600 });
   }
-  return home;
+  return { home, authCopy, authSource: auth };
 }
 
 function commandCodeEffort(reasoning) {
@@ -530,6 +538,12 @@ function parseCommandCodeLine(line, state) {
   }
   if (msg?.type !== "event") return null;
   const ev = msg.event || {};
+  if (ev.type === "message_start") {
+    // Don't let commentary before a tool call leak into the final answer when
+    // the CLI omits the finalText field.
+    state.final = "";
+    return null;
+  }
   if (ev.type === "text_delta" && typeof ev.delta === "string") {
     state.final += ev.delta;
     // Deltas arrive per token; forward at most one liveness event per second so
@@ -573,6 +587,9 @@ function spawnOpts(cwd, env) {
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
+    // POSIX: make the child its own process-group leader so a kill also reaches
+    // MCP grandchildren. Windows uses taskkill /T instead.
+    detached: process.platform !== "win32",
   };
 }
 
@@ -620,14 +637,24 @@ function killProcessTree(child, force = false) {
   if (!child || child.exitCode !== null) return;
   if (process.platform === "win32" && child.pid) {
     try {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
         stdio: "ignore",
         windowsHide: true,
       });
+      killer.on("error", () => {});
+      killer.unref?.();
     } catch {
       child.kill();
     }
     return;
+  }
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+      return;
+    } catch {
+      /* fall back to the direct child */
+    }
   }
   child.kill(force ? "SIGKILL" : "SIGTERM");
 }
@@ -738,6 +765,7 @@ async function* runCliTurn({ command, args, env, cwd, prompt, signal, state, par
     rl.close();
   });
   signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   armWatchdog();
 
   child.stdin.end(prompt);
@@ -937,7 +965,8 @@ export function createCliThread(backend, opts = {}) {
         cleanupDir(workRoot);
       }
     } else {
-      const home = commandCodeHome(servers);
+      const session = commandCodeHome(servers);
+      const home = session.home;
       try {
         // A temp workspace keeps Command Code away from `/`, $HOME, and any
         // project `.mcp.json`. The real space dirs are granted with --add-dir.
@@ -956,6 +985,14 @@ export function createCliThread(backend, opts = {}) {
           label,
         });
       } finally {
+        if (session.authCopy) {
+          // A copied auth file (Windows without symlink privileges) may have
+          // been refreshed by the CLI; put the refreshed token back.
+          try {
+            copyFileSync(session.authCopy, session.authSource);
+            chmodSync(session.authSource, 0o600);
+          } catch {}
+        }
         cleanupDir(home);
       }
     }
@@ -1071,6 +1108,7 @@ export const __test = {
   opencodeConfig,
   opencodeArgs,
   opencodeGlobalMcpNames,
+  opencodeVersion,
   reasoningVariant,
   commandCodeEffort,
   commandCodeArgs,
