@@ -26,6 +26,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -130,6 +131,27 @@ function stageImages(workRoot, imagePaths, text) {
   return { text: staged, paths };
 }
 
+// MCP environment values are secrets. Put placeholders in the config file and
+// the real values in the CLI process environment, which the model cannot read
+// (bash/edit are denied) and OpenCode substitutes before spawning the server.
+function redactMcpEnv(servers) {
+  const env = {};
+  const safe = {};
+  let index = 0;
+  for (const [name, server] of Object.entries(servers)) {
+    const values = server?.env && typeof server.env === "object" ? server.env : {};
+    const redacted = {};
+    for (const [key, value] of Object.entries(values)) {
+      const varName = `LAA_OPENCODE_MCP_${index}_${String(key).replace(/[^A-Za-z0-9_]/g, "_")}`;
+      index += 1;
+      env[varName] = String(value);
+      redacted[key] = `{env:${varName}}`;
+    }
+    safe[name] = Object.keys(redacted).length ? { ...server, env: redacted } : server;
+  }
+  return { servers: safe, env };
+}
+
 // ── OpenCode ────────────────────────────────────────────────────────────────
 
 function mcpPermissionName(name) {
@@ -141,7 +163,7 @@ function mcpPermissionName(name) {
 // rules, so these are the last matching rules and cannot be overridden by a
 // global `bash: allow` or a wildcard allow. The first rule is the deny-all;
 // every entry after it is an explicit capability.
-function opencodePermission(servers, dirs) {
+function opencodePermission(servers, dirs, protectedPaths = []) {
   // Use wildcard keys ("**", "read*") instead of exact keys ("*", "read").
   // Exact keys can already exist in the user's global config, in which case a
   // deep merge preserves their earlier position; these keys are new, so they
@@ -159,6 +181,14 @@ function opencodePermission(servers, dirs) {
     "webfetch*": "allow",
     "websearch*": "allow",
   };
+
+  // The generated config and session DB contain MCP credentials/session data
+  // and live outside the cwd; deny them explicitly even if a space directory
+  // happens to cover the temp directory.
+  for (const path of protectedPaths) {
+    const pattern = process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+    permission["read*"][pattern] = "deny";
+  }
 
   // MCP tools are server-defined, so allow each attached server explicitly.
   for (const name of Object.keys(servers)) {
@@ -249,10 +279,9 @@ async function opencodeGlobalMcpNames() {
 
 async function opencodeVersion() {
   if (opencodeVersionCache !== null) return opencodeVersionCache;
-  let raw = "";
-  let major = 0;
+  let out;
   try {
-    const out = await runCapture(commandFor("opencode"), ["--version"], {
+    out = await runCapture(commandFor("opencode"), ["--version"], {
       timeoutMs: 15_000,
       env: {
         OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
@@ -260,20 +289,21 @@ async function opencodeVersion() {
         OPENCODE_DISABLE_AUTOUPDATE: "1",
       },
     });
-    const match = out.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
-    if (match) {
-      raw = match[0];
-      major = Number(match[1]);
-    }
-  } catch {
-    /* the run itself will report a missing/broken CLI */
+  } catch (e) {
+    throw new Error(
+      `Could not determine the OpenCode version (${String(e?.message ?? e)}). ${COMMANDS.opencode.install}`
+    );
   }
-  const version = { raw, major };
-  if (raw) opencodeVersionCache = version;
+  const match = out.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  if (!match) {
+    throw new Error(`Could not determine the OpenCode version from \`opencode --version\`. ${COMMANDS.opencode.install}`);
+  }
+  const version = { raw: match[0], major: Number(match[1]) };
+  opencodeVersionCache = version;
   return version;
 }
 
-function opencodeConfig(servers, disabledNames, dirs, agentName) {
+function opencodeConfig(servers, disabledNames, dirs, agentName, protectedPaths = []) {
   const mcp = {};
   for (const name of disabledNames) mcp[name] = { enabled: false };
   for (const [name, s] of Object.entries(servers)) {
@@ -288,8 +318,8 @@ function opencodeConfig(servers, disabledNames, dirs, agentName) {
     // The top-level rules are a fallback if OpenCode cannot resolve the agent
     // (it falls back to the default agent with a warning). The run-scoped agent
     // is the normal path and cannot collide with a user-defined agent.
-    permission: opencodePermission(servers, dirs),
-    agent: { [agentName]: { mode: "primary", permission: opencodePermission(servers, dirs) } },
+    permission: opencodePermission(servers, dirs, protectedPaths),
+    agent: { [agentName]: { mode: "primary", permission: opencodePermission(servers, dirs, protectedPaths) } },
     mcp,
   };
 }
@@ -372,19 +402,21 @@ function parseOpencodeLine(line, state) {
   return null;
 }
 
-function opencodeEnv(config, workDir) {
+function opencodeEnv(config, configDir, extraEnv = {}) {
   // Keep MCP credentials out of the process environment: an MCP child can
   // inherit env vars, but it cannot read this 0600 file just by existing.
-  const configPath = join(workDir, "opencode.json");
+  // This directory is outside the agent's cwd and its read is denied.
+  const configPath = join(configDir, "opencode.json");
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   return {
+    ...extraEnv,
     OPENCODE_CONFIG: configPath,
     OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-    OPENCODE_DB: join(workDir, "opencode.db"),
+    OPENCODE_DB: join(configDir, "opencode.db"),
   };
 }
 
@@ -421,6 +453,7 @@ function commandCodeHome(servers) {
   const realHome = homedir();
   const auth = join(realHome, ".commandcode", "auth.json");
   let authCopy = null;
+  let authOriginal = null;
   if (existsSync(auth)) {
     const target = join(configDir, "auth.json");
     try {
@@ -428,6 +461,7 @@ function commandCodeHome(servers) {
     } catch {
       copyFileSync(auth, target);
       authCopy = target;
+      authOriginal = readFileSync(auth);
     }
   }
   const cache = join(realHome, ".commandcode", "cache");
@@ -465,7 +499,33 @@ function commandCodeHome(servers) {
   if (Object.keys(mcpServers).length) {
     writeFileSync(join(configDir, "mcp.json"), JSON.stringify({ mcpServers }), { mode: 0o600 });
   }
-  return { home, authCopy, authSource: auth };
+  return { home, authCopy, authSource: auth, authOriginal };
+}
+
+function writeBackCommandCodeAuth({ authCopy, authSource, authOriginal }) {
+  if (!authCopy || !authOriginal) return;
+  try {
+    // Do not clobber a newer login or another concurrent run: only write when
+    // the real file is still exactly what this run started with.
+    const current = readFileSync(authSource);
+    if (!current.equals(authOriginal)) return;
+    const next = readFileSync(authCopy);
+    if (next.equals(authOriginal)) return;
+    const temp = `${authSource}.laa-${process.pid}-${Date.now()}.tmp`;
+    writeFileSync(temp, next, { mode: 0o600 });
+    try {
+      renameSync(temp, authSource);
+    } catch {
+      try {
+        copyFileSync(temp, authSource);
+        chmodSync(authSource, 0o600);
+      } finally {
+        rmSync(temp, { force: true });
+      }
+    }
+  } catch {
+    /* auth refresh is best-effort; never mask the run result */
+  }
 }
 
 function commandCodeEffort(reasoning) {
@@ -937,6 +997,7 @@ export function createCliThread(backend, opts = {}) {
 
     if (backend === "opencode") {
       const workRoot = mkdtempSync(join(tmpdir(), "laa-oc-"));
+      const configRoot = mkdtempSync(join(tmpdir(), "laa-oc-config-"));
       try {
         const version = await opencodeVersion();
         if (version.major >= 2) {
@@ -945,12 +1006,19 @@ export function createCliThread(backend, opts = {}) {
           );
         }
         const staged = stageImages(workRoot, imagePaths, text);
-        const config = opencodeConfig(servers, await opencodeGlobalMcpNames(), spaceDirs, agentName);
+        const redacted = redactMcpEnv(servers);
+        const config = opencodeConfig(
+          redacted.servers,
+          await opencodeGlobalMcpNames(),
+          spaceDirs,
+          agentName,
+          [join(configRoot, "opencode.json"), join(configRoot, "opencode.db")]
+        );
         const variant = reasoningVariant(opts?.modelConfig?.reasoning, opts?.modelConfig?.model);
         yield* runCliTurn({
           command: commandFor("opencode"),
           args: opencodeArgs(opts, staged.paths, variant, agentName),
-          env: opencodeEnv(config, workRoot),
+          env: opencodeEnv(config, configRoot, redacted.env),
           // Run in an empty temp directory: the user's project config is
           // disabled, external reads are limited to the attached dirs, and
           // there is no project-local AGENTS.md/.opencode config to inherit.
@@ -963,10 +1031,12 @@ export function createCliThread(backend, opts = {}) {
         });
       } finally {
         cleanupDir(workRoot);
+        cleanupDir(configRoot);
       }
     } else {
       const session = commandCodeHome(servers);
       const home = session.home;
+      let ok = false;
       try {
         // A temp workspace keeps Command Code away from `/`, $HOME, and any
         // project `.mcp.json`. The real space dirs are granted with --add-dir.
@@ -984,15 +1054,12 @@ export function createCliThread(backend, opts = {}) {
           parseLine: parseCommandCodeLine,
           label,
         });
+        ok = true;
       } finally {
-        if (session.authCopy) {
-          // A copied auth file (Windows without symlink privileges) may have
-          // been refreshed by the CLI; put the refreshed token back.
-          try {
-            copyFileSync(session.authCopy, session.authSource);
-            chmodSync(session.authSource, 0o600);
-          } catch {}
-        }
+        // A copied auth file (Windows without symlink privileges) may have
+        // been refreshed by the CLI; put the refreshed token back only after a
+        // successful, non-aborted run.
+        if (ok) writeBackCommandCodeAuth(session);
         cleanupDir(home);
       }
     }
@@ -1108,6 +1175,7 @@ export const __test = {
   opencodeConfig,
   opencodeArgs,
   opencodeGlobalMcpNames,
+  redactMcpEnv,
   opencodeVersion,
   reasoningVariant,
   commandCodeEffort,

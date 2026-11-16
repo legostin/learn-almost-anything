@@ -171,10 +171,21 @@ test("Command Code text resets between assistant messages", () => {
   assert.equal(state.final, "final");
 });
 
+test("MCP environment values are redacted from the OpenCode config", () => {
+  const { servers, env } = __test.redactMcpEnv({
+    custom: { command: "true", env: { API_KEY: "secret", OTHER: "v" } },
+  });
+  assert.equal(servers.custom.env.API_KEY, "{env:LAA_OPENCODE_MCP_0_API_KEY}");
+  assert.equal(servers.custom.env.OTHER, "{env:LAA_OPENCODE_MCP_1_OTHER}");
+  assert.equal(env.LAA_OPENCODE_MCP_0_API_KEY, "secret");
+  assert.equal(env.LAA_OPENCODE_MCP_1_OTHER, "v");
+});
+
 test("OpenCode permission is a deny-first allowlist", () => {
   const permission = __test.opencodePermission(
     { context7: {}, "my-server": {} },
-    ["/data/space"]
+    ["/data/space"],
+    ["/tmp/opencode.json"]
   );
   assert.equal(permission["**"], "deny");
   assert.equal(permission.edit, undefined);
@@ -185,14 +196,22 @@ test("OpenCode permission is a deny-first allowlist", () => {
   assert.equal(permission["read*"]["*.env"], "deny");
   assert.equal(permission["external_directory*"]["*"], "deny");
   assert.equal(permission["external_directory*"]["/data/space/*"], "allow");
+  assert.equal(permission["read*"]["/tmp/opencode.json"], "deny");
 });
 
 test("OpenCode config disables personal MCP and defines a run-only agent", () => {
-  const config = __test.opencodeConfig({ context7: { command: "true" } }, ["personal"], [], "laa-test");
+  const config = __test.opencodeConfig(
+    { context7: { command: "true" } },
+    ["personal"],
+    [],
+    "laa-test",
+    ["/tmp/opencode.json"]
+  );
   assert.equal(config.mcp.personal.enabled, false);
   assert.equal(config.permission["**"], "deny");
   assert.equal(config.agent["laa-test"].permission["**"], "deny");
   assert.equal(config.agent["laa-test"].permission["context7_*"], "allow");
+  assert.equal(config.agent["laa-test"].permission["read*"]["/tmp/opencode.json"], "deny");
   assert.equal(config.agent.build, undefined);
 });
 
@@ -240,7 +259,7 @@ test("OpenCode transport concatenates split JSON and runs in a temp cwd", async 
 test("a failed OpenCode version probe is not cached", async () => {
   process.env.LAA_STUB_VERSION_FAIL = "1";
   resetCliCaches();
-  assert.equal((await __test.opencodeVersion()).major, 0);
+  await assert.rejects(__test.opencodeVersion(), /Could not determine the OpenCode version/);
   delete process.env.LAA_STUB_VERSION_FAIL;
   assert.equal((await __test.opencodeVersion()).major, 1);
 });

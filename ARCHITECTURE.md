@@ -180,19 +180,22 @@ never leak into a lesson run:
   question/plan tools stay denied. Agent rules are appended after the user's
   global rules, so a global `bash: allow` cannot re-enable it; a top-level
   copy of the rules is the fallback if OpenCode cannot resolve the agent. The
-  generated config is a `0600` file in the temporary cwd (passed with
-  `OPENCODE_CONFIG`, not env) so MCP credentials are not exposed through the
-  process environment. External reads are limited to the attached space
-  directories; attached images are copied into the temporary cwd, and `.env`
-  files stay denied. The CLI runs in a temporary cwd with its session DB there,
-  and OpenCode v2 is rejected with a clear error instead of an opaque flag
-  failure.
+  generated config is a `0600` file in a separate temp directory outside the
+  agent's cwd (passed with `OPENCODE_CONFIG`, not env). MCP env secrets are
+  stored as `{env:...}` placeholders in that file; the real values are only in
+  the CLI process env and are substituted before a server starts. Reads of the
+  config and session DB are explicitly denied. External reads are limited to
+  the attached space directories; attached images are copied into the
+  temporary cwd, and `.env` files stay denied. The CLI runs in a temporary
+  cwd, and an unreadable/unsupported OpenCode version fails closed with a clear
+  error instead of an opaque flag failure.
 - **Command Code**: each call gets a temporary `HOME` whose `.commandcode`
   contains a symlink to the real `auth.json` (copied only when a symlink is not
-  possible, then copied back after the run so refreshes persist) plus the
-  user's `permissions.deny`/`ask` rules, but no hooks,
-  allow rules, or personal MCP servers. Only the app's MCP servers are written
-  into `mcp.json`; their environment keeps the real `HOME` so custom servers
+  possible; a refreshed copy is written back only after a successful run and
+  only if the real file is unchanged) plus the user's `permissions.deny`/`ask`
+  rules, but no hooks, allow rules, or personal MCP servers. Only the app's
+  MCP servers are written into `mcp.json`; their environment keeps the real
+  `HOME` so custom servers
   retain credentials and caches. The CLI runs from a temporary workspace, which
   avoids `/`, `$HOME`, and project `.mcp.json` files; the real space directories
   are granted with `--add-dir`, and attached images are copied into the
