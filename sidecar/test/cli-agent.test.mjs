@@ -128,6 +128,10 @@ test("extractJsonText handles whole values, prose, fences, and arrays", () => {
     __test.extractJsonText('{"content":"inline ```5``` fence"}'),
     '{"content":"inline ```5``` fence"}'
   );
+  assert.equal(
+    __test.extractJsonText("Per the docs [1], here: {\"a\":1}", { type: "object" }),
+    '{"a":1}'
+  );
 });
 
 test("OpenCode text parts in one message are concatenated, new messages reset", () => {
@@ -165,11 +169,12 @@ test("OpenCode permission is a deny-first allowlist", () => {
   assert.equal(permission.external_directory["/data/space/*"], "allow");
 });
 
-test("OpenCode config disables personal MCP and overrides the build agent", () => {
-  const config = __test.opencodeConfig({ context7: { command: "true" } }, ["personal"], []);
+test("OpenCode config disables personal MCP and defines a run-only agent", () => {
+  const config = __test.opencodeConfig({ context7: { command: "true" } }, ["personal"], [], "laa-test");
   assert.equal(config.mcp.personal.enabled, false);
-  assert.equal(config.agent.build.permission["*"], "deny");
-  assert.equal(config.agent.build.permission["context7_*"], "allow");
+  assert.equal(config.agent["laa-test"].permission["*"], "deny");
+  assert.equal(config.agent["laa-test"].permission["context7_*"], "allow");
+  assert.equal(config.agent.build, undefined);
 });
 
 test("OpenCode MCP discovery fails closed and retries", async () => {
@@ -210,7 +215,7 @@ test("OpenCode transport concatenates split JSON and runs in a temp cwd", async 
   const record = JSON.parse(readFileSync(opencodeRecordPath, "utf8"));
   assert.ok(record.cwd.startsWith(tmpdir()));
   assert.ok(!record.args.includes("--dir"));
-  assert.equal(record.args[record.args.indexOf("--agent") + 1], "build");
+  assert.match(record.args[record.args.indexOf("--agent") + 1], /^laa-ro-/);
 });
 
 test("OpenCode v2 fails with an actionable error", async () => {

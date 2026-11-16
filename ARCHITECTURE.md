@@ -173,16 +173,16 @@ never leak into a lesson run:
   discovered with `opencode debug config --pure` and explicitly disabled in
   the generated config, while the app's own MCP servers are attached. A failed
   discovery is fatal (fail closed) rather than silently attaching the user's
-  personal servers. Permissions are an allowlist on the built-in `build`
-  agent's permission block: deny `*` first, then allow `read`/`glob`/`grep`/
-  `webfetch`/`websearch` and the app's MCP server patterns; `edit`, `bash`,
-  `task`, `skill` and the interactive question/plan tools stay denied. The
-  agent-level rules are appended after the user's global rules, so a global
-  `bash: allow` cannot re-enable it. External reads are limited to the attached
-  space directories; attached images are copied into the temporary cwd, and
-  `.env` files stay denied. The CLI runs in a temporary cwd with its session DB
-  there, and OpenCode v2 is rejected with a clear error instead of an opaque
-  flag failure.
+  personal servers. Permissions live in a per-run primary agent
+  (`laa-ro-<id>`) so they cannot collide with a user-defined agent: deny `*`
+  first, then allow `read`/`glob`/`grep`/`webfetch`/`websearch` and the app's
+  MCP server patterns; `edit`, `bash`, `task`, `skill` and the interactive
+  question/plan tools stay denied. Agent rules are appended after the user's
+  global rules, so a global `bash: allow` cannot re-enable it. External reads
+  are limited to the attached space directories; attached images are copied
+  into the temporary cwd, and `.env` files stay denied. The CLI runs in a
+  temporary cwd with its session DB there, and OpenCode v2 is rejected with a
+  clear error instead of an opaque flag failure.
 - **Command Code**: each call gets a temporary `HOME` whose `.commandcode`
   contains a symlink to the real `auth.json` (copied only when a symlink is not
   possible) plus the user's `permissions.deny`/`ask` rules, but no hooks,

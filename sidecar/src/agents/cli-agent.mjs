@@ -190,7 +190,9 @@ function opencodePermission(servers, dirs) {
 // so the generated config can switch them off. A failed lookup is fatal rather
 // than cached as empty: running with the user's personal servers attached is
 // worse than failing the stage (headless MCP calls do not prompt).
+const MCP_DISCOVERY_TTL_MS = 5 * 60 * 1000;
 let opencodeGlobalMcp = null;
+let opencodeGlobalMcpAt = 0;
 let opencodeGlobalMcpPending = null;
 let opencodeVersionCache = null;
 
@@ -211,7 +213,9 @@ function parseJsonObject(out) {
 }
 
 async function opencodeGlobalMcpNames() {
-  if (opencodeGlobalMcp !== null) return opencodeGlobalMcp;
+  if (opencodeGlobalMcp !== null && Date.now() - opencodeGlobalMcpAt < MCP_DISCOVERY_TTL_MS) {
+    return opencodeGlobalMcp;
+  }
   if (opencodeGlobalMcpPending) return opencodeGlobalMcpPending;
   opencodeGlobalMcpPending = (async () => {
     const outFile = join(tmpdir(), `laa-oc-config-${randomUUID()}.json`);
@@ -229,6 +233,7 @@ async function opencodeGlobalMcpNames() {
       if (!config) throw new Error("could not parse `opencode debug config` output");
       const names = config.mcp && typeof config.mcp === "object" ? Object.keys(config.mcp) : [];
       opencodeGlobalMcp = names;
+      opencodeGlobalMcpAt = Date.now();
       return names;
     } catch (e) {
       throw new Error(
@@ -268,7 +273,7 @@ async function opencodeVersion() {
   return opencodeVersionCache;
 }
 
-function opencodeConfig(servers, disabledNames, dirs) {
+function opencodeConfig(servers, disabledNames, dirs, agentName) {
   const mcp = {};
   for (const name of disabledNames) mcp[name] = { enabled: false };
   for (const [name, s] of Object.entries(servers)) {
@@ -280,9 +285,9 @@ function opencodeConfig(servers, disabledNames, dirs) {
     };
   }
   return {
-    // Force the built-in build agent so a user's default_agent cannot bypass
-    // the permission override.
-    agent: { build: { permission: opencodePermission(servers, dirs) } },
+    // A per-run agent name cannot collide with a user-defined agent, so the
+    // generated permission list is the only one applied to this run.
+    agent: { [agentName]: { mode: "primary", permission: opencodePermission(servers, dirs) } },
     mcp,
   };
 }
@@ -302,8 +307,8 @@ function reasoningVariant(reasoning, model) {
   return mapped;
 }
 
-function opencodeArgs(opts, imagePaths, variant) {
-  const args = ["run", "--format", "json", "--pure", "--agent", "build"];
+function opencodeArgs(opts, imagePaths, variant, agentName) {
+  const args = ["run", "--format", "json", "--pure", "--agent", agentName];
   const model = typeof opts?.modelConfig?.model === "string" ? opts.modelConfig.model.trim() : "";
   if (model && MODEL_RE.test(model)) args.push("--model", model);
   if (variant) args.push("--variant", variant);
@@ -608,6 +613,35 @@ function spawnProcess(command, args, opts) {
   });
 }
 
+// Windows kill() only terminates cmd.exe, leaving the CLI and its MCP children
+// alive. taskkill /T /F takes down the whole tree. On POSIX signal the process
+// group leader; escalation sends SIGKILL.
+function killProcessTree(child, force = false) {
+  if (!child || child.exitCode !== null) return;
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      child.kill();
+    }
+    return;
+  }
+  child.kill(force ? "SIGKILL" : "SIGTERM");
+}
+
+function cleanupDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch (e) {
+    // A leftover temp dir is preferable to masking a successful run or the
+    // real error on Windows (open handles) or after an interrupted kill.
+    dbg("cleanup failed", dir, String(e?.message ?? e));
+  }
+}
+
 /** Spawn a CLI, resolve with its stdout (used for model listings). */
 function runCapture(command, args, { timeoutMs = 60_000, env = {}, stdoutFile = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -637,7 +671,7 @@ function runCapture(command, args, { timeoutMs = 60_000, env = {}, stdoutFile = 
       closeSync(outFd);
     };
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      killProcessTree(child, true);
       closeOut();
       reject(new Error(`${command} timed out`));
     }, timeoutMs);
@@ -682,14 +716,14 @@ async function* runCliTurn({ command, args, env, cwd, prompt, signal, state, par
     if (watchdog) clearTimeout(watchdog);
     watchdog = setTimeout(() => {
       silent = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 3_000).unref?.();
+      killProcessTree(child);
+      setTimeout(() => killProcessTree(child, true), 3_000).unref?.();
     }, SILENT_KILL_MS);
     watchdog.unref?.();
   };
   const onAbort = () => {
-    child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 3_000).unref?.();
+    killProcessTree(child);
+    setTimeout(() => killProcessTree(child, true), 3_000).unref?.();
   };
 
   child.stdout.on("data", armWatchdog);
@@ -722,13 +756,15 @@ async function* runCliTurn({ command, args, env, cwd, prompt, signal, state, par
       child.once("close", (code, sig) => resolve({ code, sig }));
       // `close` may already have fired before this listener (readline finished
       // first); check the process state as a fallback.
-      if (child.exitCode !== null) resolve({ code: child.exitCode, sig: child.signalCode });
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve({ code: child.exitCode, sig: child.signalCode });
+      }
     });
   } finally {
     if (watchdog) clearTimeout(watchdog);
     signal?.removeEventListener("abort", onAbort);
     rl.close();
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (child.exitCode === null) killProcessTree(child, true);
   }
 
   if (silent) {
@@ -788,8 +824,21 @@ function sliceJson(text, start) {
   return null;
 }
 
-/** Pull the first JSON value out of a reply that may have prose/fences. */
-function extractJsonText(text) {
+function jsonValueType(value) {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
+}
+
+function schemaTypes(schema) {
+  const type = schema?.type;
+  if (Array.isArray(type)) return new Set(type);
+  if (typeof type === "string") return new Set([type]);
+  return null;
+}
+
+/** Pull the JSON value out of a reply that may have prose, fences, or citations. */
+function extractJsonText(text, schema) {
   const raw = String(text ?? "");
   // Try the whole reply first: this handles a JSON string containing a fenced
   // block, and a bare array/object without heuristics touching it.
@@ -798,8 +847,8 @@ function extractJsonText(text) {
     candidates.push(match[1].trim());
   }
   // Then balanced values. Scanning left-to-right tries the outer object before
-  // nested fragments; the first invalid candidate (e.g. a `{brace}` in prose)
-  // is skipped and the next opener is tried.
+  // nested fragments; invalid candidates (a `{brace}` or citation `[1]` in
+  // prose) are skipped.
   const starts = [];
   for (let i = 0; i < raw.length && starts.length < 200; i += 1) {
     if (raw[i] === "{" || raw[i] === "[") starts.push(i);
@@ -808,14 +857,28 @@ function extractJsonText(text) {
     const sliced = sliceJson(raw, start);
     if (sliced) candidates.push(sliced);
   }
+  const allowedTypes = schemaTypes(schema);
   const seen = new Set();
+  let best = null;
   for (const candidate of candidates) {
     if (!candidate || seen.has(candidate)) continue;
     seen.add(candidate);
+    let parsed;
     try {
-      return JSON.stringify(JSON.parse(candidate));
-    } catch {}
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (allowedTypes && allowedTypes.size > 0 && !allowedTypes.has(jsonValueType(parsed))) {
+      continue;
+    }
+    const normalized = JSON.stringify(parsed);
+    // Prefer the largest matching value. This skips short valid fragments in
+    // prose (for example a citation `[1]`) and keeps an outer object over a
+    // nested one.
+    if (!best || normalized.length > best.length) best = normalized;
   }
+  if (best) return best;
   throw new Error(`response did not contain valid JSON: ${raw.slice(0, 200)}`);
 }
 
@@ -839,6 +902,7 @@ export function createCliThread(backend, opts = {}) {
 
   async function* events(prompt, runOpts = {}) {
     const servers = mcpServersFor(opts);
+    const agentName = `laa-ro-${id.slice(0, 8)}`;
     const state = { backend, final: "" };
     const text = withSchema(prompt, runOpts.outputSchema);
     const spaceDirs = Array.isArray(opts.dirs) ? opts.dirs.filter(Boolean) : [];
@@ -853,11 +917,11 @@ export function createCliThread(backend, opts = {}) {
           );
         }
         const staged = stageImages(workRoot, imagePaths, text);
-        const config = opencodeConfig(servers, await opencodeGlobalMcpNames(), spaceDirs);
+        const config = opencodeConfig(servers, await opencodeGlobalMcpNames(), spaceDirs, agentName);
         const variant = reasoningVariant(opts?.modelConfig?.reasoning, opts?.modelConfig?.model);
         yield* runCliTurn({
           command: commandFor("opencode"),
-          args: opencodeArgs(opts, staged.paths, variant),
+          args: opencodeArgs(opts, staged.paths, variant, agentName),
           env: opencodeEnv(config, workRoot),
           // Run in an empty temp directory: the user's project config is
           // disabled, external reads are limited to the attached dirs, and
@@ -870,7 +934,7 @@ export function createCliThread(backend, opts = {}) {
           label,
         });
       } finally {
-        rmSync(workRoot, { recursive: true, force: true });
+        cleanupDir(workRoot);
       }
     } else {
       const home = commandCodeHome(servers);
@@ -892,11 +956,11 @@ export function createCliThread(backend, opts = {}) {
           label,
         });
       } finally {
-        rmSync(home, { recursive: true, force: true });
+        cleanupDir(home);
       }
     }
 
-    const final = runOpts.outputSchema ? extractJsonText(state.final) : state.final;
+    const final = runOpts.outputSchema ? extractJsonText(state.final, runOpts.outputSchema) : state.final;
     yield { type: "item.completed", item: { type: "agent_message", text: final } };
   }
 
@@ -993,6 +1057,7 @@ export function resetCliCaches() {
   opencodeModels = null;
   commandCodeModels = null;
   opencodeGlobalMcp = null;
+  opencodeGlobalMcpAt = 0;
   opencodeGlobalMcpPending = null;
   opencodeVersionCache = null;
 }
