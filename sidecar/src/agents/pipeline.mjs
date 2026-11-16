@@ -555,6 +555,21 @@ function describeCodexError(msg) {
   return s;
 }
 
+// devlog wants a string; Codex vision stages pass an items array instead.
+function logPrompt(input) {
+  if (typeof input === "string") return input;
+  if (!Array.isArray(input)) return String(input ?? "");
+  const parts = [];
+  for (const item of input) {
+    if (!item) continue;
+    if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
+    else if (item.type === "local_image" && typeof item.path === "string") {
+      parts.push(`[local image: ${item.path}]`);
+    }
+  }
+  return parts.join("\n\n");
+}
+
 async function runOnce(prompt, outputSchema, opts) {
   const backend = currentBackend() ?? "codex";
   let input = prompt;
@@ -565,7 +580,7 @@ async function runOnce(prompt, outputSchema, opts) {
     runOpts = req.opts;
   }
   runOpts = { ...runOpts, modelConfig: await resolveModelConfig(runOpts?.modelConfig) };
-  const rec = devlog.startCall({ backend, prompt: input, model: runOpts?.modelConfig?.model });
+  const rec = devlog.startCall({ backend, prompt: logPrompt(input), model: runOpts?.modelConfig?.model });
   try {
     const thread = openThread(runOpts);
     const turn = await thread.run(
@@ -596,7 +611,7 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
     runOpts = req.opts;
   }
   runOpts = { ...runOpts, modelConfig: await resolveModelConfig(runOpts?.modelConfig) };
-  const rec = devlog.startCall({ backend, prompt: input, model: runOpts?.modelConfig?.model });
+  const rec = devlog.startCall({ backend, prompt: logPrompt(input), model: runOpts?.modelConfig?.model });
   // The CLI transport has its own silent-process watchdog; the Codex SDK's
   // idle timer would otherwise abort a model turn that is simply thinking.
   const idleTimeoutMs = backend === "codex" ? (runOpts?.idleTimeoutMs ?? 0) : 0;
@@ -700,6 +715,14 @@ async function runStreamed(prompt, outputSchema, onProgress, opts) {
     if (idleTimer) clearTimeout(idleTimer);
     if (totalTimer) clearTimeout(totalTimer);
   }
+}
+
+// Vision stages historically used thread.run on Codex. Keep that path intact;
+// CLI transports use the streaming path so they can report progress.
+async function runVision(input, opts, ctx) {
+  const backend = currentBackend() ?? "codex";
+  if (backend === "codex") return await runOnce(input, undefined, opts);
+  return await runStreamed(input, undefined, ctx?.progress, opts);
 }
 
 // The Codex CLI caches the live model catalog at ~/.codex/models_cache.json —
@@ -2133,7 +2156,7 @@ Output ONLY a single-line JSON object:
   for (const im of images) input.push({ type: "local_image", path: im.path });
 
   ctx?.progress?.({ label: "reviewing" });
-  const text = await runStreamed(input, undefined, ctx?.progress, { braveApiKey, modelConfig });
+  const text = await runVision(input, { braveApiKey, modelConfig }, ctx);
   return normalizeReview(extractJsonLoose(text));
 }
 
@@ -2171,7 +2194,7 @@ Output ONLY a single-line JSON object:
   }
 
   ctx?.progress?.({ label: "reviewing" });
-  const text = await runStreamed(input, undefined, ctx?.progress, { braveApiKey, modelConfig });
+  const text = await runVision(input, { braveApiKey, modelConfig }, ctx);
   const parsed = extractJsonLoose(text);
   return {
     pick: typeof parsed.pick === "number" ? parsed.pick : null,
@@ -3365,7 +3388,7 @@ export async function reviewWidgetRender({ title, description, pngPath, braveApi
     { type: "local_image", path: pngPath },
   ];
   ctx?.progress?.({ label: "validating", detail: "visual check" });
-  const text = await runStreamed(input, undefined, ctx?.progress, { braveApiKey, modelConfig });
+  const text = await runVision(input, { braveApiKey, modelConfig }, ctx);
   return normalizeWidgetReview(extractJsonLoose(text));
 }
 

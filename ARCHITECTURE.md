@@ -169,24 +169,33 @@ Isolation matches the other backends — the user's personal agent setup must
 never leak into a lesson run:
 
 - **OpenCode**: `--pure` disables plugins; external/Claude skills are disabled
-  by env; project configs are ignored; the user's global MCP servers are read
-  once (`opencode debug config`) and explicitly disabled in the generated
-  config, while the app's own MCP servers are attached. Permissions
-  default-allow (MCP tool names are server-defined, so a blanket deny would
-  hide them) but explicitly deny shell/edit/write/patch/subagents and the
-  interactive question/plan tools — the same read-only posture as the Codex
-  sandbox. The session DB lives in a temporary directory.
+  by env and project configs are ignored. The user's global MCP servers are
+  discovered with `opencode debug config --pure` and explicitly disabled in
+  the generated config, while the app's own MCP servers are attached. A failed
+  discovery is fatal (fail closed) rather than silently attaching the user's
+  personal servers. Permissions are an allowlist on the built-in `build`
+  agent's permission block: deny `*` first, then allow `read`/`glob`/`grep`/
+  `webfetch`/`websearch` and the app's MCP server patterns; `edit`, `bash`,
+  `task`, `skill` and the interactive question/plan tools stay denied. The
+  agent-level rules are appended after the user's global rules, so a global
+  `bash: allow` cannot re-enable it. External reads are limited to the attached
+  space directories; attached images are copied into the temporary cwd, and
+  `.env` files stay denied. The CLI runs in a temporary cwd with its session DB
+  there, and OpenCode v2 is rejected with a clear error instead of an opaque
+  flag failure.
 - **Command Code**: each call gets a temporary `HOME` whose `.commandcode`
-  contains a symlink to the real `auth.json` (so the user's login works) but no
-  settings/hooks/sessions; only the app's MCP servers are written into
-  `mcp.json`. `--safe-mode --no-skills --no-session --no-auto-update
-  --skip-onboarding` keep it non-interactive, and `-p` refuses writes by
-  default. Its headless mode treats the current directory as the read-only
-  workspace and ignores `--add-dir`, so the runner starts the CLI from the
-  narrowest common ancestor of the space/attachment paths the stage needs.
-  (Consequence: when a stage deliberately explores a Space directory, the CLI
-  also discovers a project-level `.mcp.json` there if the repo has one.) The
-  temp home is deleted after the run.
+  contains a symlink to the real `auth.json` (copied only when a symlink is not
+  possible) plus the user's `permissions.deny`/`ask` rules, but no hooks,
+  allow rules, or personal MCP servers. Only the app's MCP servers are written
+  into `mcp.json`; their environment keeps the real `HOME` so custom servers
+  retain credentials and caches. The CLI runs from a temporary workspace, which
+  avoids `/`, `$HOME`, and project `.mcp.json` files; the real space directories
+  are granted with `--add-dir`, and attached images are copied into the
+  temporary workspace. `--permission-mode plan` makes the run read-only across
+  the tool surface, not just the headless blocklist.
+  `--safe-mode --no-skills --no-session --no-auto-update --skip-onboarding`
+  keep it non-interactive, and `taste-learning=false` prevents files being
+  written into the learner's space. The temp home is deleted after the run.
 
 ---
 
@@ -533,10 +542,12 @@ The sidecar maps `reasoning` onto SDK-specific fields:
   `low | medium | high | xhigh | max` → `effort: <value>`.
 - Codex (`modelThreadOptions` in `pipeline.mjs`): the same vocabulary maps onto
   Codex's `reasoning.effort` (or disables it).
-- OpenCode (`cli-agent.mjs`): maps onto `--variant` (using the model's own
-  variant list from `opencode models --verbose`).
+- OpenCode (`cli-agent.mjs`): maps onto `--variant` only when the value is a
+  safe identifier and, when the catalog is loaded, the model actually declares
+  that variant; unsupported variants are omitted instead of silently ignored.
 - Command Code (`cli-agent.mjs`): maps onto `--effort` (`max`/`xhigh` → `max`,
-  `off`/`none` → `low`).
+  `off`/`none` → `low`); unknown values are omitted rather than passed through
+  as flags.
 
 Empty fields are dropped so the agent falls back to its built-in default —
 the user only sets the levers they care about.

@@ -18,16 +18,19 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline";
 
@@ -42,6 +45,8 @@ import {
 const SILENT_KILL_MS = 10 * 60 * 1000;
 const STDERR_TAIL = 4 * 1024;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/;
+const REASONING_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+const COMMANDCODE_EFFORT_RE = /^(minimal|low|medium|high|xhigh|max)$/;
 const DEBUG = process.env.LAA_CLI_DEBUG === "1";
 const dbg = (...a) => {
   if (DEBUG) process.stderr.write("[cli-agent] " + a.join(" ") + "\n");
@@ -103,52 +108,167 @@ function mcpServersFor(opts = {}) {
   return servers;
 }
 
+// Attachments are copied into the run's temporary workspace. This keeps the
+// CLI from needing read access to the original (often /tmp) directory and means
+// only the learner's space directories are exposed as external roots.
+function stageImages(workRoot, imagePaths, text) {
+  if (!imagePaths.length) return { text, paths: [] };
+  const dir = join(workRoot, "attachments");
+  mkdirSync(dir, { recursive: true });
+  const paths = [];
+  const replacements = [];
+  for (let i = 0; i < imagePaths.length; i += 1) {
+    const source = imagePaths[i];
+    const target = join(dir, `${i}-${basename(source)}`);
+    copyFileSync(source, target);
+    paths.push(target);
+    replacements.push([source, target]);
+  }
+  let staged = text;
+  for (const [source, target] of replacements) staged = staged.split(source).join(target);
+  return { text: staged, paths };
+}
+
 // ── OpenCode ────────────────────────────────────────────────────────────────
 
-// V1 permission actions. Default-allow (MCP tools are server-defined, so a
-// blanket deny hides them), then deny every mutation/execution surface —
-// equivalent to the read-only sandbox the Codex backend runs in.
-const OPENCODE_PERMISSION = {
-  "*": "allow",
-  bash: "deny",
-  edit: "deny",
-  write: "deny",
-  patch: "deny",
-  multiedit: "deny",
-  task: "deny",
-  question: "deny",
-  plan_enter: "deny",
-  plan_exit: "deny",
-  webfetch: "allow",
-  websearch: "allow",
-};
+function mcpPermissionName(name) {
+  // Must match OpenCode's MCP tool naming: sanitize(server) + "_" + sanitize(tool).
+  return String(name).replace(/[^A-Za-z0-9_-]/g, "_");
+}
 
-// User-level MCP servers are merged into every OpenCode run. Learn the names
-// once so the generated config can switch them off — this is what keeps the
-// user's unrelated personal servers from spawning (and hanging) mid-lesson.
+// The build agent's permission rules are appended after the user's global
+// rules, so these are the last matching rules and cannot be overridden by a
+// global `bash: allow` or a wildcard allow. The first rule is the deny-all;
+// every entry after it is an explicit capability.
+function opencodePermission(servers, dirs) {
+  const permission = {
+    "*": "deny",
+    edit: "deny",
+    bash: "deny",
+    task: "deny",
+    question: "deny",
+    plan_enter: "deny",
+    plan_exit: "deny",
+    skill: "deny",
+    read: {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+    },
+    glob: "allow",
+    grep: "allow",
+    webfetch: "allow",
+    websearch: "allow",
+  };
+
+  // MCP tools are server-defined, so allow each attached server explicitly.
+  for (const name of Object.keys(servers)) {
+    permission[`${mcpPermissionName(name)}_*`] = "allow";
+  }
+
+  // External paths are limited to the learner's attached space directories and
+  // the directory holding an attached image. Everything else stays denied.
+  const roots = new Set();
+  for (const dir of dirs) {
+    if (typeof dir === "string" && dir.trim()) roots.add(resolve(dir.trim()));
+  }
+  if (roots.size === 0) {
+    permission.external_directory = "deny";
+  } else {
+    const external = { "*": "deny" };
+    for (const root of roots) {
+      external[`${root}/*`] = "allow";
+      external[root] = "allow";
+    }
+    permission.external_directory = external;
+  }
+  return permission;
+}
+
+// User-level MCP servers are merged into every OpenCode run. Learn their names
+// so the generated config can switch them off. A failed lookup is fatal rather
+// than cached as empty: running with the user's personal servers attached is
+// worse than failing the stage (headless MCP calls do not prompt).
 let opencodeGlobalMcp = null;
+let opencodeGlobalMcpPending = null;
+let opencodeVersionCache = null;
+
+function parseJsonObject(out) {
+  const text = String(out || "").trim();
+  const candidates = [text];
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) candidates.push(text.slice(start, end + 1));
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return null;
+}
+
 async function opencodeGlobalMcpNames() {
-  if (opencodeGlobalMcp) return opencodeGlobalMcp;
-  opencodeGlobalMcp = [];
+  if (opencodeGlobalMcp !== null) return opencodeGlobalMcp;
+  if (opencodeGlobalMcpPending) return opencodeGlobalMcpPending;
+  opencodeGlobalMcpPending = (async () => {
+    const outFile = join(tmpdir(), `laa-oc-config-${randomUUID()}.json`);
+    try {
+      await runCapture(commandFor("opencode"), ["debug", "config", "--pure"], {
+        timeoutMs: 30_000,
+        stdoutFile: outFile,
+        env: {
+          OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+          OPENCODE_DISABLE_CLAUDE_CODE: "1",
+          OPENCODE_DISABLE_AUTOUPDATE: "1",
+        },
+      });
+      const config = parseJsonObject(readFileSync(outFile, "utf8"));
+      if (!config) throw new Error("could not parse `opencode debug config` output");
+      const names = config.mcp && typeof config.mcp === "object" ? Object.keys(config.mcp) : [];
+      opencodeGlobalMcp = names;
+      return names;
+    } catch (e) {
+      throw new Error(
+        `Could not inspect the user OpenCode config (${String(e?.message ?? e)}). ` +
+          "Refusing to run OpenCode because personal MCP servers could be attached without permission."
+      );
+    } finally {
+      rmSync(outFile, { force: true });
+      opencodeGlobalMcpPending = null;
+    }
+  })();
+  return opencodeGlobalMcpPending;
+}
+
+async function opencodeVersion() {
+  if (opencodeVersionCache !== null) return opencodeVersionCache;
+  let raw = "";
+  let major = 0;
   try {
-    const out = await runCapture(commandFor("opencode"), ["debug", "config", "--pure"], {
-      timeoutMs: 30_000,
+    const out = await runCapture(commandFor("opencode"), ["--version"], {
+      timeoutMs: 15_000,
       env: {
         OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
         OPENCODE_DISABLE_CLAUDE_CODE: "1",
         OPENCODE_DISABLE_AUTOUPDATE: "1",
       },
     });
-    const start = out.indexOf("{");
-    const names = Object.keys(JSON.parse(start >= 0 ? out.slice(start) : out)?.mcp ?? {});
-    if (names.length) opencodeGlobalMcp = names;
+    const match = out.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+    if (match) {
+      raw = match[0];
+      major = Number(match[1]);
+    }
   } catch {
-    /* no global config / not installed yet — nothing to disable */
+    /* the run itself will report a missing/broken CLI */
   }
-  return opencodeGlobalMcp;
+  opencodeVersionCache = { raw, major };
+  return opencodeVersionCache;
 }
 
-function opencodeConfig(servers, disabledNames) {
+function opencodeConfig(servers, disabledNames, dirs) {
   const mcp = {};
   for (const name of disabledNames) mcp[name] = { enabled: false };
   for (const [name, s] of Object.entries(servers)) {
@@ -159,27 +279,51 @@ function opencodeConfig(servers, disabledNames) {
       ...(s.env && Object.keys(s.env).length ? { environment: s.env } : {}),
     };
   }
-  return { permission: OPENCODE_PERMISSION, mcp };
+  return {
+    // Force the built-in build agent so a user's default_agent cannot bypass
+    // the permission override.
+    agent: { build: { permission: opencodePermission(servers, dirs) } },
+    mcp,
+  };
 }
 
-function reasoningVariant(reasoning) {
+function reasoningVariant(reasoning, model) {
   const r = typeof reasoning === "string" ? reasoning.trim().toLowerCase() : "";
   if (!r) return null;
-  if (["off", "none", "disabled"].includes(r)) return "none";
-  if (r === "max") return "max";
-  return r;
+  const mapped = ["off", "none", "disabled"].includes(r) ? "none" : r;
+  if (!REASONING_RE.test(mapped)) return null;
+  // When the catalog is already loaded, only send variants the model declares.
+  // Unknown variants are silently ignored by OpenCode, so this avoids no-op
+  // thinking levels without an extra CLI call.
+  if (opencodeModels) {
+    const entry = opencodeModels.find((m) => m.value === model);
+    if (entry && !entry.effortLevels.includes(mapped)) return null;
+  }
+  return mapped;
 }
 
-function opencodeArgs(opts, imagePaths) {
-  const args = ["run", "--format", "json", "--pure"];
+function opencodeArgs(opts, imagePaths, variant) {
+  const args = ["run", "--format", "json", "--pure", "--agent", "build"];
   const model = typeof opts?.modelConfig?.model === "string" ? opts.modelConfig.model.trim() : "";
   if (model && MODEL_RE.test(model)) args.push("--model", model);
-  const variant = reasoningVariant(opts?.modelConfig?.reasoning);
   if (variant) args.push("--variant", variant);
-  const dir = Array.isArray(opts?.dirs) ? opts.dirs.find(Boolean) : null;
-  if (dir) args.push("--dir", dir);
   for (const path of imagePaths) args.push("-f", path);
   return args;
+}
+
+function appendOpencodeText(state, part) {
+  const messageID = typeof part.messageID === "string" ? part.messageID : "";
+  if (messageID && state.finalMessageId !== messageID) {
+    state.finalMessageId = messageID;
+    state.finalParts = [];
+    state.final = "";
+  }
+  state.finalParts ??= [];
+  const id = typeof part.id === "string" ? part.id : `part-${state.finalParts.length}`;
+  const existing = state.finalParts.find((p) => p.id === id);
+  if (existing) existing.text = part.text;
+  else state.finalParts.push({ id, text: part.text });
+  state.final = state.finalParts.map((p) => p.text).join("");
 }
 
 function parseOpencodeLine(line, state) {
@@ -190,10 +334,10 @@ function parseOpencodeLine(line, state) {
     return null;
   }
   if (ev?.type === "text" && ev.part?.type === "text" && typeof ev.part.text === "string") {
-    // A text part is a complete assistant message segment. Keep the latest one:
-    // intermediate commentary before a tool call must not be concatenated into
-    // the final structured answer.
-    state.final = ev.part.text;
+    // A long answer can arrive as several text parts in the same assistant
+    // message. Concatenate those, but reset when a new message starts so
+    // intermediate commentary before a tool call is not included.
+    appendOpencodeText(state, ev.part);
     return { type: "item.updated", item: { type: "reasoning", text: "" } };
   }
   if (ev?.type === "reasoning" && typeof ev.part?.text === "string") {
@@ -228,7 +372,6 @@ function opencodeEnv(config, workDir) {
     OPENCODE_DISABLE_CLAUDE_CODE: "1",
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
     OPENCODE_DISABLE_AUTOUPDATE: "1",
-    OPENCODE_DISABLE_SHARE: "1",
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DB: join(workDir, "opencode.db"),
   };
@@ -236,14 +379,36 @@ function opencodeEnv(config, workDir) {
 
 // ── Command Code ────────────────────────────────────────────────────────────
 
+function commandCodeUserPermissions() {
+  // Command Code reads deny/ask rules from ~/.commandcode/settings.json. Keep
+  // those rules in the isolated HOME, but never copy hooks, MCP servers, or
+  // allow rules from the user's config.
+  const path = join(homedir(), ".commandcode", "settings.json");
+  if (!existsSync(path)) return null;
+  try {
+    const settings = JSON.parse(readFileSync(path, "utf8"));
+    const permissions = settings?.permissions;
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return null;
+    const kept = {};
+    for (const key of ["deny", "ask", "disableBypass"]) {
+      if (permissions[key] !== undefined) kept[key] = permissions[key];
+    }
+    return Object.keys(kept).length ? kept : null;
+  } catch {
+    return null;
+  }
+}
+
 function commandCodeHome(servers) {
   const home = mkdtempSync(join(tmpdir(), "laa-cmd-"));
   const configDir = join(home, ".commandcode");
   mkdirSync(configDir, { recursive: true });
+  mkdirSync(join(home, "workspace"), { recursive: true });
 
   // Keep the user's real login; sessions/hooks/settings stay isolated. A
   // symlink also lets the CLI refresh a token in place when needed.
-  const auth = join(homedir(), ".commandcode", "auth.json");
+  const realHome = homedir();
+  const auth = join(realHome, ".commandcode", "auth.json");
   if (existsSync(auth)) {
     const target = join(configDir, "auth.json");
     try {
@@ -252,7 +417,7 @@ function commandCodeHome(servers) {
       copyFileSync(auth, target);
     }
   }
-  const cache = join(homedir(), ".commandcode", "cache");
+  const cache = join(realHome, ".commandcode", "cache");
   if (existsSync(cache)) {
     try {
       symlinkSync(cache, join(configDir, "cache"), "dir");
@@ -261,14 +426,27 @@ function commandCodeHome(servers) {
     }
   }
 
+  const userPermissions = commandCodeUserPermissions();
+  if (userPermissions) {
+    writeFileSync(join(configDir, "settings.json"), JSON.stringify({ permissions: userPermissions }), {
+      mode: 0o600,
+    });
+  }
+
   const mcpServers = {};
   for (const [name, s] of Object.entries(servers)) {
+    const env = { ...(s.env && typeof s.env === "object" ? s.env : {}) };
+    // MCP servers run as children of the CLI. They should still see the real
+    // home (credentials, npm cache), even though the CLI itself uses the
+    // isolated HOME.
+    if (!env.HOME) env.HOME = realHome;
+    if (!env.USERPROFILE) env.USERPROFILE = realHome;
     mcpServers[name] = {
       transport: "stdio",
       enabled: true,
       command: s.command,
       args: Array.isArray(s.args) ? s.args : [],
-      ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+      env,
     };
   }
   if (Object.keys(mcpServers).length) {
@@ -282,33 +460,11 @@ function commandCodeEffort(reasoning) {
   if (!r) return null;
   if (["off", "none", "disabled", "minimal"].includes(r)) return "low";
   if (r === "xhigh" || r === "max") return "max";
+  if (!COMMANDCODE_EFFORT_RE.test(r)) return null;
   return r;
 }
 
-// Command Code's headless mode treats the current directory as the workspace.
-// `--add-dir` is not honoured there (1.88), so pick the narrowest directory that
-// contains everything the stage needs and run from it. Writes are still denied
-// by the CLI's default headless permission policy.
-function commonAncestor(paths) {
-  if (!paths.length) return null;
-  let common = paths[0];
-  for (const path of paths.slice(1)) {
-    while (path !== common && !path.startsWith(common + "/") && !path.startsWith(common + "\\")) {
-      const parent = dirname(common);
-      if (parent === common) break;
-      common = parent;
-    }
-  }
-  return common;
-}
-
-function commandCodeCwd(opts, imagePaths, fallback) {
-  const dirs = Array.isArray(opts?.dirs) ? opts.dirs.filter(Boolean) : [];
-  const candidates = [...dirs, ...imagePaths.map((p) => dirname(p))].map((p) => resolve(p));
-  return commonAncestor(candidates) || fallback;
-}
-
-function commandCodeArgs(opts) {
+function commandCodeArgs(opts, addDirs = []) {
   const args = [
     "-p",
     "--output-format",
@@ -318,6 +474,10 @@ function commandCodeArgs(opts) {
     "--safe-mode",
     "--no-auto-update",
     "--skip-onboarding",
+    // Read-only mode: the headless blocklist only covers a handful of tools,
+    // while plan mode denies writes/shell across the whole tool surface.
+    "--permission-mode",
+    "plan",
     // Taste learning writes `.commandcode/taste` into the workspace; a lesson
     // run must never leave files in the learner's space directory.
     "--config",
@@ -330,8 +490,14 @@ function commandCodeArgs(opts) {
   if (model && MODEL_RE.test(model)) args.push("--model", model);
   const effort = commandCodeEffort(opts?.modelConfig?.reasoning);
   if (effort) args.push("--effort", effort);
-  const dirs = Array.isArray(opts?.dirs) ? opts.dirs.filter(Boolean) : [];
-  for (const dir of dirs) args.push("--add-dir", dir);
+  const seen = new Set();
+  for (const dir of addDirs) {
+    if (typeof dir !== "string" || !dir.trim()) continue;
+    const value = resolve(dir.trim());
+    if (seen.has(value)) continue;
+    seen.add(value);
+    args.push("--add-dir", value);
+  }
   return args;
 }
 
@@ -405,32 +571,78 @@ function spawnOpts(cwd, env) {
   };
 }
 
-// Windows resolves npm's .cmd shims only through cmd.exe, and Node's `shell:
-// true` joins args without quoting (breaking paths with spaces). Build one
-// quoted command line instead. Prompts travel on stdin, so this only ever
-// carries app-controlled flags/paths.
+// Windows resolves npm's .cmd shims only through cmd.exe. Node's `shell: true`
+// is not safe for arbitrary arguments, so build a cmd.exe command line using
+// the escaping rules from cross-spawn (the same approach execa uses). Prompts
+// travel on stdin; this only ever carries app-controlled flags and paths.
+const CMD_META_RE = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeCmdCommand(value) {
+  return String(value).replace(CMD_META_RE, "^$1");
+}
+
+function escapeCmdArgument(value, doubleEscapeMetaChars) {
+  let arg = String(value);
+  // Backslashes before a quote (and at the end) must be doubled so the target
+  // program's argument parser sees the original characters.
+  arg = arg.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
+  arg = arg.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  arg = `"${arg}"`;
+  // Escape cmd.exe metacharacters, including %, so they are not expanded.
+  arg = arg.replace(CMD_META_RE, "^$1");
+  if (doubleEscapeMetaChars) arg = arg.replace(CMD_META_RE, "^$1");
+  return arg;
+}
+
+function windowsCommandLine(command, args) {
+  const isCmdShim = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(command);
+  return [escapeCmdCommand(command), ...args.map((arg) => escapeCmdArgument(arg, isCmdShim))].join(" ");
+}
+
 function spawnProcess(command, args, opts) {
   if (process.platform !== "win32") return spawn(command, args, opts);
-  const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
-  const line = [command, ...args].map(quote).join(" ");
-  return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${line}"`], {
+  const line = windowsCommandLine(command, args);
+  return spawn(process.env.ComSpec || process.env.comspec || "cmd.exe", ["/d", "/s", "/c", `"${line}"`], {
     ...opts,
     windowsVerbatimArguments: true,
   });
 }
 
 /** Spawn a CLI, resolve with its stdout (used for model listings). */
-function runCapture(command, args, { timeoutMs = 60_000, env = {} } = {}) {
+function runCapture(command, args, { timeoutMs = 60_000, env = {}, stdoutFile = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(command, args, spawnOpts(undefined, env));
+    let outFd = null;
+    let child;
+    try {
+      const options = spawnOpts(undefined, env);
+      if (stdoutFile) {
+        // Some CLIs (OpenCode's debug config) can exit before a pipe drains a
+        // large JSON document; a file descriptor makes the writes blocking and
+        // avoids a truncated config.
+        outFd = openSync(stdoutFile, "w", 0o600);
+        options.stdio = ["pipe", outFd, "pipe"];
+      }
+      child = spawnProcess(command, args, options);
+    } catch (e) {
+      if (outFd !== null) closeSync(outFd);
+      reject(e);
+      return;
+    }
     let out = "";
     let err = "";
+    let fdOpen = outFd !== null;
+    const closeOut = () => {
+      if (!fdOpen) return;
+      fdOpen = false;
+      closeSync(outFd);
+    };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
+      closeOut();
       reject(new Error(`${command} timed out`));
     }, timeoutMs);
     timer.unref?.();
-    child.stdout.on("data", (c) => {
+    child.stdout?.on("data", (c) => {
       out += c.toString();
     });
     child.stderr.on("data", (c) => {
@@ -439,10 +651,12 @@ function runCapture(command, args, { timeoutMs = 60_000, env = {} } = {}) {
     child.stdin.on("error", () => {});
     child.on("error", (e) => {
       clearTimeout(timer);
+      closeOut();
       reject(e);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      closeOut();
       if (code === 0) resolve(out);
       else reject(new Error(`${command} exited with ${code}: ${tail(err)}`));
     });
@@ -576,22 +790,33 @@ function sliceJson(text, start) {
 
 /** Pull the first JSON value out of a reply that may have prose/fences. */
 function extractJsonText(text) {
-  const candidates = [];
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) candidates.push(fence[1].trim());
-  for (const opener of ["{", "["]) {
-    const start = text.indexOf(opener);
-    if (start < 0) continue;
-    const sliced = sliceJson(text, start);
+  const raw = String(text ?? "");
+  // Try the whole reply first: this handles a JSON string containing a fenced
+  // block, and a bare array/object without heuristics touching it.
+  const candidates = [raw.trim()];
+  for (const match of raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)) {
+    candidates.push(match[1].trim());
+  }
+  // Then balanced values. Scanning left-to-right tries the outer object before
+  // nested fragments; the first invalid candidate (e.g. a `{brace}` in prose)
+  // is skipped and the next opener is tried.
+  const starts = [];
+  for (let i = 0; i < raw.length && starts.length < 200; i += 1) {
+    if (raw[i] === "{" || raw[i] === "[") starts.push(i);
+  }
+  for (const start of starts) {
+    const sliced = sliceJson(raw, start);
     if (sliced) candidates.push(sliced);
   }
-  candidates.push(text.trim());
-  for (const c of candidates) {
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
     try {
-      return JSON.stringify(JSON.parse(c));
+      return JSON.stringify(JSON.parse(candidate));
     } catch {}
   }
-  throw new Error(`response did not contain valid JSON: ${text.slice(0, 200)}`);
+  throw new Error(`response did not contain valid JSON: ${raw.slice(0, 200)}`);
 }
 
 // ── Thread factory ──────────────────────────────────────────────────────────
@@ -616,19 +841,29 @@ export function createCliThread(backend, opts = {}) {
     const servers = mcpServersFor(opts);
     const state = { backend, final: "" };
     const text = withSchema(prompt, runOpts.outputSchema);
-    const dirs = Array.isArray(opts.dirs) ? opts.dirs.filter(Boolean) : [];
-    for (const path of imagePaths) dirs.push(dirname(path));
+    const spaceDirs = Array.isArray(opts.dirs) ? opts.dirs.filter(Boolean) : [];
 
     if (backend === "opencode") {
       const workRoot = mkdtempSync(join(tmpdir(), "laa-oc-"));
       try {
-        const config = opencodeConfig(servers, await opencodeGlobalMcpNames());
+        const version = await opencodeVersion();
+        if (version.major >= 2) {
+          throw new Error(
+            `OpenCode ${version.raw || "v2"} is not supported yet. Install OpenCode 1.x or choose another agent.`
+          );
+        }
+        const staged = stageImages(workRoot, imagePaths, text);
+        const config = opencodeConfig(servers, await opencodeGlobalMcpNames(), spaceDirs);
+        const variant = reasoningVariant(opts?.modelConfig?.reasoning, opts?.modelConfig?.model);
         yield* runCliTurn({
           command: commandFor("opencode"),
-          args: opencodeArgs(opts, imagePaths),
+          args: opencodeArgs(opts, staged.paths, variant),
           env: opencodeEnv(config, workRoot),
-          cwd: dirs[0] || process.cwd(),
-          prompt: text,
+          // Run in an empty temp directory: the user's project config is
+          // disabled, external reads are limited to the attached dirs, and
+          // there is no project-local AGENTS.md/.opencode config to inherit.
+          cwd: workRoot,
+          prompt: staged.text,
           signal: runOpts.signal,
           state,
           parseLine: parseOpencodeLine,
@@ -640,13 +875,17 @@ export function createCliThread(backend, opts = {}) {
     } else {
       const home = commandCodeHome(servers);
       try {
-        const args = commandCodeArgs(opts);
+        // A temp workspace keeps Command Code away from `/`, $HOME, and any
+        // project `.mcp.json`. The real space dirs are granted with --add-dir.
+        const cwd = join(home, "workspace");
+        const staged = stageImages(cwd, imagePaths, text);
+        const args = commandCodeArgs(opts, spaceDirs);
         yield* runCliTurn({
           command: commandFor("commandcode"),
           args,
           env: commandCodeEnv(home),
-          cwd: commandCodeCwd(opts, imagePaths, home),
-          prompt: text,
+          cwd,
+          prompt: staged.text,
           signal: runOpts.signal,
           state,
           parseLine: parseCommandCodeLine,
@@ -749,9 +988,26 @@ export async function listCliModels(backend) {
   return { models: [] };
 }
 
-/** Test hook: forget cached catalogs. */
+/** Test hook: forget cached catalogs and discovery results. */
 export function resetCliCaches() {
   opencodeModels = null;
   commandCodeModels = null;
   opencodeGlobalMcp = null;
+  opencodeGlobalMcpPending = null;
+  opencodeVersionCache = null;
 }
+
+/** Internal hooks for the sidecar transport tests. */
+export const __test = {
+  parseOpencodeLine,
+  parseCommandCodeLine,
+  extractJsonText,
+  opencodePermission,
+  opencodeConfig,
+  opencodeArgs,
+  opencodeGlobalMcpNames,
+  reasoningVariant,
+  commandCodeEffort,
+  commandCodeArgs,
+  windowsCommandLine,
+};

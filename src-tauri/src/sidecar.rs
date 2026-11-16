@@ -149,6 +149,14 @@ pub fn command_path_if_found(name: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// Fast lookup for UI availability checks. Unlike `command_path`, this never
+/// shells out per missing binary; the login-shell PATH is already cached in
+/// `expanded_path`.
+pub fn command_path_if_found_fast(name: &str) -> Option<PathBuf> {
+    let path = expanded_path();
+    find_executable_in_path(name, &path)
+}
+
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|p| p == &path) {
         paths.push(path);

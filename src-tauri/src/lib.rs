@@ -4298,10 +4298,10 @@ fn check_agent_availability(state: tauri::State<'_, Arc<SettingsState>>) -> Agen
     // An agent disabled in settings is reported unavailable, which hides it
     // from pickers and suggestions everywhere.
     AgentAvailability {
-        claude: cli_present("claude") && state.agent_enabled("claude"),
-        codex: cli_present("codex") && state.agent_enabled("codex"),
-        opencode: cli_present("opencode") && state.agent_enabled("opencode"),
-        commandcode: cli_present("commandcode") && state.agent_enabled("commandcode"),
+        claude: state.agent_enabled("claude") && cli_present("claude"),
+        codex: state.agent_enabled("codex") && cli_present("codex"),
+        opencode: state.agent_enabled("opencode") && cli_present("opencode"),
+        commandcode: state.agent_enabled("commandcode") && cli_present("commandcode"),
     }
 }
 

@@ -82,7 +82,13 @@ pub fn cli_path(agent: &AgentSpec) -> Option<PathBuf> {
 }
 
 pub fn available(id: &str) -> bool {
-    spec(id).and_then(cli_path).is_some()
+    let Some(agent) = spec(id) else { return false };
+    if sidecar::command_path_if_found_fast(agent.cli).is_some() {
+        return true;
+    }
+    agent
+        .alt_cli
+        .is_some_and(|alt| sidecar::command_path_if_found_fast(alt).is_some())
 }
 
 /// Whether the agent can generate illustrations itself.
