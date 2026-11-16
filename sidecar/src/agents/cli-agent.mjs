@@ -144,7 +144,9 @@ function redactMcpEnv(servers) {
     for (const [key, value] of Object.entries(values)) {
       const varName = `LAA_OPENCODE_MCP_${index}_${String(key).replace(/[^A-Za-z0-9_]/g, "_")}`;
       index += 1;
-      env[varName] = String(value);
+      // OpenCode substitutes {env:...} into the config *text* before parsing
+      // the JSON, so quotes/backslashes/newlines must already be JSON-escaped.
+      env[varName] = JSON.stringify(String(value)).slice(1, -1);
       redacted[key] = `{env:${varName}}`;
     }
     safe[name] = Object.keys(redacted).length ? { ...server, env: redacted } : server;

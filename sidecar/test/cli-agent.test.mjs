@@ -179,6 +179,12 @@ test("MCP environment values are redacted from the OpenCode config", () => {
   assert.equal(servers.custom.env.OTHER, "{env:LAA_OPENCODE_MCP_1_OTHER}");
   assert.equal(env.LAA_OPENCODE_MCP_0_API_KEY, "secret");
   assert.equal(env.LAA_OPENCODE_MCP_1_OTHER, "v");
+
+  // OpenCode injects the env value into the config text before JSON parsing.
+  const tricky = 'a"b\\c\nd';
+  const redacted = __test.redactMcpEnv({ custom: { command: "true", env: { VALUE: tricky } } });
+  const json = `{"value":"${redacted.env.LAA_OPENCODE_MCP_0_VALUE}"}`;
+  assert.equal(JSON.parse(json).value, tricky);
 });
 
 test("OpenCode permission is a deny-first allowlist", () => {
