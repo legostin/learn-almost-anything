@@ -163,7 +163,9 @@ commandcode -p --output-format json
 Codex SDK exposes, so `pipeline.mjs` needs no per-provider branching. When a
 stage requests a JSON Schema, the runner appends the schema to the prompt and
 extracts/validates the JSON before returning it (these CLIs have no native
-structured-output mode).
+structured-output mode). Extraction keeps the last outermost schema-valid
+value, so a corrected answer that follows a long draft wins without selecting
+nested objects or citation fragments.
 
 Isolation matches the other backends — the user's personal agent setup must
 never leak into a lesson run:
@@ -206,6 +208,12 @@ never leak into a lesson run:
   `--safe-mode --no-skills --no-session --no-auto-update --skip-onboarding`
   keep it non-interactive, and `taste-learning=false` prevents files being
   written into the learner's space. The temp home is deleted after the run.
+
+Every CLI child is its own process group. A detached reaper kills that group if
+the sidecar disappears (including SIGKILL), and each turn has a 30-minute hard
+ceiling, so a dead or wedged parent cannot leave a CLI/MCP tree running
+indefinitely. Normal completion and abort still use the same process-tree kill,
+with `taskkill /T /F` on Windows.
 
 ---
 

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createCliThread, resetCliCaches, __test } from "../src/agents/cli-agent.mjs";
 
@@ -84,6 +86,9 @@ process.stdin.on("end", () => {
 );
 chmodSync(commandCodeStub, 0o755);
 
+const hangScript = join(root, "hang.mjs");
+writeFileSync(hangScript, 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);\n');
+
 const originalOpencode = process.env.LEARN_ANYTHING_OPENCODE_CLI;
 const originalCommandCode = process.env.LEARN_ANYTHING_COMMANDCODE_CLI;
 const originalRecord = process.env.LAA_TEST_RECORD;
@@ -136,6 +141,21 @@ test("extractJsonText handles whole values, prose, fences, and arrays", () => {
   assert.equal(
     __test.extractJsonText("Per the docs [1], here: {\"a\":1}", { type: "object" }),
     '{"a":1}'
+  );
+});
+
+test("extractJsonText prefers the last top-level value and keeps outer objects", () => {
+  assert.equal(
+    __test.extractJsonText(
+      'Draft:\n```json\n{"answer":"draft","padding":"xxxxxxxx"}\n```\nCorrection:\n```json\n{"answer":"final"}\n```',
+      { type: "object" }
+    ),
+    '{"answer":"final"}'
+  );
+  assert.equal(__test.extractJsonText('First {"a":1} then {"b":2}'), '{"b":2}');
+  assert.equal(
+    __test.extractJsonText('Here: {"outer":{"inner":1,"deep":{"x":2}}} trailing', { type: "object" }),
+    '{"outer":{"inner":1,"deep":{"x":2}}}'
   );
 });
 
@@ -322,4 +342,65 @@ test("Windows command lines escape cmd.exe metacharacters", () => {
   ]);
   assert.match(line, /\^%PATH\^%/);
   assert.match(line, /\^ /);
+});
+
+
+test("parent-death reaper kills a detached CLI group", async () => {
+  const reaperPath = fileURLToPath(new URL("../src/agents/reaper.mjs", import.meta.url));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const parent = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  let reaper = null;
+  try {
+    await new Promise((resolve) => parent.once("exit", resolve));
+    reaper = spawn(process.execPath, [reaperPath, String(parent.pid), String(child.pid)], {
+      stdio: "ignore",
+    });
+    const deadline = Date.now() + 5_000;
+    let alive = true;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(child.pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(alive, false, "reaper should kill the child group");
+  } finally {
+    reaper?.kill("SIGKILL");
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+});
+
+test("CLI turns enforce an absolute runtime cap", async () => {
+  const state = { backend: "opencode", final: "" };
+  const events = __test.runCliTurn({
+    command: process.execPath,
+    args: [hangScript],
+    env: {},
+    cwd: root,
+    prompt: "",
+    state,
+    parseLine: () => null,
+    label: "Test",
+    maxRuntimeMs: 120,
+  });
+  await assert.rejects(async () => {
+    for await (const _event of events) {
+      /* drain */
+    }
+  }, /runtime limit/);
 });

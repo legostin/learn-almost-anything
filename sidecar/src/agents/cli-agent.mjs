@@ -35,6 +35,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import { braveStdioServer } from "../lib/brave.mjs";
 import {
@@ -45,6 +46,9 @@ import {
 
 // A headless agent that prints nothing for this long is treated as hung.
 const SILENT_KILL_MS = 10 * 60 * 1000;
+// A hard ceiling for every turn; even a wedged orphan cannot run forever.
+const MAX_RUN_MS = 30 * 60 * 1000;
+const REAPER_PATH = fileURLToPath(new URL("./reaper.mjs", import.meta.url));
 const STDERR_TAIL = 4 * 1024;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/;
 const REASONING_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
@@ -709,11 +713,31 @@ function spawnProcess(command, args, opts) {
   });
 }
 
+/** Start a detached watchdog that kills the CLI group if this sidecar dies. */
+function startParentReaper(child) {
+  if (!child?.pid) return null;
+  try {
+    const reaper = spawn(process.execPath, [REAPER_PATH, String(process.pid), String(child.pid)], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    reaper.on("error", (error) => dbg("parent-death reaper failed:", String(error?.message ?? error)));
+    reaper.unref();
+    return reaper;
+  } catch (error) {
+    // The hard runtime cap still bounds the child if the watchdog cannot start.
+    dbg("parent-death reaper could not start:", String(error?.message ?? error));
+    return null;
+  }
+}
+
 // Windows kill() only terminates cmd.exe, leaving the CLI and its MCP children
 // alive. taskkill /T /F takes down the whole tree. On POSIX signal the process
-// group leader; escalation sends SIGKILL.
+// group leader; escalation sends SIGKILL. Do not rely on the leader still being
+// alive: it may have exited while MCP grandchildren remain in its group.
 function killProcessTree(child, force = false) {
-  if (!child || child.exitCode !== null) return;
+  if (!child) return;
   if (process.platform === "win32" && child.pid) {
     try {
       const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -723,7 +747,11 @@ function killProcessTree(child, force = false) {
       killer.on("error", () => {});
       killer.unref?.();
     } catch {
-      child.kill();
+      try {
+        child.kill(force ? "SIGKILL" : "SIGTERM");
+      } catch {
+        /* already gone */
+      }
     }
     return;
   }
@@ -735,7 +763,13 @@ function killProcessTree(child, force = false) {
       /* fall back to the direct child */
     }
   }
-  child.kill(force ? "SIGKILL" : "SIGTERM");
+  if (child.exitCode === null) {
+    try {
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 function cleanupDir(dir) {
@@ -763,6 +797,7 @@ function runCapture(command, args, { timeoutMs = 60_000, env = {}, stdoutFile = 
         options.stdio = ["pipe", outFd, "pipe"];
       }
       child = spawnProcess(command, args, options);
+      startParentReaper(child);
     } catch (e) {
       if (outFd !== null) closeSync(outFd);
       reject(e);
@@ -808,16 +843,35 @@ function runCapture(command, args, { timeoutMs = 60_000, env = {}, stdoutFile = 
  * Run one headless CLI turn, yielding Codex-shaped progress events and leaving
  * the final assistant text on `state.final`.
  */
-async function* runCliTurn({ command, args, env, cwd, prompt, signal, state, parseLine, label }) {
+async function* runCliTurn({
+  command,
+  args,
+  env,
+  cwd,
+  prompt,
+  signal,
+  state,
+  parseLine,
+  label,
+  maxRuntimeMs = MAX_RUN_MS,
+}) {
   dbg("spawn", command, JSON.stringify(args), "cwd=", cwd);
   const child = spawnProcess(command, args, spawnOpts(cwd, env));
+  startParentReaper(child);
   const rl = createInterface({ input: child.stdout });
   let stderr = "";
   let exit = null;
   let spawnError = null;
   let silent = false;
+  let timedOut = false;
 
   let watchdog = null;
+  const maxTimer = setTimeout(() => {
+    timedOut = true;
+    killProcessTree(child);
+    setTimeout(() => killProcessTree(child, true), 3_000).unref?.();
+  }, maxRuntimeMs);
+  maxTimer.unref?.();
   const armWatchdog = () => {
     if (watchdog) clearTimeout(watchdog);
     watchdog = setTimeout(() => {
@@ -869,11 +923,16 @@ async function* runCliTurn({ command, args, env, cwd, prompt, signal, state, par
     });
   } finally {
     if (watchdog) clearTimeout(watchdog);
+    clearTimeout(maxTimer);
     signal?.removeEventListener("abort", onAbort);
     rl.close();
-    if (child.exitCode === null) killProcessTree(child, true);
+    // Even when the leader exited normally, MCP grandchildren can outlive it.
+    killProcessTree(child, true);
   }
 
+  if (timedOut) {
+    throw new Error(`${label} exceeded its ${Math.round(maxRuntimeMs / 60000)} minute runtime limit`);
+  }
   if (silent) {
     throw new Error(`${label} produced no output for ${Math.round(SILENT_KILL_MS / 60000)} minutes`);
   }
@@ -947,45 +1006,68 @@ function schemaTypes(schema) {
 /** Pull the JSON value out of a reply that may have prose, fences, or citations. */
 function extractJsonText(text, schema) {
   const raw = String(text ?? "");
+  const candidates = [];
+  const push = (value, start) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const offset = value.indexOf(trimmed);
+    candidates.push({
+      text: trimmed,
+      start: start + Math.max(offset, 0),
+      end: start + Math.max(offset, 0) + trimmed.length,
+    });
+  };
+
   // Try the whole reply first: this handles a JSON string containing a fenced
   // block, and a bare array/object without heuristics touching it.
-  const candidates = [raw.trim()];
+  push(raw, 0);
   for (const match of raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)) {
-    candidates.push(match[1].trim());
+    const start = match.index + Math.max(match[0].indexOf(match[1]), 0);
+    push(match[1], start);
   }
-  // Then balanced values. Scanning left-to-right tries the outer object before
-  // nested fragments; invalid candidates (a `{brace}` or citation `[1]` in
-  // prose) are skipped.
+  // Then balanced values. Invalid candidates (a `{brace}` or citation `[1]`
+  // in prose) are skipped.
   const starts = [];
   for (let i = 0; i < raw.length && starts.length < 200; i += 1) {
     if (raw[i] === "{" || raw[i] === "[") starts.push(i);
   }
   for (const start of starts) {
     const sliced = sliceJson(raw, start);
-    if (sliced) candidates.push(sliced);
+    if (sliced) push(sliced, start);
   }
+
   const allowedTypes = schemaTypes(schema);
-  const seen = new Set();
-  let best = null;
+  const valid = [];
   for (const candidate of candidates) {
-    if (!candidate || seen.has(candidate)) continue;
-    seen.add(candidate);
     let parsed;
     try {
-      parsed = JSON.parse(candidate);
+      parsed = JSON.parse(candidate.text);
     } catch {
       continue;
     }
     if (allowedTypes && allowedTypes.size > 0 && !allowedTypes.has(jsonValueType(parsed))) {
       continue;
     }
-    const normalized = JSON.stringify(parsed);
-    // Prefer the largest matching value. This skips short valid fragments in
-    // prose (for example a citation `[1]`) and keeps an outer object over a
-    // nested one.
-    if (!best || normalized.length > best.length) best = normalized;
+    valid.push({ ...candidate, normalized: JSON.stringify(parsed) });
   }
-  if (best) return best;
+
+  // Drop values nested inside another valid value (for example an inner object
+  // inside the real outer object). Among the remaining top-level values, take
+  // the last one: corrections follow drafts, so the final answer is last.
+  const outermost = valid.filter(
+    (candidate) =>
+      !valid.some(
+        (other) =>
+          other !== candidate &&
+          other.start <= candidate.start &&
+          other.end >= candidate.end &&
+          (other.start < candidate.start || other.end > candidate.end)
+      )
+  );
+  if (outermost.length > 0) {
+    outermost.sort((a, b) => a.start - b.start || a.end - b.end);
+    return outermost[outermost.length - 1].normalized;
+  }
   throw new Error(`response did not contain valid JSON: ${raw.slice(0, 200)}`);
 }
 
@@ -1201,4 +1283,6 @@ export const __test = {
   commandCodeArgs,
   commandCodeAllowRules,
   windowsCommandLine,
+  runCliTurn,
+  MAX_RUN_MS,
 };
