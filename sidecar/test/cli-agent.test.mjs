@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createCliThread, resetCliCaches, __test } from "../src/agents/cli-agent.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "laa-cli-test-"));
+const realTmp = realpathSync(tmpdir());
 const opencodeStub = join(root, "opencode");
 const commandCodeStub = join(root, "commandcode");
 const recordPath = join(root, "commandcode-record.json");
@@ -159,6 +160,32 @@ test("extractJsonText prefers the last top-level value and keeps outer objects",
   );
 });
 
+test("extractJsonText rejects trailing examples that miss required keys", () => {
+  const objectSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { title: { type: "string" }, items: { type: "array" } },
+    required: ["title", "items"],
+  };
+  assert.equal(
+    __test.extractJsonText(
+      '{"title":"Real answer","items":[1,2]}\nNote: each item uses the shape {"id": 1}.',
+      objectSchema
+    ),
+    '{"title":"Real answer","items":[1,2]}'
+  );
+
+  const untypedSchema = {
+    additionalProperties: false,
+    properties: { title: { type: "string" } },
+    required: ["title"],
+  };
+  assert.equal(
+    __test.extractJsonText('{"title":"Real answer"}\nSources: [1], [2]', untypedSchema),
+    '{"title":"Real answer"}'
+  );
+});
+
 test("OpenCode text parts in one message are concatenated, new messages reset", () => {
   const state = { backend: "opencode", final: "" };
   __test.parseOpencodeLine(
@@ -211,7 +238,7 @@ test("OpenCode permission is a deny-first allowlist", () => {
   const permission = __test.opencodePermission(
     { context7: {}, "my-server": {} },
     ["/data/space"],
-    ["/tmp/opencode.json"]
+    [join(realTmp, "opencode.json")]
   );
   assert.equal(permission["**"], "deny");
   assert.equal(permission.edit, undefined);
@@ -222,7 +249,18 @@ test("OpenCode permission is a deny-first allowlist", () => {
   assert.equal(permission["read*"]["*.env"], "deny");
   assert.equal(permission["external_directory*"]["*"], "deny");
   assert.equal(permission["external_directory*"]["/data/space/*"], "allow");
-  assert.equal(permission["read*"]["/tmp/opencode.json"], "deny");
+  assert.equal(permission["read*"][join(realTmp, "opencode.json")], "deny");
+});
+
+test("OpenCode permission resolves symlinked roots and protected paths", { skip: process.platform === "win32" }, () => {
+  const real = join(root, "real-space");
+  const link = join(root, "link-space");
+  mkdirSync(real, { recursive: true });
+  symlinkSync(real, link);
+  const resolved = realpathSync(real);
+  const permission = __test.opencodePermission({}, [link], [join(link, "opencode.json")]);
+  assert.equal(permission["external_directory*"][`${resolved}/*`], "allow");
+  assert.equal(permission["read*"][join(resolved, "opencode.json")], "deny");
 });
 
 test("OpenCode config disables personal MCP and defines a run-only agent", () => {
@@ -231,14 +269,15 @@ test("OpenCode config disables personal MCP and defines a run-only agent", () =>
     ["personal"],
     [],
     "laa-test",
-    ["/tmp/opencode.json"]
+    [join(realTmp, "opencode.json")]
   );
   assert.equal(config.mcp.personal.enabled, false);
   assert.equal(config.permission["**"], "deny");
   assert.equal(config.agent["laa-test"].permission["**"], "deny");
   assert.equal(config.agent["laa-test"].permission["context7_*"], "allow");
-  assert.equal(config.agent["laa-test"].permission["read*"]["/tmp/opencode.json"], "deny");
-  assert.equal(config.agent.build, undefined);
+  assert.equal(config.agent["laa-test"].permission["read*"][join(realTmp, "opencode.json")], "deny");
+  assert.equal(config.agent.build.permission["**"], "deny");
+  assert.deepEqual(config.agent.build.permission, config.agent["laa-test"].permission);
 });
 
 test("OpenCode MCP discovery fails closed and retries", async () => {
@@ -287,7 +326,7 @@ test("OpenCode transport concatenates split JSON and runs in a temp cwd", async 
   assert.equal(result.finalResponse, '{"answer":"hello"}');
 
   const record = JSON.parse(readFileSync(opencodeRecordPath, "utf8"));
-  assert.ok(record.cwd.startsWith(tmpdir()));
+  assert.ok(record.cwd.startsWith(realTmp));
   assert.ok(!record.args.includes("--dir"));
   assert.match(record.args[record.args.indexOf("--agent") + 1], /^laa-ro-/);
 });
@@ -326,7 +365,7 @@ test("Command Code transport uses a temp workspace and grants real dirs", async 
   const record = JSON.parse(readFileSync(recordPath, "utf8"));
   assert.notEqual(record.cwd, "/");
   assert.notEqual(record.cwd, homedir());
-  assert.ok(record.cwd.startsWith(tmpdir()));
+  assert.ok(record.cwd.startsWith(realTmp));
   assert.ok(record.args.includes(space));
   assert.ok(!record.args.includes(imageDir));
   assert.ok(record.args.includes("--permission-mode"));

@@ -26,6 +26,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -165,6 +166,21 @@ function mcpPermissionName(name) {
   return String(name).replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
+// OpenCode works with resolved paths. On macOS, for example, /var is a symlink
+// to /private/var; a deny written against the symlinked path would not match.
+function canonicalPath(path) {
+  const value = String(path);
+  try {
+    return realpathSync(value);
+  } catch {
+    try {
+      return join(realpathSync(dirname(value)), basename(value));
+    } catch {
+      return resolve(value);
+    }
+  }
+}
+
 // The build agent's permission rules are appended after the user's global
 // rules, so these are the last matching rules and cannot be overridden by a
 // global `bash: allow` or a wildcard allow. The first rule is the deny-all;
@@ -192,7 +208,8 @@ function opencodePermission(servers, dirs, protectedPaths = []) {
   // and live outside the cwd; deny them explicitly even if a space directory
   // happens to cover the temp directory.
   for (const path of protectedPaths) {
-    const pattern = process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+    const resolved = canonicalPath(path);
+    const pattern = process.platform === "win32" ? resolved.replace(/\\/g, "/") : resolved;
     permission["read*"][pattern] = "deny";
   }
 
@@ -205,7 +222,7 @@ function opencodePermission(servers, dirs, protectedPaths = []) {
   // Attached images are copied into the temporary cwd, so they need no root.
   const roots = new Set();
   for (const dir of dirs) {
-    if (typeof dir === "string" && dir.trim()) roots.add(resolve(dir.trim()));
+    if (typeof dir === "string" && dir.trim()) roots.add(canonicalPath(dir.trim()));
   }
   if (roots.size === 0) {
     permission["external_directory*"] = "deny";
@@ -320,12 +337,18 @@ function opencodeConfig(servers, disabledNames, dirs, agentName, protectedPaths 
       ...(s.env && Object.keys(s.env).length ? { environment: s.env } : {}),
     };
   }
+  const permission = opencodePermission(servers, dirs, protectedPaths);
   return {
     // The top-level rules are a fallback if OpenCode cannot resolve the agent
     // (it falls back to the default agent with a warning). The run-scoped agent
-    // is the normal path and cannot collide with a user-defined agent.
-    permission: opencodePermission(servers, dirs, protectedPaths),
-    agent: { [agentName]: { mode: "primary", permission: opencodePermission(servers, dirs, protectedPaths) } },
+    // is the normal path and cannot collide with a user-defined agent. Apply
+    // the same rules to the default `build` agent so a global
+    // `agent.build.permission` cannot win on that fallback path.
+    permission,
+    agent: {
+      [agentName]: { mode: "primary", permission },
+      build: { permission },
+    },
     mcp,
   };
 }
@@ -1003,6 +1026,21 @@ function schemaTypes(schema) {
   return null;
 }
 
+// Top-level required keys are enough to reject trailing examples. Extra keys
+// are intentionally allowed: some CLIs add harmless fields the schema forbids,
+// and rejecting those would turn a usable answer into a parse failure.
+function schemaConforms(value, schema) {
+  const allowedTypes = schemaTypes(schema);
+  if (allowedTypes && allowedTypes.size > 0 && !allowedTypes.has(jsonValueType(value))) {
+    return false;
+  }
+  if (Array.isArray(schema?.required) && schema.required.length > 0) {
+    if (jsonValueType(value) !== "object") return false;
+    return schema.required.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  }
+  return true;
+}
+
 /** Pull the JSON value out of a reply that may have prose, fences, or citations. */
 function extractJsonText(text, schema) {
   const raw = String(text ?? "");
@@ -1048,26 +1086,31 @@ function extractJsonText(text, schema) {
     if (allowedTypes && allowedTypes.size > 0 && !allowedTypes.has(jsonValueType(parsed))) {
       continue;
     }
-    valid.push({ ...candidate, normalized: JSON.stringify(parsed) });
+    valid.push({ ...candidate, normalized: JSON.stringify(parsed), conforms: schemaConforms(parsed, schema) });
   }
 
   // Drop values nested inside another valid value (for example an inner object
   // inside the real outer object). Among the remaining top-level values, take
   // the last one: corrections follow drafts, so the final answer is last.
-  const outermost = valid.filter(
-    (candidate) =>
-      !valid.some(
-        (other) =>
-          other !== candidate &&
-          other.start <= candidate.start &&
-          other.end >= candidate.end &&
-          (other.start < candidate.start || other.end > candidate.end)
-      )
-  );
-  if (outermost.length > 0) {
+  // Prefer schema-conforming values so a trailing example cannot beat the real
+  // answer; fall back to any type-valid value if the model omitted a key.
+  const lastOutermost = (items) => {
+    const outermost = items.filter(
+      (candidate) =>
+        !items.some(
+          (other) =>
+            other !== candidate &&
+            other.start <= candidate.start &&
+            other.end >= candidate.end &&
+            (other.start < candidate.start || other.end > candidate.end)
+        )
+    );
+    if (outermost.length === 0) return null;
     outermost.sort((a, b) => a.start - b.start || a.end - b.end);
     return outermost[outermost.length - 1].normalized;
-  }
+  };
+  const answer = lastOutermost(valid.filter((candidate) => candidate.conforms)) ?? lastOutermost(valid);
+  if (answer) return answer;
   throw new Error(`response did not contain valid JSON: ${raw.slice(0, 200)}`);
 }
 
