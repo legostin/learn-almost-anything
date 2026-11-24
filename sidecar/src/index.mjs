@@ -9,26 +9,35 @@
 //
 // Stdout = protocol channel only. All diagnostics go to stderr.
 //
-// Backend selection: methods that hit an LLM accept `backend: "claude" | "codex"`
-// in params. Defaults to "claude". The dispatcher routes to the right module.
+// Backend selection: methods that hit an LLM accept `backend` in params
+// ("claude" | "codex" | "opencode" | "commandcode"). Defaults to "claude".
+// The dispatcher routes to the right module and runs the handler inside a
+// per-request backend context (see agents/backends.mjs).
 
 import { createInterface } from "node:readline";
 import process from "node:process";
 
 import * as claude from "./agents/claude.mjs";
 import * as codex from "./agents/codex.mjs";
+import * as opencode from "./agents/opencode.mjs";
+import * as commandcode from "./agents/commandcode.mjs";
+import { withBackend } from "./agents/backends.mjs";
 import * as devlog from "./lib/devlog.mjs";
 import { probeMcp } from "./lib/mcp-probe.mjs";
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 const log = (...args) => process.stderr.write("[sidecar] " + args.join(" ") + "\n");
 
-const agents = { claude, codex };
+const agents = { claude, codex, opencode, commandcode };
 
-function pickAgent(params) {
+function backendName(params) {
   const name = params?.backend ?? "claude";
   if (!agents[name]) throw new Error(`unknown backend: ${name}`);
-  return agents[name];
+  return name;
+}
+
+function pickAgent(params) {
+  return agents[backendName(params)];
 }
 
 // Best-effort human-readable course/section labels for the dev log. Params
@@ -126,6 +135,13 @@ rl.on("line", async (line) => {
     send({ id, error: `unknown method: ${method}` });
     return;
   }
+  let backend;
+  try {
+    backend = backendName(params);
+  } catch (e) {
+    send({ id, error: String(e?.message ?? e) });
+    return;
+  }
   inflight++;
   const ctx = {
     progress(payload) {
@@ -144,7 +160,9 @@ rl.on("line", async (line) => {
     const result =
       method === "ping"
         ? await handler(params ?? {}, ctx)
-        : await devlog.runRequest(meta, () => handler(params ?? {}, ctx));
+        : await withBackend(backend, () =>
+            devlog.runRequest(meta, () => handler(params ?? {}, ctx))
+          );
     send({ id, result });
   } catch (e) {
     log("handler error for", method, "—", e?.stack || String(e));

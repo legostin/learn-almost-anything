@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent sidecar for Learn (Almost) Anything — JSON-RPC over stdio, Claude Agent SDK + Codex SDK.",
+  "description": "Agent sidecar for Learn (Almost) Anything — JSON-RPC over stdio, Claude Agent SDK + Codex/OpenCode/Command Code transports.",
   "keywords": [
     "claude-agent-sdk",
     "codex-sdk",
+    "opencode",
+    "command-code",
     "mcp",
     "ai-agents",
     "sidecar",
@@ -16,7 +18,8 @@
   "homepage": "https://github.com/legostin/learn-almost-anything",
   "main": "src/index.mjs",
   "scripts": {
-    "start": "node src/index.mjs"
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0",

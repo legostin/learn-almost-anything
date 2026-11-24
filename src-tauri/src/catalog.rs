@@ -455,6 +455,13 @@ fn write_package_to_course(
     catalog_server_url: Option<&str>,
 ) -> Result<(), String> {
     let title = package_title(package);
+    let imported_agent = if crate::agents::is_known(&package.course.agent) {
+        package.course.agent.as_str()
+    } else {
+        // Preserve the old catalog-import fallback for packages written by
+        // versions that only knew claude/codex.
+        "codex"
+    };
     db::upsert_imported_course(
         conn,
         course_id,
@@ -462,11 +469,7 @@ fn write_package_to_course(
         Some(&title),
         &package.course.language,
         db::normalize_course_format(Some(&package.course.course_format)),
-        if package.course.agent == "claude" {
-            "claude"
-        } else {
-            "codex"
-        },
+        imported_agent,
         "ready",
         package.course.created_at,
         now,

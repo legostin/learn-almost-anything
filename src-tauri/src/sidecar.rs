@@ -149,6 +149,14 @@ pub fn command_path_if_found(name: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// Fast lookup for UI availability checks. Unlike `command_path`, this never
+/// shells out per missing binary; the login-shell PATH is already cached in
+/// `expanded_path`.
+pub fn command_path_if_found_fast(name: &str) -> Option<PathBuf> {
+    let path = expanded_path();
+    find_executable_in_path(name, &path)
+}
+
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|p| p == &path) {
         paths.push(path);
@@ -389,7 +397,7 @@ impl Sidecar {
             .arg(script)
             // Pin the working directory to an app-owned folder. Launched from
             // Finder the app inherits cwd "/", which the spawned agent CLIs
-            // (claude/codex) also inherit; exploring the filesystem from root
+            // also inherit; exploring the filesystem from root
             // makes them touch macOS-protected ~/Desktop etc. and trip a TCC
             // prompt. A neutral app dir keeps them out of the user's files.
             .current_dir(cwd)
@@ -406,11 +414,16 @@ impl Sidecar {
             .env("PATH", &expanded_path)
             .env_remove("ANTHROPIC_API_KEY");
 
-        if let Some(path) = command_path_if_found("claude") {
-            command.env("LEARN_ANYTHING_CLAUDE_CLI", path);
-        }
-        if let Some(path) = command_path_if_found("codex") {
-            command.env("LEARN_ANYTHING_CODEX_CLI", path);
+        // Expose every installed agent CLI to the sidecar by absolute path so
+        // it never has to guess at PATH resolution (same directory the app
+        // itself resolves binaries from).
+        for agent in crate::agents::AGENTS {
+            if let Some(path) = crate::agents::cli_path(agent) {
+                command.env(
+                    format!("LEARN_ANYTHING_{}_CLI", agent.id.to_uppercase()),
+                    path,
+                );
+            }
         }
 
         let mut child = command.spawn()?;

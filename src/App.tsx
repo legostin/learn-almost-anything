@@ -52,7 +52,18 @@ import appLoader from "./assets/app-loader.gif";
 import appMark from "./assets/app-mark.png";
 import "./App.css";
 
-type Agent = "claude" | "codex";
+const AGENT_IDS = ["claude", "codex", "opencode", "commandcode"] as const;
+type Agent = (typeof AGENT_IDS)[number];
+const AGENT_LABELS: Record<Agent, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  opencode: "OpenCode",
+  commandcode: "Command Code",
+};
+const isAgent = (value: unknown): value is Agent =>
+  typeof value === "string" && (AGENT_IDS as readonly string[]).includes(value);
+const firstAvailableAgent = (avail: AgentAvailability | null | undefined): Agent =>
+  AGENT_IDS.find((id) => avail?.[id]) ?? "claude";
 type CourseFormat =
   | "academic_course"
   | "mini_module"
@@ -649,10 +660,10 @@ type BackendModels = {
   utility: StageModel;
   verify: StageModel;
 };
-type ModelConfig = { claude: BackendModels; codex: BackendModels };
-type ModelBackend = "claude" | "codex";
+type ModelConfig = Record<Agent, BackendModels>;
+type ModelBackend = Agent;
 type ModelCategory = "planning" | "writing" | "tests" | "assistant" | "utility" | "verify";
-type AgentAvailability = { claude: boolean; codex: boolean };
+type AgentAvailability = Record<Agent, boolean>;
 type ModelInfoLite = {
   value: string;
   label: string;
@@ -687,6 +698,8 @@ type SettingsStatus = {
   image_provider?: string;
   claude_enabled?: boolean;
   codex_enabled?: boolean;
+  opencode_enabled?: boolean;
+  commandcode_enabled?: boolean;
 };
 type Tagline = { ru: string; en: string };
 
@@ -1490,7 +1503,7 @@ function App() {
             topic,
             title: payload.title?.trim() || topic,
             reason: payload.reason?.trim(),
-            agent: payload.agent === "claude" ? "claude" : "codex",
+            agent: isAgent(payload.agent) ? payload.agent : "claude",
             language: normalizeCourseLanguage(payload.language) || initialCourseLanguage(),
           },
         });
@@ -1583,8 +1596,9 @@ function App() {
   async function startCourseSuggestion() {
     randomizeHomeTitleFont();
     if (courseSuggestion.status === "running" || courseSuggestionRunningRef.current) return;
-    const backend =
-      agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : null;
+    const backend = agentAvail
+      ? AGENT_IDS.find((id) => agentAvail[id]) ?? null
+      : null;
     const language = initialCourseLanguage();
     courseSuggestionRequestedRef.current = true;
     courseSuggestionRunningRef.current = true;
@@ -1602,13 +1616,7 @@ function App() {
     if (courseSuggestion.status !== "ready") return;
     const idea = courseSuggestion.idea;
     const agent =
-      agentAvail?.[idea.agent] !== false
-        ? idea.agent
-        : agentAvail?.claude
-          ? "claude"
-          : agentAvail?.codex
-            ? "codex"
-            : idea.agent;
+      agentAvail?.[idea.agent] !== false ? idea.agent : firstAvailableAgent(agentAvail);
     try {
       const id = await invoke<string>("create_course", {
         topic: idea.topic,
@@ -2478,7 +2486,7 @@ function CapabilityBanners({
   geminiConfigured,
   onOpenSettings,
 }: {
-  agentAvail: { claude: boolean; codex: boolean } | null;
+  agentAvail: AgentAvailability | null;
   runtimeError: string | null;
   braveConfigured: boolean | null;
   geminiConfigured: boolean | null;
@@ -2501,7 +2509,7 @@ function CapabilityBanners({
   }
   if (!agentAvail) return null; // still loading
   // A real blocker — no agent CLI at all — stays a hard alert.
-  const noAgents = !agentAvail.claude && !agentAvail.codex;
+  const noAgents = !AGENT_IDS.some((id) => agentAvail[id]);
   if (noAgents) {
     return (
       <div className="banner banner-error" role="alert">
@@ -3377,7 +3385,7 @@ function HomeSystemStatus({
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
-  const hasAgent = Boolean(agentAvail?.claude || agentAvail?.codex);
+  const hasAgent = Boolean(agentAvail && AGENT_IDS.some((id) => agentAvail[id]));
   const coreReady = Boolean(hasAgent && braveConfigured === true && modelSettings);
 
   return (
@@ -3392,8 +3400,9 @@ function HomeSystemStatus({
         <span className="home-system-compact">
           <b>{coreReady ? t("homeSetupReady") : t("homeSetupNeedsAttention")}</b>
           <span>
-            Claude {agentStatusText(agentAvail?.claude, t)} · Codex{" "}
-            {agentStatusText(agentAvail?.codex, t)}
+            {AGENT_IDS.map(
+              (id) => `${AGENT_LABELS[id]} ${agentStatusText(agentAvail?.[id], t)}`
+            ).join(" · ")}
           </span>
           <span>
             {t("homeSearchService")} {configStatusText(braveConfigured, t)} ·{" "}
@@ -3408,13 +3417,13 @@ function HomeSystemStatus({
       {expanded && (
         <div className="home-system-details">
           <div className="home-model-table" aria-label={t("homeSystemTitle")}>
-            {(["claude", "codex"] as const).map((backend) => (
+            {AGENT_IDS.map((backend) => (
               <div
                 className={`home-model-row ${agentAvail?.[backend] === false ? "disabled" : ""}`}
                 key={backend}
               >
                 <div className="home-model-backend">
-                  <span>{backend === "claude" ? "Claude" : "Codex"}</span>
+                  <span>{AGENT_LABELS[backend]}</span>
                   <span className={`home-status-dot ${agentAvail?.[backend] ? "ok" : "warn"}`} />
                 </div>
                 <div className="home-model-cells">
@@ -4087,8 +4096,12 @@ function SettingsModal({
   const [imageGeneration, setImageGeneration] = useState(true);
   const [savingImageGen, setSavingImageGen] = useState(false);
   const [imageProvider, setImageProvider] = useState("auto");
-  const [claudeEnabled, setClaudeEnabled] = useState(true);
-  const [codexEnabled, setCodexEnabled] = useState(true);
+  const [agentEnabled, setAgentEnabled] = useState<Record<Agent, boolean>>({
+    claude: true,
+    codex: true,
+    opencode: true,
+    commandcode: true,
+  });
   const [savingAgents, setSavingAgents] = useState(false);
   const [braveKey, setBraveKey] = useState("");
   const [braveConfigured, setBraveConfigured] = useState(false);
@@ -4125,6 +4138,8 @@ function SettingsModal({
   const [modelList, setModelList] = useState<Record<ModelBackend, ModelInfoLite[] | null>>({
     claude: null,
     codex: null,
+    opencode: null,
+    commandcode: null,
   });
 
   useEffect(() => {
@@ -4148,10 +4163,14 @@ function SettingsModal({
     if (s.gemini_image_model) setGeminiImageModel(s.gemini_image_model);
     if (s.gemini_tts_model) setGeminiTtsModel(s.gemini_tts_model);
     setDebugLogging(Boolean(s.debug_logging));
+    setAgentEnabled({
+      claude: s.claude_enabled !== false,
+      codex: s.codex_enabled !== false,
+      opencode: s.opencode_enabled !== false,
+      commandcode: s.commandcode_enabled !== false,
+    });
     setImageGeneration(s.image_generation !== false);
     setImageProvider(s.image_provider || "auto");
-    setClaudeEnabled(s.claude_enabled !== false);
-    setCodexEnabled(s.codex_enabled !== false);
   }
 
   async function saveAgentEnabled(agent: Agent, enabled: boolean) {
@@ -4702,26 +4721,19 @@ function SettingsModal({
 
         <div className="setting-group">
           <div className="setting-label">{t("agentsTitle")}</div>
-          <label className="setting-toggle">
-            <input
-              type="checkbox"
-              checked={claudeEnabled}
-              disabled={savingAgents}
-              onChange={(e) => saveAgentEnabled("claude", e.target.checked)}
-            />
-            <span className="setting-label">Claude</span>
-          </label>
-          <label className="setting-toggle">
-            <input
-              type="checkbox"
-              checked={codexEnabled}
-              disabled={savingAgents}
-              onChange={(e) => saveAgentEnabled("codex", e.target.checked)}
-            />
-            <span className="setting-label">Codex</span>
-          </label>
+          {AGENT_IDS.map((id) => (
+            <label className="setting-toggle" key={id}>
+              <input
+                type="checkbox"
+                checked={agentEnabled[id]}
+                disabled={savingAgents}
+                onChange={(e) => saveAgentEnabled(id, e.target.checked)}
+              />
+              <span className="setting-label">{AGENT_LABELS[id]}</span>
+            </label>
+          ))}
           <div className="setting-note">{t("agentsNote")}</div>
-          {!claudeEnabled && !codexEnabled && (
+          {!AGENT_IDS.some((id) => agentEnabled[id]) && (
             <div className="setting-note warn-note">⚠ {t("agentsAllOffWarn")}</div>
           )}
         </div>
@@ -4730,13 +4742,13 @@ function SettingsModal({
           <div className="setting-group">
             <div className="setting-label">{t("modelsTitle")}</div>
             <div className="lang-picker">
-              {(["claude", "codex"] as const).map((b) => (
+              {AGENT_IDS.map((b) => (
                 <button
                   key={b}
                   className={`lang-option ${modelBackend === b ? "active" : ""}`}
                   onClick={() => setModelBackend(b)}
                 >
-                  {b === "claude" ? "Claude" : "Codex"}
+                  {AGENT_LABELS[b]}
                 </button>
               ))}
             </div>
@@ -6887,7 +6899,7 @@ function CreateCourse({
   onCreatedRoadmap,
   onCancel,
 }: {
-  agentAvail: { claude: boolean; codex: boolean } | null;
+  agentAvail: AgentAvailability | null;
   spaceId?: string;
   roadmapId?: string;
   roadmapSkill?: string;
@@ -6939,7 +6951,7 @@ function CreateCourse({
     const sp = spaces.find((s) => s.id === selectedSpace);
     if (sp) setStrict(sp.strict);
   }, [selectedSpace, spaces]);
-  const initialAgent: Agent = agentAvail?.claude ? "claude" : agentAvail?.codex ? "codex" : "claude";
+  const initialAgent: Agent = firstAvailableAgent(agentAvail);
   const [topic, setTopic] = useState(initialTopic ?? "");
   // "roadmap" is a creation choice, not a course format: it spawns a Roadmap
   // entity instead of a course. Not offered when creating from a roadmap skill.
@@ -7016,8 +7028,7 @@ function CreateCourse({
   // unavailable, swap to whichever is available.
   useEffect(() => {
     if (!agentAvail) return;
-    if (agent === "claude" && !agentAvail.claude && agentAvail.codex) setAgent("codex");
-    else if (agent === "codex" && !agentAvail.codex && agentAvail.claude) setAgent("claude");
+    if (!agentAvail[agent]) setAgent(firstAvailableAgent(agentAvail));
   }, [agentAvail, agent]);
 
   // Doc-lesson mode: pre-fill the instructions (topic field) from any stored
@@ -7035,15 +7046,8 @@ function CreateCourse({
     };
   }, [docLesson]);
 
-  const claudeOk = agentAvail?.claude !== false;
-  const codexOk = agentAvail?.codex !== false;
-  const selectedAvail =
-    agentAvail === null
-      ? true
-      : agent === "claude"
-        ? agentAvail.claude
-        : agentAvail.codex;
-  const noAgents = agentAvail !== null && !claudeOk && !codexOk;
+  const selectedAvail = agentAvail === null ? true : agentAvail[agent];
+  const noAgents = agentAvail !== null && !AGENT_IDS.some((id) => agentAvail[id]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -7377,28 +7381,17 @@ function CreateCourse({
           value={agent}
           onChange={(v) => setAgent(v as Agent)}
           options={[
-            {
-              value: "claude",
+            ...AGENT_IDS.map((id) => ({
+              value: id,
               title: (
                 <>
-                  Claude
-                  <AgentAvailBadge available={claudeOk} />
+                  {AGENT_LABELS[id]}
+                  <AgentAvailBadge available={agentAvail?.[id] !== false} />
                 </>
               ),
-              desc: t("claudeDesc"),
-              disabled: !claudeOk,
-            },
-            {
-              value: "codex",
-              title: (
-                <>
-                  Codex
-                  <AgentAvailBadge available={codexOk} />
-                </>
-              ),
-              desc: t("codexDesc"),
-              disabled: !codexOk,
-            },
+              desc: t(`${id}Desc` as const),
+              disabled: agentAvail?.[id] === false,
+            })),
           ]}
         />
       </label>
@@ -7935,8 +7928,11 @@ function CourseView({
               await onChanged();
             }}
           >
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
+            {AGENT_IDS.map((id) => (
+              <option value={id} key={id}>
+                {AGENT_LABELS[id]}
+              </option>
+            ))}
           </select>
           <div className="translate-wrap" ref={moreRef}>
             <button
@@ -8629,8 +8625,11 @@ function LessonMetaActions({
           await onChanged();
         }}
       >
-        <option value="claude">claude</option>
-        <option value="codex">codex</option>
+        {AGENT_IDS.map((id) => (
+          <option value={id} key={id}>
+            {AGENT_LABELS[id]}
+          </option>
+        ))}
       </select>
       <div className="translate-wrap" ref={moreRef}>
         <button
@@ -9348,7 +9347,7 @@ function StructureBuilder({
   const t = useT();
   const running = job?.status === "running";
   const errored = job?.status === "error";
-  const other = course.agent === "claude" ? "codex" : "claude";
+  const other = AGENT_IDS.find((id) => id !== course.agent) ?? "claude";
   // Offer the diagnostic once: skip if already taken (profile.diagnostic) or
   // dismissed this session.
   const [diagState, setDiagState] = useState<"unknown" | "offer" | "done">("unknown");
