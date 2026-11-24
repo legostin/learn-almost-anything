@@ -20,15 +20,17 @@
 
   /* text */
   --text: #1c1917;
-  --text-muted: #78716c;
-  --text-subtle: #a8a29e;
+  --text-muted: #5f5954;
+  --text-subtle: #716a65;
 
   /* accents — quiet slate for commands, warm ochre for activity */
   --primary: #3f5065;
   --primary-hover: #2f3d50;
   --primary-soft: #eef1f4;
   --primary-soft-strong: #dbe2e9;
-  --accent: #9b5f32;
+  --accent: #8a5229;
+  /* text on a solid primary/accent/danger/status fill */
+  --on-fill: #ffffff;
   --accent-soft: #f4eadf;
 
   /* status */
@@ -45,6 +47,10 @@
   --radius-sm: 6px;
   --radius: 8px;
   --radius-lg: 8px;
+
+  /* Native controls (buttons, inputs, selects) follow the theme; without
+     this they keep black UA text on our dark surfaces. */
+  color-scheme: light dark;
 
   font-family: var(--font-sans);
   font-size: 14px;
@@ -488,10 +494,10 @@ button {
 .home-dashboard {
   --home-ink: #141414;
   --home-muted: #6f6b66;
-  --home-faint: #a8a29e;
+  --home-faint: #716a65;
   --home-rule: #d7d3ce;
   --home-rule-strong: #1f1f1f;
-  --home-accent: #9b5f32;
+  --home-accent: #8a5229;
   --home-accent-soft: #f4eadf;
   display: flex;
   flex-direction: column;
@@ -1564,7 +1570,7 @@ button {
 .create-course button[type="submit"],
 .wizard button:not([type="button"]):not(.ghost) {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-color: var(--primary);
   box-shadow: none;
 }
@@ -1734,7 +1740,7 @@ button {
 .catalog-card-actions button {
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   cursor: pointer;
 }
 .catalog-card-actions button:disabled {
@@ -2010,11 +2016,11 @@ button {
 }
 .agent-pill.agent-claude {
   background: transparent;
-  color: #9b5f32;
+  color: var(--accent);
 }
 .agent-pill.agent-codex {
   background: transparent;
-  color: #2f6b56;
+  color: var(--status-ready-fg);
 }
 .agent-pill.agent-opencode {
   background: transparent;
@@ -2300,7 +2306,7 @@ button {
   cursor: pointer;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   transition: background 120ms ease;
   font-family: inherit;
 }
@@ -2447,7 +2453,7 @@ button {
 }
 .sub-action.gen {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-color: var(--primary);
 }
 .sub-action.gen:hover {
@@ -2470,7 +2476,7 @@ button {
 }
 .sub-action.retry:hover {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-fill);
 }
 .sub-action.busy {
   background: transparent;
@@ -2600,7 +2606,7 @@ button {
 .sub-empty button {
   padding: 9px 18px;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border: 1px solid var(--primary);
   border-radius: 4px;
   cursor: pointer;
@@ -2717,7 +2723,7 @@ button {
 .stage.done .stage-dot {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-fill);
 }
 .stage.active .stage-dot {
   background: var(--surface);
@@ -3483,7 +3489,7 @@ button {
   justify-content: center;
   border-radius: 50%;
   background: var(--status-ready-fg);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 11px;
   font-weight: 700;
 }
@@ -3600,7 +3606,7 @@ button {
   margin-left: 6px;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 11px;
   font-weight: 700;
 }
@@ -4107,7 +4113,7 @@ button {
   padding: 1px 8px;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 11px;
   font-weight: 700;
 }
@@ -4953,7 +4959,7 @@ button {
   padding: 9px 18px;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-radius: 4px;
   cursor: pointer;
   font-family: inherit;
@@ -5129,11 +5135,11 @@ button {
 }
 .state-icon.ready {
   background: var(--status-ready-fg);
-  color: #fff;
+  color: var(--on-fill);
 }
 .state-icon.failed {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-fill);
 }
 .submodule.state-ready .submodule-title {
   color: var(--text);
@@ -5208,7 +5214,7 @@ button {
 }
 .msg-user .bubble {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
 }
 .msg-agent .bubble {
   background: var(--surface-2);
@@ -5267,7 +5273,7 @@ button {
   cursor: pointer;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   transition: background 120ms ease;
 }
 .proposal-actions button:hover:not(:disabled) {
@@ -5327,7 +5333,7 @@ button {
   cursor: pointer;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   transition: background 120ms ease;
 }
 .refine-input button:hover:not(:disabled) {
@@ -5547,7 +5553,7 @@ button {
   font-weight: 500;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-radius: 4px;
   cursor: pointer;
   transition: background 120ms ease;
@@ -5602,7 +5608,7 @@ button {
   font-weight: 500;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-radius: 4px;
   cursor: pointer;
 }
@@ -6346,7 +6352,7 @@ button {
   border: 0;
   border-radius: 50%;
   background: var(--primary, #3f5065);
-  color: #fff;
+  color: var(--on-fill);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -6444,7 +6450,7 @@ button {
   margin: 0 4px;
   border-radius: 50%;
   background: var(--primary, #3f5065);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 15px;
 }
 .audio-ctrl-primary:hover {
@@ -6603,7 +6609,7 @@ button {
   width: 96px;
   height: 96px;
   background: var(--primary, #3f5065);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 36px;
   box-shadow: 0 12px 28px -8px color-mix(in srgb, var(--primary, #3f5065) 42%, transparent);
 }
@@ -6681,7 +6687,7 @@ button {
 .sub-regenerate.danger {
   background: var(--accent, #9b5f32);
   border-color: var(--accent, #9b5f32);
-  color: #fff;
+  color: var(--on-fill);
 }
 .sub-regenerate.danger:hover {
   filter: brightness(1.08);
@@ -6727,7 +6733,7 @@ button {
   border: none;
   border-radius: var(--radius);
   background: var(--accent, #9b5f32);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
@@ -6935,7 +6941,7 @@ button.domain-chip {
 
     --text: #fafaf9;
     --text-muted: #a8a29e;
-    --text-subtle: #78716c;
+    --text-subtle: #948d87;
 
     --primary: #8fa0b4;
     --primary-hover: #a3b1c2;
@@ -6943,6 +6949,8 @@ button.domain-chip {
     --primary-soft-strong: rgba(143, 160, 180, 0.24);
     --accent: #d29a5b;
     --accent-soft: rgba(210, 154, 91, 0.16);
+    /* dark-mode fills are light, so text on them must be dark */
+    --on-fill: #0c0a09;
 
     --status-wizard-bg: #292524;
     --status-wizard-fg: #d6d3d1;
@@ -6957,6 +6965,15 @@ button.domain-chip {
   .sidebar {
     background: #161412;
   }
+  .agent-pill.agent-opencode {
+    color: #a8b3e0;
+  }
+  .agent-pill.agent-commandcode {
+    color: #d0a6d3;
+  }
+  .reader-new {
+    background: rgba(230, 184, 0, 0.12);
+  }
   .course-list li.active {
     background: var(--surface);
   }
@@ -6966,7 +6983,7 @@ button.domain-chip {
   .home-dashboard {
     --home-ink: #f5f5f4;
     --home-muted: #b8b2ab;
-    --home-faint: #78716c;
+    --home-faint: #948d87;
     --home-rule: #44403c;
     --home-rule-strong: #f5f5f4;
     --home-accent: #d29a5b;
@@ -7580,7 +7597,7 @@ button.domain-chip {
   padding: 9px 16px;
   border: 1px solid var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 14px;
@@ -7854,7 +7871,7 @@ button.domain-chip {
   border: 1px solid var(--accent);
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -8025,7 +8042,7 @@ button.domain-chip {
   border: 1px solid var(--accent);
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -8718,7 +8735,7 @@ button.domain-chip {
   border: 1px solid currentColor;
   border-radius: var(--radius);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   font-family: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -8837,7 +8854,7 @@ button.domain-chip {
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 14px;
   cursor: pointer;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
@@ -9050,7 +9067,7 @@ button.domain-chip {
   border: none;
   border-radius: 50%;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
@@ -9079,7 +9096,7 @@ button.domain-chip {
   border-radius: 999px;
   border: none;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
@@ -9318,7 +9335,7 @@ button.domain-chip {
 }
 .le-save {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   border: none;
   border-radius: var(--radius-sm);
   padding: 6px 14px;
@@ -9540,7 +9557,7 @@ button.domain-chip {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   cursor: pointer;
 }
 .le-ai-actions button.ghost {
